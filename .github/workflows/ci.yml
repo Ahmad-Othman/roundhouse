@@ -22,7 +22,7 @@ env:
   # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
-  CAMPFIRE_SHA: 8fa6138fb9263d71b6ad5e8aeeaeb1883f67c652
+  CAMPFIRE_SHA: 90b330024dec3e757c79b6a7e6568f93da8e3148
 
 jobs:
   # -------------------------------------------------------------------
@@ -1270,6 +1270,13 @@ jobs:
       # so what moved is the Rails oracle. The third of four steps.
       # Measured 406 of 406, 69 of 69 files, on both lanes (spinel
       # 3bc554dc), campfire-compare green on both.
+      #
+      # `90b33002` (2026-09-26) is upstream main: composer drafts (#283)
+      # and mention-menu spacing (#284) — the composer's JS and CSS, a
+      # `data-action` string, `bin/release`, a system test. The last of
+      # the four steps. Measured 406 of 406, 69 of 69 files, on both lanes
+      # (spinel 3bc554dc); campfire-compare green on both; the four
+      # browser specs green through the Lexxy composer.
       #
       # 300 of 300 -> 342 of 397 (2026-09-20), the SAME campfire: the
       # ingest had only ever read `test/models` and `test/controllers`,
