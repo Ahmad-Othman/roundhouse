@@ -35,6 +35,14 @@ pub(super) fn collect_extra_params(body: &Expr, arg_name: &str) -> Vec<String> {
     if super::view_uses_bare_name(body, "controller_name") {
         out.push("controller_name".to_string());
     }
+    // The request's path parameters, for a view whose `url_for` options
+    // hash (`{controller:, action:, page:}`) may resolve to a route with
+    // a segment the hash leaves out: Rails recalls it from the current
+    // request (see `lower_url_option_helpers`). Same rule as the two
+    // above — collected only when used, at a fixed position.
+    if super::view_uses_url_options_hash(body) {
+        out.push("path_parameters".to_string());
+    }
     let mut bound: Vec<String> = Vec::new();
     if !arg_name.is_empty() {
         bound.push(arg_name.to_string());

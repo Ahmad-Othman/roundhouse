@@ -34,6 +34,8 @@ module ActionController
     def request_path=: (String) -> String
     def request_format: () -> Symbol
     def request_format=: (Symbol) -> Symbol
+    def path_parameters: () -> Hash[String, String]
+    def path_parameters=: (Hash[String, String]) -> Hash[String, String]
 
     # `attr_reader` — getter only. Setters are internal (assigned via
     # `@status =`, `@body =`, `@location =` from render/redirect_to/head).

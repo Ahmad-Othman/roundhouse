@@ -1425,6 +1425,7 @@ module RequestDispatch
       end
     end
     controller.params  = merged
+    controller.path_parameters = matched.path_params
     controller.session = @__session ||= ActionDispatch::Session.new
     controller.flash   = @__flash   ||= ActionDispatch::Flash.new
     # The inbound jar is the browser's whole state — what the test has

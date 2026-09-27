@@ -612,6 +612,7 @@ pub(super) fn rewrite_render_to_views(
             // get no extra args — no arity mismatch).
             let pass_action_name = contract.map(|c| c.uses_action_name).unwrap_or(false);
             let pass_controller_name = contract.map(|c| c.uses_controller_name).unwrap_or(false);
+            let pass_path_parameters = contract.map(|c| c.uses_path_parameters).unwrap_or(false);
             // Peek at the trailing kwarg-Hash for a `format: :json`
             // marker that the respond_to flattener planted. If
             // present, route to `<sym>_json` view and tag the outer
@@ -683,6 +684,9 @@ pub(super) fn rewrite_render_to_views(
                 }
                 if pass_controller_name {
                     view_args.push(str_lit(e.span, &controller_name));
+                }
+                if pass_path_parameters {
+                    view_args.push(ivar("path_parameters", e.span));
                 }
             }
             // Digit-leading stems (`about/404`) carry a `_` prefix on the

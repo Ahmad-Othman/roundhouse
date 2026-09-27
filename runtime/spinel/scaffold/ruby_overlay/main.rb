@@ -141,6 +141,7 @@ module Main
     merged = matched.path_params.dup
     request[:params].each { |k, v| merged[k] = v }
     controller.params  = merged
+    controller.path_parameters = matched.path_params
 
     # Decode inbound flash from cookies. Each flash key carries via
     # its own cookie (`flash_notice`, `flash_alert`) so the cookie

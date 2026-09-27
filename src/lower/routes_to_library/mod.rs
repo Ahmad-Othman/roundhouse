@@ -343,6 +343,19 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     funcs
 }
 
+/// `a && b`, for the resolver's arm conditions.
+fn and(a: Expr, b: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::And,
+            surface: crate::expr::BoolOpSurface::Symbol,
+            left: a,
+            right: b,
+        },
+    )
+}
+
 /// The generated resolver for a hash-form `url_for`. `extras` are the
 /// option keys beside `controller:`/`action:`, sorted — one function per
 /// distinct set, so each keeps TYPED params instead of taking a
@@ -442,18 +455,28 @@ fn build_url_options_function(
             ],
         },
     );
-    // Candidate routes: a GET whose dynamic segments are exactly the
-    // extras. `/newest/:user/page/:page` is not a candidate for the
-    // `page`-only set — its `:user` has no value to fill.
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut arms: Vec<(String, Expr)> = Vec::new();
+    // Candidates, per `"controller#action"`, in the order Rails' own
+    // generation answers them (checked against actionpack 8.1 for
+    // lobsters' `get "/top(/:length(/page/:page))"`):
+    //
+    //   1. EXACT — a GET whose dynamic segments are exactly the extras.
+    //      `/newest/page/:page` for `{…, page:}`.
+    //   2. RECALL — one with more segments, when the request's own path
+    //      parameters supply each one the hash leaves out, most segments
+    //      first. Rails fills them from the current request: on
+    //      `/top/1y`, `{controller:, action:, page: 2}` is
+    //      `/top/1y/page/2`.
+    //   3. DROP — the most specific one whose segments are a subset of
+    //      the extras, when every extra it leaves out is a segment of
+    //      that action's routes: an optional segment Rails cannot place
+    //      is dropped, not moved to the query. On `/top?length=1y` there
+    //      is no `:length` to recall and Rails answers `/top`.
+    //
+    // `/newest/:user/page/:page` is never a candidate for another
+    // action's link: every arm is keyed on the controller#action.
+    let mut groups: Vec<(String, Vec<&FlatRoute>)> = Vec::new();
     for route in flat {
         if route.method != HttpMethod::Get {
-            continue;
-        }
-        let mut params = route.path_params.clone();
-        params.sort();
-        if params != extras {
             continue;
         }
         let key = format!(
@@ -461,10 +484,96 @@ fn build_url_options_function(
             controller_symbol(route.controller.0.as_str()),
             route.action.as_str()
         );
-        if !seen.insert(key.clone()) {
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, rs)) => rs.push(route),
+            None => groups.push((key, vec![route])),
+        }
+    }
+    let sorted = |r: &FlatRoute| {
+        let mut p = r.path_params.clone();
+        p.sort();
+        p
+    };
+    let recall_ref = || var_ref("recall");
+    let mut arms: Vec<(String, Option<Expr>, Expr)> = Vec::new();
+    for (key, routes) in &groups {
+        if let Some(r) = routes.iter().find(|r| sorted(r) == extras) {
+            arms.push((key.clone(), None, build_path_expr(&r.path, &r.path_params, &no_slugs)));
             continue;
         }
-        arms.push((key, build_path_expr(&route.path, &route.path_params, &no_slugs)));
+        let mut supers: Vec<&&FlatRoute> = routes
+            .iter()
+            .filter(|r| {
+                let p = sorted(r);
+                p.len() > extras.len() && extras.iter().all(|x| p.contains(x))
+            })
+            .collect();
+        supers.sort_by_key(|r| std::cmp::Reverse(r.path_params.len()));
+        let mut seen_paths: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for r in supers {
+            if !seen_paths.insert(r.path.as_str()) {
+                continue;
+            }
+            let missing: Vec<&String> =
+                r.path_params.iter().filter(|p| !extras.contains(p)).collect();
+            let mut cond: Option<Expr> = None;
+            let mut binds: Vec<Expr> = Vec::new();
+            for m in &missing {
+                let has = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(recall_ref()),
+                        method: Symbol::from("key?"),
+                        args: vec![lit_str(m.to_string())],
+                        block: None,
+                        parenthesized: true,
+                    },
+                );
+                cond = Some(match cond {
+                    None => has,
+                    Some(c) => and(c, has),
+                });
+                binds.push(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Assign {
+                        target: crate::expr::LValue::Var {
+                            id: VarId(0),
+                            name: Symbol::from(m.as_str()),
+                        },
+                        value: Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Send {
+                                recv: Some(recall_ref()),
+                                method: Symbol::from("fetch"),
+                                args: vec![lit_str(m.to_string()), lit_str(String::new())],
+                                block: None,
+                                parenthesized: true,
+                            },
+                        ),
+                    },
+                ));
+            }
+            binds.push(build_path_expr(&r.path, &r.path_params, &no_slugs));
+            arms.push((
+                key.clone(),
+                cond,
+                Expr::new(Span::synthetic(), ExprNode::Seq { exprs: binds }),
+            ));
+        }
+        let family: std::collections::HashSet<&String> =
+            routes.iter().flat_map(|r| r.path_params.iter()).collect();
+        let drop = routes
+            .iter()
+            .filter(|r| {
+                let p = sorted(r);
+                p.len() < extras.len()
+                    && p.iter().all(|x| extras.contains(x))
+                    && extras.iter().all(|x| p.contains(x) || family.contains(x))
+            })
+            .max_by_key(|r| r.path_params.len());
+        if let Some(r) = drop {
+            arms.push((key.clone(), None, build_path_expr(&r.path, &r.path_params, &no_slugs)));
+        }
     }
     // Innermost else. `raise` reads as a Send on every target that
     // emits this module.
@@ -488,20 +597,24 @@ fn build_url_options_function(
     );
     // Fold the arms into a nested if/else, last arm outermost-last.
     let mut body = unroutable;
-    for (key, path) in arms.into_iter().rev() {
+    for (key, extra_cond, path) in arms.into_iter().rev() {
+        let is_key = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(key_expr.clone()),
+                method: Symbol::from("=="),
+                args: vec![lit_str(key)],
+                block: None,
+                parenthesized: false,
+            },
+        );
         body = Expr::new(
             Span::synthetic(),
             ExprNode::If {
-                cond: Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Send {
-                        recv: Some(key_expr.clone()),
-                        method: Symbol::from("=="),
-                        args: vec![lit_str(key)],
-                        block: None,
-                        parenthesized: false,
-                    },
-                ),
+                cond: match extra_cond {
+                    None => is_key,
+                    Some(c) => and(is_key, c),
+                },
                 then_branch: path,
                 else_branch: body,
             },
@@ -511,18 +624,22 @@ fn build_url_options_function(
         .chain(std::iter::once("action".to_string()))
         .chain(extras.iter().cloned())
         .collect();
+    // The request's path parameters, last: what the RECALL arms read.
+    let recall_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) };
     LibraryFunction {
         module_path: module_path.to_vec(),
         name: Symbol::from(url_options_helper_name(extras)),
         params: names
             .iter()
             .map(|n| Param::positional(Symbol::from(n.clone())))
+            .chain(std::iter::once(Param::positional(Symbol::from("recall"))))
             .collect(),
         body,
         signature: Some(fn_sig(
             names
                 .iter()
                 .map(|n| (Symbol::from(n.clone()), Ty::Str))
+                .chain(std::iter::once((Symbol::from("recall"), recall_ty)))
                 .collect(),
             Ty::Str,
         )),

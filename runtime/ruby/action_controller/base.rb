@@ -96,6 +96,11 @@ module ActionController
   # a feature none of them exercise yet.
   class Base
     attr_accessor :params, :session, :flash, :request_method, :request_path, :request_format
+    # Rails' `request.path_parameters`: the matched route's own segments
+    # (`{"length" => "1y"}` on `/top/1y`), not the query string. The
+    # dispatcher assigns it; a `url_for` options hash reads it to fill a
+    # segment the hash leaves out, as Rails recalls it.
+    attr_accessor :path_parameters
     attr_reader   :status, :body, :location, :content_type
     # Cache-Control, split into two TYPED readers rather than Rails'
     # one mixed Hash. Rails' `response.cache_control` is
@@ -109,6 +114,7 @@ module ActionController
 
     def initialize
       @params  = {}
+      @path_parameters = {}
       @session = ActionDispatch::Session.new
       @flash   = ActionDispatch::Flash.new
       @status  = 200

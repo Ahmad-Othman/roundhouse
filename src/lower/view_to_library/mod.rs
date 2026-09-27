@@ -1755,6 +1755,9 @@ pub(crate) struct ViewArgs {
     pub ivars: Vec<Symbol>,
     pub uses_action_name: bool,
     pub uses_controller_name: bool,
+    /// The view's `url_for` options hash needs the request's path
+    /// parameters (see `extra_params::collect_extra_params`).
+    pub uses_path_parameters: bool,
 }
 
 /// Map `(view-module, action-stem) -> ViewArgs` for the controller's
@@ -2423,6 +2426,7 @@ pub(crate) fn action_view_ivar_map(
                 ivars,
                 uses_action_name: view_uses_bare_name(&v.body, "action_name"),
                 uses_controller_name: view_uses_bare_name(&v.body, "controller_name"),
+                uses_path_parameters: view_uses_url_options_hash(&v.body),
             },
         );
     }
@@ -2433,6 +2437,37 @@ pub(crate) fn action_view_ivar_map(
 /// no-recv/no-arg Send (`action_name`) or a Var (`action_name` already
 /// lowered to a local). Used to surface controller-context helpers
 /// (action_name/controller_name) as view params only when actually used.
+/// True when the view body holds a `url_for` options hash — a Hash
+/// literal whose keys are all Symbols and include both `controller` and
+/// `action` (`{controller: controller_name, action: action_name, page:
+/// @page + 1}`), the shape `lower_url_option_helpers` resolves.
+pub(crate) fn view_uses_url_options_hash(body: &Expr) -> bool {
+    fn walk(e: &Expr) -> bool {
+        if let ExprNode::Hash { entries, .. } = &*e.node {
+            let keys: Option<Vec<&str>> = entries
+                .iter()
+                .map(|(k, _)| match &*k.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str()),
+                    _ => None,
+                })
+                .collect();
+            if let Some(keys) = keys {
+                if keys.contains(&"controller") && keys.contains(&"action") {
+                    return true;
+                }
+            }
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |c| {
+            if !found && walk(c) {
+                found = true;
+            }
+        });
+        found
+    }
+    walk(body)
+}
+
 pub(crate) fn view_uses_bare_name(body: &Expr, name: &str) -> bool {
     fn walk(e: &Expr, name: &str) -> bool {
         let hit = match &*e.node {

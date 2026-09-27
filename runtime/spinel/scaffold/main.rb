@@ -378,6 +378,7 @@ module Main
     # the form body into flat bracket keys (req.req_params["article[title]"]);
     # re-nest them + merge the route's path captures (id, ...).
     controller.params = Main.nest_params(req.req_params, matched.path_params)
+    controller.path_parameters = matched.path_params
     Main.nest_uploads(controller.params, req.uploads) if req.uploads.length > 0
     # Typed request object + per-request context statics. Helpers are
     # module functions with no controller in scope; the emit rewrites

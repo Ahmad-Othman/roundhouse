@@ -908,10 +908,19 @@ fn emit_url_options_hash(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     let to_s = |e: Expr| send(Some(e), "to_s", Vec::new(), None, false);
     let mut args = vec![to_s(controller), to_s(action)];
     args.extend(extras.into_iter().map(|(_, v)| to_s(v)));
-    let args = args
+    let mut args: Vec<Expr> = args
         .into_iter()
         .map(|a| rewrite_helpers_in_expr(&a, ctx))
         .collect();
+    // The request's path parameters, for the segments the hash leaves
+    // out (Rails' recall). An action view takes them as a param
+    // (`extra_params`); anywhere else they are not in scope, and an
+    // empty Hash recalls nothing.
+    args.push(if ctx.locals.iter().any(|l| l == "path_parameters") {
+        var_ref(Symbol::from("path_parameters"))
+    } else {
+        Expr::new(Span::synthetic(), ExprNode::Hash { entries: Vec::new(), kwargs: false })
+    });
     Some(route_helpers_call(
         &crate::lower::url_options_helper_name(&extra_names),
         args,
