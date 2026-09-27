@@ -22,7 +22,7 @@ env:
   # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
-  CAMPFIRE_SHA: 9a258bd1a099e842d32d4dd2b0408aaa959114d4
+  CAMPFIRE_SHA: 8fa6138fb9263d71b6ad5e8aeeaeb1883f67c652
 
 jobs:
   # -------------------------------------------------------------------
@@ -1262,6 +1262,14 @@ jobs:
       # allowed `style` is DROPPED on spinel (no CSS scrubber; ledgered).
       # Measured 406 of 406, 69 of 69 files, on both lanes (spinel
       # 3bc554dc), campfire-compare green on both, room page included.
+      #
+      # `8fa6138f` (2026-09-26) is two merges past `9a258bd1`: mocha 3.1.0
+      # (#257) and web-push 3.1.0 (#254), which lets openssl go to 4.0.2 —
+      # Gemfile.lock only. The emitted trees pin none of the three (the
+      # ruby lane already resolved current releases; spinel uses none),
+      # so what moved is the Rails oracle. The third of four steps.
+      # Measured 406 of 406, 69 of 69 files, on both lanes (spinel
+      # 3bc554dc), campfire-compare green on both.
       #
       # 300 of 300 -> 342 of 397 (2026-09-20), the SAME campfire: the
       # ingest had only ever read `test/models` and `test/controllers`,
