@@ -25,7 +25,13 @@ use roundhouse::ingest::ingest_app;
 use roundhouse::project::BuildTarget;
 
 fn tree() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("roundhouse-url-options-recall-{}", std::process::id()));
+    // Per CALL, not just per process: the tests in this file run in
+    // parallel, and each clears its directory first — sharing one let a
+    // test ingest a tree the other had just removed.
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir()
+        .join(format!("roundhouse-url-options-recall-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     for (path, body) in [
         ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"notes\", force: :cascade do |t|\n    t.string \"body\"\n  end\nend\n"),
