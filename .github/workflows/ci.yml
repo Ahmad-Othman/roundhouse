@@ -22,7 +22,7 @@ env:
   # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
-  CAMPFIRE_SHA: 91d294f4a09f9bbe37f9548959bfcb43645678fb
+  CAMPFIRE_SHA: f8e36e9761eceb0f22d79910ca9d6fb6d7235dad
 
 jobs:
   # -------------------------------------------------------------------
@@ -1239,6 +1239,15 @@ jobs:
       # (394/395). With it no campfire test extends a single object, and
       # the suite measured 396 of 396, 68 of 68 files, on both lanes
       # (spinel 234125c5, the one skip is campfire's own `skip`).
+      #
+      # `f8e36e97` (2026-09-26) is three merges past `91d294f4`: rubyzip
+      # 3.4.0 (#282), an Actions bump (#281), and `REDIS_URL` (#262) —
+      # an ERB `ENV.fetch` in config/cable.yml and a new
+      # config/initializers/resque.rb, neither of which reaches the emit
+      # (cable.yml is not read; the initializer is not a mixin). The
+      # first of four steps across upstream's Lexxy merge (`9a258bd`),
+      # taken alone so each step's fallout is its own. Measured 396 of
+      # 396, 68 of 68 files, on both lanes (spinel 3bc554dc).
       #
       # 300 of 300 -> 342 of 397 (2026-09-20), the SAME campfire: the
       # ingest had only ever read `test/models` and `test/controllers`,
