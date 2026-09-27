@@ -17,12 +17,14 @@
 # into Ruby-inspect notation, not JSON.
 #
 # CRuby-only by nature (respond_to? dispatch). A site whose value the
-# compiler typed as a class with declared readers never reaches this:
-# lower::as_json_poro writes that class an `as_json_str` writer and
-# respells the site `render plain: v.as_json_str, content_type:
-# "application/json"`, on every target. What is left here — a Hash
-# literal, a Relation, a class with its own `as_json` — surfaces on
-# other targets as an unresolved constant until the writer covers it.
+# compiler typed as a class it could write an `as_json_str` writer for
+# — declared readers, or a model's own `as_json` in a shape
+# lower::as_json_shape reads, or a collection of either — never reaches
+# this: lower::as_json_poro respells it `render plain: <text>,
+# content_type: "application/json"`, on every target. What is left here
+# — a Hash literal, an untyped value, an `as_json` outside those shapes
+# — surfaces on other targets as an unresolved constant until the
+# writer covers it.
 module ActionController
   module JsonRender
     def self.encode(value)

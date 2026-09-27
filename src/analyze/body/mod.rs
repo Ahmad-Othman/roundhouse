@@ -119,6 +119,16 @@ pub struct ClassInfo {
     /// answers its Array, an unclassified one is assumed to still be a
     /// query and re-wraps as the relation.
     pub materializing_scopes: std::collections::HashSet<Symbol>,
+    /// Methods whose every return is the value of the BLOCK they were
+    /// called with — `yield` on each path, or the block handed on to
+    /// another such method (lobsters' `get_from_cache(opts, &)`, which
+    /// answers `yield` uncached and `Rails.cache.fetch(key, &)` cached).
+    /// No signature can say that without method generics, which the RBS
+    /// reader does not model, so dispatch answers the CALL SITE's block
+    /// type for these, the way it already does for `then` and
+    /// `transaction`. Harvested each fixpoint round
+    /// (`Analyzer::harvest_method_returns`).
+    pub block_value_methods: std::collections::HashSet<Symbol>,
     /// Methods callable on an instance: `post.title`, `post.destroy`.
     pub instance_methods: HashMap<Symbol, Ty>,
     /// AccessorKind per method — lets the body-typer flag Method

@@ -787,17 +787,26 @@ impl Analyzer {
     /// whole-program fixpoint loop that (a) harvests inferred return
     /// types from method bodies into the dispatch registry, (b) unifies
     /// parameter types across call sites, and (c) re-runs typing with
-    /// the refined registry. Iterates to a fixed point (cap of 4 like
-    /// Spinel) using a signature fingerprint to detect convergence.
+    /// the refined registry. Iterates to a fixed point (capped; see
+    /// `FIXPOINT_CAP`) using a signature fingerprint to detect convergence.
     pub fn analyze(&mut self, app: &mut App) {
+        const FIXPOINT_CAP: usize = 12;
         self.run_typing_passes(app);
 
         // Whole-program fixpoint: harvest returns + unify params, re-type,
-        // repeat until the registry signature stabilizes. Cap matches
-        // Spinel's empirically-observed "1-2 iterations typically; 4 is a
-        // safety net" — see `~/git/spinel/spinel_codegen.rb:7459-7492`.
+        // repeat until the registry signature stabilizes. Each round
+        // carries a fact one link further, so the cap bounds the longest
+        // CHAIN an app can have typed — not a cost most apps pay, since
+        // the signature check ends the loop as soon as nothing moves.
+        // It was 4, after Spinel's "1-2 iterations typically; 4 is a
+        // safety net" (`~/git/spinel/spinel_codegen.rb:7459-7492`), and
+        // lobsters never converged under it: `render json: @stories`
+        // sits at the end of `.new` args → `initialize` → `@scope` →
+        // `with_pagination_info` → `get` → `paginate` → the
+        // `get_from_cache` block → its return → the destructuring, which
+        // settles on round 9.
         let mut prev_sig = self.inference_signature();
-        for _ in 0..4 {
+        for _ in 0..FIXPOINT_CAP {
             self.harvest_returns_to_registry(app);
             self.unify_params_from_call_sites(app);
             let cur_sig = self.inference_signature();
@@ -3246,7 +3255,11 @@ impl Analyzer {
         for controller in &app.controllers {
             let class_id = &controller.name;
             for action in controller.actions() {
-                let Some(body_ty) = effective_return_ty(&action.body) else { continue };
+                let Some(body_ty) =
+                    tuple_return_ty(&action.body).or_else(|| effective_return_ty(&action.body))
+                else {
+                    continue;
+                };
                 if matches!(body_ty, Ty::Var { .. }) {
                     continue;
                 }
@@ -3256,8 +3269,47 @@ impl Analyzer {
             }
         }
 
+        self.harvest_block_value_methods(app);
         self.fold_concern_surfaces(app);
         self.fold_current_attribute_forwarders(app);
+    }
+
+    /// Rebuild every class's `block_value_methods` from the bodies as
+    /// this round typed them. Derived state, so rebuilt rather than
+    /// accumulated (as `inferred_params` is, for the same reason); a
+    /// method forwarding its block to a sibling that is one becomes one
+    /// a round later, as its callee's verdict lands.
+    fn harvest_block_value_methods(&mut self, app: &App) {
+        let mut found: Vec<(ClassId, Symbol)> = Vec::new();
+        for model in &app.models {
+            for method in model.methods() {
+                let bp = method.block_param.as_ref().map(|p| &p.name);
+                if self.returns_block_value(&model.name, &method.body, bp) {
+                    found.push((model.name.clone(), method.name.clone()));
+                }
+            }
+        }
+        for lc in &app.library_classes {
+            for method in &lc.methods {
+                let bp = method.block_param.as_ref().map(|p| &p.name);
+                if self.returns_block_value(&lc.name, &method.body, bp) {
+                    found.push((lc.name.clone(), method.name.clone()));
+                }
+            }
+        }
+        for controller in &app.controllers {
+            for action in controller.actions() {
+                if self.returns_block_value(&controller.name, &action.body, action.block_param.as_ref()) {
+                    found.push((controller.name.clone(), action.name.clone()));
+                }
+            }
+        }
+        for info in self.classes.values_mut() {
+            info.block_value_methods.clear();
+        }
+        for (class_id, method) in found {
+            self.classes.entry(class_id).or_default().block_value_methods.insert(method);
+        }
     }
 
     /// A `CurrentAttributes` class-level forwarder answers exactly what
@@ -3402,6 +3454,7 @@ impl Analyzer {
     /// target (spinel) returns what the function returns.
     fn method_return_ty(&self, _class_id: &ClassId, method: &crate::dialect::MethodDef) -> Option<Ty> {
         self.class_object_return_ty(&method.body)
+            .or_else(|| tuple_return_ty(&method.body))
             .or_else(|| effective_return_ty(&method.body))
     }
 
@@ -3478,6 +3531,45 @@ impl Analyzer {
             1 => classes.pop().unwrap(),
             _ => Ty::Union { variants: classes },
         })
+    }
+
+    /// True when every value `body` can return is the value of the
+    /// block the method was called with: `yield`, or a call handing
+    /// `block_param` on to a method that itself returns its block's
+    /// value (see `ClassInfo::block_value_methods`). A raising arm
+    /// returns nothing and does not count against it; a `return` off
+    /// the tail must pass the same test, or the walk declines.
+    fn returns_block_value(&self, owner: &ClassId, body: &Expr, block_param: Option<&Symbol>) -> bool {
+        let leaves = return_leaves(body);
+        !leaves.is_empty()
+            && leaves.iter().all(|leaf| match &*leaf.node {
+                ExprNode::Yield { .. } => true,
+                ExprNode::Send { recv, method, block: Some(b), .. } => {
+                    let forwards = matches!(
+                        (&*b.node, block_param),
+                        (ExprNode::Var { name, .. }, Some(bp)) if name == bp
+                    );
+                    // The callee's own verdict, asked through the same
+                    // dispatch rule a call site uses, with a stand-in
+                    // informative block type.
+                    let recv_ty = match recv {
+                        Some(r) => r.ty.clone(),
+                        None => Some(Ty::Class { id: owner.clone(), args: vec![] }),
+                    };
+                    // `Rails.cache` by its spelling too: app analysis
+                    // does not type it (the runtime's RBS is not in the
+                    // app registry), and `fetch` on the framework's
+                    // store answers the block's value, fresh or cached.
+                    let rails_cache = method.as_str() == "fetch"
+                        && recv.as_ref().is_some_and(|r| crate::lower::rails_cache::is_rails_cache(r));
+                    forwards
+                        && (rails_cache
+                            || crate::analyze::body::BodyTyper::new(&self.classes)
+                                .block_value_return(recv_ty.as_ref(), method, Some(&Ty::Nil))
+                                .is_some())
+                }
+                _ => false,
+            })
     }
 
     fn register_method_return(
@@ -3887,6 +3979,27 @@ impl Analyzer {
                         }
                         _ => Vec::new(),
                     };
+                    // `Klass.new(a, b)` hands its arguments to
+                    // `initialize` — that is all `Class#new` does with
+                    // them — so the site is evidence for the
+                    // constructor's params too. Recorded under `new`
+                    // alone, `initialize` was seeded with nothing and
+                    // every `@x = x` it made came out untyped: lobsters'
+                    // `StoriesPaginator.new(scope, …)` passed a typed
+                    // `Relation[Story]` and the paginator's `@scope`
+                    // still answered `Array[untyped]` to every caller.
+                    // Only a CONSTANT receiver: an instance answering
+                    // `new` is some other method entirely.
+                    if method.as_str() == "new"
+                        && recv.as_ref().is_some_and(|r| matches!(&*r.node, ExprNode::Const { .. }))
+                    {
+                        out.push((
+                            class_id.clone(),
+                            Symbol::from("initialize"),
+                            arg_tys.clone(),
+                            kw_tys.clone(),
+                        ));
+                    }
                     out.push((class_id, method.clone(), arg_tys, kw_tys));
                 }
                 if let Some(r) = recv { self.collect_send_sites(r, self_class, helpers, out); }
@@ -5982,4 +6095,85 @@ pub fn register_stdlib_classes(
     classes: &mut std::collections::HashMap<crate::ident::ClassId, ClassInfo>,
 ) {
     registry::stdlib::register(classes);
+}
+
+/// Every expression whose value a method body can return: the tail,
+/// through `if`/`case`/`begin`-`rescue` arms, plus the value of each
+/// `return` anywhere in the body outside a block. A raising arm returns
+/// nothing and contributes no leaf.
+pub(crate) fn return_leaves(body: &Expr) -> Vec<&Expr> {
+    fn tails<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match &*e.node {
+            ExprNode::If { then_branch, else_branch, .. } => {
+                tails(then_branch, out);
+                tails(else_branch, out);
+            }
+            ExprNode::Case { arms, .. } => arms.iter().for_each(|a| tails(&a.body, out)),
+            ExprNode::Seq { exprs } if !exprs.is_empty() => tails(exprs.last().unwrap(), out),
+            ExprNode::BeginRescue { body, rescues, else_branch, .. } => {
+                tails(else_branch.as_ref().unwrap_or(body), out);
+                rescues.iter().for_each(|r| tails(&r.body, out));
+            }
+            ExprNode::Return { .. } => {}
+            ExprNode::Raise { .. } => {}
+            _ => out.push(e),
+        }
+    }
+    fn returns<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match &*e.node {
+            // A block's `return`/`next` is not the method's.
+            ExprNode::Lambda { .. } => {}
+            ExprNode::Return { value } => {
+                tails(value, out);
+                returns(value, out);
+            }
+            _ => e.node.for_each_child(&mut |c| returns(c, out)),
+        }
+    }
+    let mut out = Vec::new();
+    tails(body, &mut out);
+    returns(body, &mut out);
+    out
+}
+
+/// A method that returns a fixed-length array whose positions hold
+/// DIFFERENT types — `[cache_votes(scope), show_more]` — returns a
+/// tuple, and callers destructure it that way (`@stories, @show_more =
+/// paginate(…)`). The literal itself stays `Array[A | B]` inside the
+/// body; only the boundary says which position is which, the way the
+/// harvest draws `Relation` and `Class[C]` there. Without it the union
+/// reaches every target of the destructuring: lobsters' `@stories`
+/// was `Array[Story] | bool`, and `render json: @stories` had nothing
+/// to serialize.
+///
+/// All or nothing: every return leaf must be an array literal of the
+/// same length (two or more), with no splat, and some position must
+/// actually differ from another — a uniform literal is an ordinary
+/// `Array[T]`.
+pub(crate) fn tuple_return_ty(body: &Expr) -> Option<Ty> {
+    let leaves = return_leaves(body);
+    let mut positions: Option<Vec<Ty>> = None;
+    for leaf in leaves {
+        let ExprNode::Array { elements, .. } = &*leaf.node else { return None };
+        if elements.len() < 2 || elements.iter().any(|e| matches!(&*e.node, ExprNode::Splat { .. })) {
+            return None;
+        }
+        let tys: Vec<Ty> = elements.iter().map(|e| e.ty.clone()).collect::<Option<_>>()?;
+        if tys.iter().any(|t| matches!(t, Ty::Var { .. })) {
+            return None;
+        }
+        positions = Some(match positions {
+            None => tys,
+            Some(prev) if prev.len() == tys.len() => {
+                prev.into_iter().zip(tys).map(|(a, b)| crate::analyze::body::union_of(a, b)).collect()
+            }
+            Some(_) => return None,
+        });
+    }
+    let elems = positions?;
+    let first = &elems[0];
+    if elems.iter().all(|t| t == first) {
+        return None;
+    }
+    Some(Ty::Tuple { elems })
 }

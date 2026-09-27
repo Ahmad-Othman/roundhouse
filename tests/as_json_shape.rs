@@ -119,6 +119,52 @@ fn entry_list_extended_by_push_is_declined() {
     assert!(err.contains("push"), "error should name the blocking construct, got: {err}");
 }
 
+#[test]
+fn entry_list_reads_a_post_hoc_write_after_the_walk() {
+    // Current upstream lobsters Story appends two keys once the walk is
+    // done. Reading only the list lost them without a word.
+    let app = app_from(vec![(
+        "app/models/story.rb",
+        "class Story < ApplicationRecord\n\
+         \x20 def as_json(_options = {})\n\
+         \x20   keys = [ :short_id, :title ]\n\
+         \x20   json = {}\n\
+         \x20   keys.each do |k|\n\
+         \x20     json[k] = send(k)\n\
+         \x20   end\n\
+         \x20   json[:short_id_url] = Routes.story_short_id_url self\n\
+         \x20   json\n\
+         \x20 end\n\
+         end\n",
+    )]);
+    let pairs = as_json_pairs(&as_json_body(&app, "Story")).expect("recognized");
+    assert_eq!(keys(&pairs), ["short_id", "title", "short_id_url"]);
+    assert!(matches!(find(&pairs, "short_id_url").value, PairValue::Computed(_)));
+}
+
+#[test]
+fn entry_list_with_a_statement_it_does_not_know_is_declined() {
+    // Anything besides the list, the result hash, the walk, a
+    // `json[:k] = v` write and the trailing read could write a key this
+    // reader never sees.
+    let app = app_from(vec![(
+        "app/models/story.rb",
+        "class Story < ApplicationRecord\n\
+         \x20 def as_json(_options = {})\n\
+         \x20   keys = [ :short_id ]\n\
+         \x20   json = {}\n\
+         \x20   keys.each do |k|\n\
+         \x20     json[k] = send(k)\n\
+         \x20   end\n\
+         \x20   json.merge!(extra_fields)\n\
+         \x20   json\n\
+         \x20 end\n\
+         end\n",
+    )]);
+    let err = as_json_pairs(&as_json_body(&app, "Story")).expect_err("declined");
+    assert!(err.contains("unrecognized"), "got: {err}");
+}
+
 // ── idiom B: attrs + super(only:) + post-hoc writes ────────────────
 
 #[test]

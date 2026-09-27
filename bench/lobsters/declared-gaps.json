@@ -31,9 +31,9 @@
       "route": "/hottest",
       "since": "2026-08-03",
       "owner": "roundhouse",
-      "reason": "inline `render json:` is not lowered for strict targets, so the emit answers this route with its html arm",
-      "detail": "config/routes.rb pins `get \"/hottest\" => \"home#index\", :format => \"json\"`, so Rails serves JSON here and the AOT lane serves the HTML page. The respond_to flattening ledgers the dropped arm as a lower_residue warning (src/lower/controller/body.rs).",
-      "closes_with": "the render-json monomorphizer: src/lower/as_json_shape.rs and as_json_writer.rs are committed; remaining is type inference for Computed pair values, nested-record and Array[String] encoding, the datetime offset format, and widening FormatBreadth",
+      "reason": "this snapshot's Story#as_json serializes a nested record (`submitter_user: user`), which the render-json monomorphizer declines, so the emit answers this route with its html arm",
+      "detail": "config/routes.rb pins `get \"/hottest\" => \"home#index\", :format => \"json\"`, so Rails serves JSON here and the AOT lane serves the HTML page. The respond_to flattening ledgers the dropped arm as a lower_residue warning (src/lower/controller/body.rs). Current upstream lobsters, whose Story#as_json writes `submitter_user: user.username`, is monomorphized end to end (src/lower/as_json_poro.rs, as_json_writer.rs).",
+      "closes_with": "nested-record encoding: Story's writer calling User's, where User#as_json is the attrs + super(only:) idiom with four row-dependent keys, a pluck, and keybase_signatures (an Array of Hashes, which needs its own encoding)",
       "status": "in progress"
     },
     {

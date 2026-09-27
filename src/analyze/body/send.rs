@@ -230,6 +230,12 @@ impl<'a> BodyTyper<'a> {
         if matches!(method.as_str(), "then" | "yield_self" | "tap") {
             return Some(vec![recv_ty.clone()]);
         }
+        if let Ty::Tuple { elems } = recv_ty {
+            let as_array = Ty::Array {
+                elem: Box::new(elems.iter().cloned().reduce(union_of).unwrap_or(Ty::Untyped)),
+            };
+            return self.block_params_for(Some(&as_array), method);
+        }
         match recv_ty {
             Ty::Array { elem } => match method.as_str() {
                 "each" | "map" | "collect" | "flat_map" | "collect_concat"
@@ -498,6 +504,15 @@ impl<'a> BodyTyper<'a> {
         block_ret: Option<&Ty>,
         args: &[crate::expr::Expr],
     ) -> Ty {
+        // A tuple (a method returning `[a, b]` of mixed types — see
+        // `tuple_return_ty`) is still an Array at runtime: anything but
+        // destructuring reads it as one, over the union of its slots.
+        if let Some(Ty::Tuple { elems }) = recv_ty {
+            let as_array = Ty::Array {
+                elem: Box::new(elems.iter().cloned().reduce(union_of).unwrap_or(Ty::Untyped)),
+            };
+            return self.dispatch(Some(&as_array), method, block_ret, args);
+        }
         // `Class[C]` — a method that returns the class object itself
         // (see `class_object_return_ty`). Dispatch reads it back as
         // `C`, the flattened type a bare `C` constant already has, so
@@ -636,6 +651,9 @@ impl<'a> BodyTyper<'a> {
         // (e.g. `transaction { @story.save }` over an unmodeled ivar)
         // falls through to the registered `Untyped`, which is the
         // gradual answer and not a dispatch failure.
+        if let Some(t) = self.block_value_return(recv_ty, method, block_ret) {
+            return t;
+        }
         if method.as_str() == "transaction"
             && matches!(recv_ty, Some(Ty::Class { .. }))
         {
@@ -1337,6 +1355,43 @@ impl<'a> BodyTyper<'a> {
     /// this is the class lookup minus the parent walk. A `seen` set
     /// guards the pathological `module A; include B; end; module B;
     /// include A; end` cycle.
+    /// The call site's block type, when the method called is one that
+    /// returns its block's value (`ClassInfo::block_value_methods`) —
+    /// found on the receiver's class, its mixins, or a parent. The
+    /// runtime's `Rails::Cache#fetch` is one by construction: its body
+    /// is `yield`, and a hit answers what an earlier miss's block
+    /// stored. Only an INFORMATIVE block type is adopted, as for
+    /// `transaction`; otherwise the registered answer stands.
+    pub(crate) fn block_value_return(
+        &self,
+        recv_ty: Option<&Ty>,
+        method: &Symbol,
+        block_ret: Option<&Ty>,
+    ) -> Option<Ty> {
+        let ret = block_ret.filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped))?;
+        let Some(Ty::Class { id, .. }) = recv_ty else { return None };
+        if id.0.as_str() == "Rails::Cache" && method.as_str() == "fetch" {
+            return Some(ret.clone());
+        }
+        let mut current = Some(id.clone());
+        for _ in 0..32 {
+            let cls = self.classes().get(current.as_ref()?)?;
+            let own = std::iter::once(cls).chain(cls.includes.iter().filter_map(|m| self.classes().get(m)));
+            for c in own {
+                if c.block_value_methods.contains(method) {
+                    return Some(ret.clone());
+                }
+                // Defined here without being one: it shadows anything
+                // further up.
+                if c.instance_methods.contains_key(method) || c.class_methods.contains_key(method) {
+                    return None;
+                }
+            }
+            current = cls.parent.clone();
+        }
+        None
+    }
+
     fn lookup_in_module(&self, module_id: &ClassId, method: &Symbol) -> Option<Ty> {
         let mut stack = vec![module_id.clone()];
         let mut seen = std::collections::BTreeSet::new();

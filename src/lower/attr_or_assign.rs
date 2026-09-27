@@ -7,20 +7,39 @@
 //! (a local, an ivar, a zero-arg read chain), where evaluating it twice
 //! is the same as once.
 //!
-//! Only for an UNTYPED receiver, because that is the one spinel refuses
+//! Only for a receiver not typed as ONE class (untyped, or a union of
+//! classes), because that is the one spinel refuses
 //! ("unsupported call-or-write (non-object)"): its CallOrWrite lowering
 //! needs a concrete class to read and write the slot, while the plain
 //! read and the plain writer dispatch through a poly receiver like any
-//! other send. A typed receiver keeps the native compound form every
+//! other send. A one-class receiver keeps the native compound form every
 //! emitter already renders. lobsters' `CommentVoteHydrator#[]` is the
 //! case: `comment.current_vote ||= @votes[comment.id]` on a parameter
-//! nothing types.
+//! its call sites type as a union of three models.
 
 use crate::app::App;
 use crate::expr::{BoolOpKind, BoolOpSurface, Expr, ExprNode, LValue, OpAssignOp};
 
 pub fn apply_attr_or_assign_lowering(app: &mut App) {
     super::for_each_hook_body(app, &mut rewrite);
+}
+
+/// A receiver typed as ONE class, nil allowed — the only kind spinel's
+/// CallOrWrite lowering can read and write a slot on. A union of
+/// classes is a poly receiver there exactly as an untyped one is:
+/// `CommentVoteHydrator#[]`'s `comment` became `Comment | Message |
+/// ModMailMessage | nil` once `.new` call sites seeded `initialize`, and
+/// spinel refused the compound form the moment it stopped being untyped.
+fn one_class(ty: Option<&crate::ty::Ty>) -> bool {
+    use crate::ty::Ty;
+    match ty {
+        Some(Ty::Class { .. }) => true,
+        Some(Ty::Union { variants }) => {
+            variants.iter().filter(|v| matches!(v, Ty::Class { .. })).count() == 1
+                && variants.iter().all(|v| matches!(v, Ty::Class { .. } | Ty::Nil))
+        }
+        _ => false,
+    }
 }
 
 fn rewrite(expr: &mut Expr) {
@@ -33,8 +52,7 @@ fn rewrite(expr: &mut Expr) {
         OpAssignOp::AndAnd => BoolOpKind::And,
         _ => return,
     };
-    let untyped = recv.ty.as_ref().is_none_or(|t| t.is_unknown());
-    if !untyped || !super::case_lambda::is_pure_read(recv) {
+    if one_class(recv.ty.as_ref()) || !super::case_lambda::is_pure_read(recv) {
         return;
     }
     let span = expr.span;

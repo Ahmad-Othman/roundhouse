@@ -252,7 +252,53 @@ fn pairs_from_entry_list_idiom(stmts: &[&Expr]) -> Result<Vec<JsonPair>, ShapeEr
             return Err("entry list is extended by `push` after the literal");
         }
     }
-    Ok(pairs)
+
+    // Every OTHER statement must be one the idiom is made of: the result
+    // hash opened empty, the walk over the list, a post-hoc
+    // `json[:k] = v` write, or the trailing read that returns the hash.
+    // Current upstream lobsters `Story#as_json` appends two keys after
+    // the walk (`json[:short_id_url] = Routes.story_short_id_url self`);
+    // reading the list alone dropped them without a word, which is the
+    // one outcome this recognizer exists to rule out. A statement this
+    // does not know could write a key too, so it declines.
+    let mut hash_var: Option<Symbol> = None;
+    for (i, stmt) in stmts.iter().enumerate() {
+        let (inner, cond) = split_guard(stmt);
+        match &*inner.node {
+            ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+                if name == &list_var && array_elements(value).is_some() {
+                    continue;
+                }
+                if cond.is_none() && hash_var.is_none() && is_empty_hash(value) {
+                    hash_var = Some(name.clone());
+                    continue;
+                }
+                return Err("unrecognized assignment in the entry-list idiom");
+            }
+            ExprNode::Send { recv: Some(recv), method, block: Some(_), .. }
+                if method.as_str() == "each" && is_named_local(recv, &list_var) && cond.is_none() => {}
+            ExprNode::Send { recv: Some(recv), method, args, .. }
+                if method.as_str() == "[]="
+                    && args.len() == 2
+                    && hash_var.as_ref().is_some_and(|h| is_named_local(recv, h)) =>
+            {
+                let key = lit_sym(&args[0]).ok_or("hash write key is not a symbol literal")?;
+                pairs.push(JsonPair {
+                    key,
+                    value: PairValue::Computed(args[1].clone()),
+                    cond: cond.cloned(),
+                });
+            }
+            _ if i == stmts.len() - 1
+                && cond.is_none()
+                && hash_var.as_ref().is_some_and(|h| is_named_local(inner, h)) => {}
+            _ => return Err("unrecognized statement in the entry-list idiom"),
+        }
+    }
+    match &hash_var {
+        Some(h) if stmts.last().is_some_and(|s| is_named_local(s, h)) => Ok(pairs),
+        _ => Err("the entry-list idiom does not return its result hash"),
+    }
 }
 
 // ── shape helpers ──────────────────────────────────────────────────

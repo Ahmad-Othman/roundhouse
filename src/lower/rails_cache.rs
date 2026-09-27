@@ -68,7 +68,7 @@ fn rewrite(expr: &mut Expr) {
 
 /// `Rails.cache` — the receiver the store hangs off. An app object that
 /// happens to answer `fetch` is not it.
-fn is_rails_cache(e: &Expr) -> bool {
+pub(crate) fn is_rails_cache(e: &Expr) -> bool {
     let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node else { return false };
     if method.as_str() != "cache" || !args.is_empty() {
         return false;

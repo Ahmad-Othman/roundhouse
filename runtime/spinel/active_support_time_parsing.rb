@@ -143,15 +143,15 @@ module ActiveSupport
   # `parse_db_time` above now lands the instant in the app's zone, so
   # the offset is the receiver's own — NOT a hardcoded "+00:00", which
   # would label local clock fields as UTC and be wrong by the offset.
-  # `parse_db_time` carries the sub-second fraction now, but this
-  # format still spells a literal ".000" — strftime here has no
-  # millisecond directive. Nothing on this tree exercises it yet: the
-  # spinel emit drops the json respond_to arm, so /hottest renders HTML
-  # here where Rails renders JSON — see src/lower/controller/body.rs.
+  # The milliseconds are `usec / 1000`, formatted apart: strftime here
+  # has no millisecond directive, and xmlschema(3) TRUNCATES (.027418 →
+  # .027), which integer division does too. A monomorphized `as_json`
+  # writer (lower::as_json_writer, `PairEncoding::ZonedTime`) is what
+  # reaches this — lobsters' /hottest, one call per story.
   def self.json_time(str)
     t = parse_db_time(str)
     return nil if t.nil?
-    t.strftime("%Y-%m-%dT%H:%M:%S.000%:z")
+    t.strftime("%Y-%m-%dT%H:%M:%S") + format(".%03d", t.usec / 1000) + t.strftime("%:z")
   end
 
   # RFC 2822 date, the shape stdlib `time` gives `Time#rfc2822` — which

@@ -55,13 +55,25 @@
 //! — which the controller rewrite already lowers on every target, with
 //! the author's `content_type:` standing. `JsonBuilder` ships in the
 //! shared runtime, so the ruby lane runs the very writer the compiled
-//! lane does: one oracle, one text. A `render json:` whose value is not
-//! a class this pass wrote a writer for (a Hash literal, a Relation, a
-//! model with its own `as_json` — see `as_json_shape`'s known gaps)
-//! keeps the runtime encoder, CRuby-only as before.
+//! lane does: one oracle, one text.
+//!
+//! ## A model with its own `as_json`
+//!
+//! Rails serializes it through that method, called bare. When
+//! `as_json_shape` reads the body (lobsters' `Story#as_json`) and
+//! analysis types every value, the pairs become the writer instead of
+//! the readers — see `declared_as_json_writer`. A COLLECTION of such
+//! records (`render json: @stories`, an `Array[Story]` or a
+//! `Relation[Story]`) is a JSON array of each record's text.
+//!
+//! What keeps the runtime encoder, CRuby-only as before: a Hash
+//! literal, a value the analyzer could not type, and a model whose
+//! `as_json` is outside the two idioms or has a value with no encoding
+//! here (a nested record, a Hash).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
+use crate::analyze::ClassInfo;
 use crate::app::App;
 use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, ModelBodyItem, Param};
 use crate::effect::EffectSet;
@@ -70,11 +82,11 @@ use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
 use crate::ty::Ty;
 
-use super::as_json_shape::{JsonPair, PairValue};
-use super::as_json_writer::{writer_method, WRITER_METHOD};
+use super::as_json_shape::{as_json_pairs_for_no_arg_call, JsonPair, PairValue, ShapeError};
+use super::as_json_writer::{typed_writer_method, writer_method, PairEncoding, WRITER_METHOD};
 use super::typing::with_ty;
 
-pub fn apply_as_json_synthesis(app: &mut App) {
+pub fn apply_as_json_synthesis(app: &mut App, registry: &HashMap<ClassId, ClassInfo>) {
     let wanted = json_rendered_classes(app);
     if wanted.is_empty() {
         return;
@@ -94,6 +106,36 @@ pub fn apply_as_json_synthesis(app: &mut App) {
             matches!(item, ModelBodyItem::Method { method, .. } if method.name.as_str() == "as_json")
         });
         if declares_as_json {
+            // The model wrote its own `as_json`. Rails serializes a bare
+            // `render json:` through it with no options, so specialize
+            // it to that call and write the text it would build —
+            // provided every value's TYPE says how. One value that does
+            // not (a nested record, a Hash) leaves the whole model on
+            // the runtime encoder, whose dropped arm is already ledgered
+            // at the site.
+            let table = app.schema.tables.get(&model.table.0);
+            let Some(writer) = model.body.iter().find_map(|item| match item {
+                ModelBodyItem::Method { method, .. } if method.name.as_str() == "as_json" => {
+                    declared_as_json_writer(&model.name, method, table, registry).ok()
+                }
+                _ => None,
+            }) else {
+                continue;
+            };
+            model.body.push(ModelBodyItem::Method {
+                method: writer,
+                leading_comments: Vec::new(),
+                leading_blank_line: true,
+            });
+            written.insert(model.name.clone());
+            continue;
+        }
+        // A TABLE-backed record without its own `as_json` serializes
+        // its columns in Rails (`serializable_hash`), not its
+        // `attr_accessor`s — a different answer this path does not
+        // write. The declared-readers writer is for the tableless class
+        // (`Opengraph::Metadata`); a record keeps the runtime encoder.
+        if app.schema.tables.contains_key(&model.table.0) {
             continue;
         }
         // The `attr_*` family, splat expanded — the SAME list the
@@ -160,7 +202,7 @@ fn rewrite_render_json(e: &Expr, written: &HashSet<ClassId>) -> Option<Expr> {
         matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == name)
     };
     let value = entries.iter().find_map(|(k, v)| is_key(k, "json").then_some(v))?;
-    let Some(Ty::Class { id, .. }) = value.ty.as_ref() else { return None };
+    let (id, collection) = rendered_class(value.ty.as_ref()?)?;
     if !written.contains(id) {
         return None;
     }
@@ -170,19 +212,11 @@ fn rewrite_render_json(e: &Expr, written: &HashSet<ClassId>) -> Option<Expr> {
             Ty::Sym,
         )
     };
-    let encoded = with_ty(
-        Expr::new(
-            value.span,
-            ExprNode::Send {
-                recv: Some(value.clone()),
-                method: Symbol::from(WRITER_METHOD),
-                args: vec![],
-                block: None,
-                parenthesized: false,
-            },
-        ),
-        Ty::Str,
-    );
+    let encoded = if collection {
+        collection_text(value, id)
+    } else {
+        writer_call(value.clone())
+    };
     let mut new_entries: Vec<(Expr, Expr)> = Vec::new();
     for (k, v) in entries {
         if is_key(k, "json") {
@@ -215,6 +249,156 @@ fn rewrite_render_json(e: &Expr, written: &HashSet<ClassId>) -> Option<Expr> {
         }),
         ..e.clone()
     })
+}
+
+/// The class a `render json:` value serializes, and whether the value
+/// is a COLLECTION of it. Rails encodes an Array or a Relation as a JSON
+/// array of each record's `as_json` — lobsters' `render json: @stories`
+/// on every story listing.
+fn rendered_class(ty: &Ty) -> Option<(&ClassId, bool)> {
+    match ty {
+        Ty::Class { id, .. } => Some((id, false)),
+        Ty::Relation { of } => Some((of, true)),
+        Ty::Array { elem } => match &**elem {
+            Ty::Class { id, .. } => Some((id, true)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `<v>.as_json_str`
+fn writer_call(recv: Expr) -> Expr {
+    let span = recv.span;
+    with_ty(
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from(WRITER_METHOD),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        ),
+        Ty::Str,
+    )
+}
+
+/// `"[" + <v>.map { |record| record.as_json_str }.join(",") + "]"` —
+/// map+join, the shape the jbuilder lowerer's `array!` uses, for the
+/// same reason: it emits idiomatically on every target, where a
+/// mutable first-element flag does not.
+fn collection_text(value: &Expr, id: &ClassId) -> Expr {
+    let span = value.span;
+    let str_lit = |s: &str| {
+        with_ty(
+            Expr::new(span, ExprNode::Lit { value: Literal::Str { value: s.to_string() } }),
+            Ty::Str,
+        )
+    };
+    let item = Symbol::from("record");
+    let item_ref = with_ty(
+        Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: item.clone() }),
+        Ty::Class { id: id.clone(), args: vec![] },
+    );
+    let block = Expr::new(
+        span,
+        ExprNode::Lambda {
+            rest_param: None,
+            params: vec![item],
+            block_param: None,
+            body: writer_call(item_ref),
+            block_style: crate::expr::BlockStyle::Brace,
+        },
+    );
+    let send = |recv: Expr, method: &str, args: Vec<Expr>, block: Option<Expr>, ty: Ty| {
+        with_ty(
+            Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(recv),
+                    method: Symbol::from(method),
+                    args,
+                    block,
+                    parenthesized: true,
+                },
+            ),
+            ty,
+        )
+    };
+    let mapped = send(value.clone(), "map", vec![], Some(block), Ty::Array { elem: Box::new(Ty::Str) });
+    let joined = send(mapped, "join", vec![str_lit(",")], None, Ty::Str);
+    let open = send(str_lit("["), "+", vec![joined], None, Ty::Str);
+    send(open, "+", vec![str_lit("]")], None, Ty::Str)
+}
+
+/// A model's own `as_json`, specialized to the bare call `render json:`
+/// makes, as an `as_json_str` writer — or why not.
+///
+/// Every pair is typed before anything is written. A `Reader` answers
+/// from the schema (a temporal column renders zoned, as Rails'
+/// `TimeWithZone` does) or from the analyzer's signature for the method
+/// it names; a `Computed` value from the type analysis stamped on it.
+/// A type with no JSON encoding here — a record, a Hash, an Array of
+/// anything but Strings, or no type at all — declines the model rather
+/// than letting the scalar encoder quote its `to_s`.
+fn declared_as_json_writer(
+    owner: &ClassId,
+    method: &MethodDef,
+    table: Option<&crate::schema::Table>,
+    registry: &HashMap<ClassId, ClassInfo>,
+) -> Result<MethodDef, ShapeError> {
+    let pairs = as_json_pairs_for_no_arg_call(&method.params, &method.body)?;
+    let info = registry.get(owner).ok_or("the model has no analyzed class info")?;
+    let encodings = pairs
+        .iter()
+        .map(|pair| match &pair.value {
+            PairValue::Reader(name) => {
+                let column = table.and_then(|t| t.columns.iter().find(|c| &c.name == name));
+                if let Some(c) = column {
+                    if matches!(
+                        c.col_type,
+                        crate::schema::ColumnType::DateTime
+                            | crate::schema::ColumnType::Date
+                            | crate::schema::ColumnType::Time
+                    ) {
+                        return Ok(PairEncoding::ZonedTime);
+                    }
+                }
+                let ty = match info.instance_methods.get(name) {
+                    Some(Ty::Fn { ret, .. }) => (**ret).clone(),
+                    _ => info
+                        .attributes
+                        .fields
+                        .get(name)
+                        .cloned()
+                        .ok_or("a key reads a method with no known type")?,
+                };
+                encoding_for(&ty)
+            }
+            PairValue::Computed(e) => encoding_for(e.ty.as_ref().ok_or("a computed key has no type")?),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    typed_writer_method(owner, &pairs, &encodings)
+}
+
+/// The encoder a value of type `ty` takes, when there is one.
+fn encoding_for(ty: &Ty) -> Result<PairEncoding, ShapeError> {
+    fn scalar(ty: &Ty) -> bool {
+        match ty {
+            Ty::Str | Ty::Int | Ty::Float | Ty::Bool | Ty::Nil => true,
+            Ty::Union { variants } => variants.iter().all(scalar),
+            _ => false,
+        }
+    }
+    if scalar(ty) {
+        return Ok(PairEncoding::Scalar(ty.clone()));
+    }
+    match ty {
+        Ty::Array { elem } if matches!(**elem, Ty::Str) => Ok(PairEncoding::StringArray),
+        _ => Err("a key's value type has no JSON encoding here"),
+    }
 }
 
 /// Post-order in-place replacement, the shape `params_merge` uses.
@@ -267,7 +451,7 @@ fn json_rendered_classes(app: &App) -> HashSet<ClassId> {
                         if value.as_str() != "json" {
                             continue;
                         }
-                        if let Some(Ty::Class { id, .. }) = v.ty.as_ref() {
+                        if let Some((id, _)) = v.ty.as_ref().and_then(rendered_class) {
                             if known.contains(id) {
                                 out.insert(id.clone());
                             }

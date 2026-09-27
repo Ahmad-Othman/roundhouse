@@ -65,6 +65,16 @@ module JsonBuilder
     "\"#{encode_string(v.to_s)}\""
   end
 
+  # An Array of Strings as a JSON array — the one non-scalar value a
+  # monomorphized `as_json` writer hands over (lobsters Story's
+  # `tags: tags.map(&:tag).sort`). Typed `Array[String]` rather than a
+  # walk over `untyped` elements: the writer routes a value here only
+  # when analysis typed it so, and a mixed array is declined upstream
+  # instead of encoded by guess.
+  def self.encode_string_array(values)
+    "[" + values.map { |v| "\"#{encode_string(v)}\"" }.join(",") + "]"
+  end
+
   # An integer-backed enum column as Rails serializes it: the LABEL,
   # not the stored integer (`json.(user, :role)` renders `"bot"`, the
   # reader `user.role` in Rails answers the label too). `labels` is

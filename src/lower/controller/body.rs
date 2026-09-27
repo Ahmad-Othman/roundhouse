@@ -354,7 +354,7 @@ fn json_arm_drop_reason(
     if !with_format_dispatch {
         return Some("this emit path does not dispatch on request_format");
     }
-    if breadth.json_any || is_simple_render_sym(branch_body) {
+    if breadth.json_any || is_simple_render_sym(branch_body) || is_encoded_render(branch_body) {
         return None;
     }
     Some("inline `render json: <expr>` needs an encoder this tree has none for")
@@ -398,6 +398,29 @@ fn is_simple_render_sym(body: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// True when `body` renders text that is ALREADY encoded —
+/// `render plain: <str>, …`. `lower::as_json_poro` respells a `render
+/// json:` it could write down this way (`<v>.as_json_str`), so the arm
+/// no longer reaches the runtime encoder the narrow breadths exclude and
+/// travels like any other plain render.
+fn is_encoded_render(body: &Expr) -> bool {
+    let body = match &*body.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+        _ => body,
+    };
+    let ExprNode::Send { recv: None, method, args, .. } = &*body.node else { return false };
+    if method.as_str() != "render" || args.len() != 1 {
+        return false;
+    }
+    let ExprNode::Hash { entries, .. } = &*args[0].node else { return false };
+    let has = |name: &str| {
+        entries.iter().any(|(k, _)| {
+            matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == name)
+        })
+    };
+    has("plain") && !has("json")
 }
 
 /// Build the `if request_format == :json; <json>; else; <html>; end`

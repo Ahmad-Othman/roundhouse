@@ -195,9 +195,10 @@ end
     );
 }
 
-/// A class with its own `as_json` gets no writer (its pairs are not
-/// recognized here), so its site keeps the runtime encoder — CRuby-only,
-/// loud elsewhere, and never wrong text.
+/// A class with its own `as_json` in a shape `as_json_shape` does not
+/// read (a bare Hash literal) gets no writer, so its site keeps the
+/// runtime encoder — CRuby-only, loud elsewhere, and never wrong text.
+/// The idioms it DOES read are `tests/render_json_declared_as_json.rs`.
 #[test]
 fn a_declared_as_json_keeps_the_runtime_encoder_at_the_site() {
     let src = controller_emit_with(

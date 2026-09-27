@@ -35,22 +35,18 @@
 //! it. Every lobsters model clears the rule: User's conditional keys all
 //! sit behind four unconditional ones.
 //!
-//! ## KNOWN GAP — a `Computed` pair's type is not checked
+//! ## Typing the values
 //!
 //! `JsonBuilder.encode_value` is a SCALAR encoder: nil/bool/Integer/
-//! Float/String, and a `to_s`-and-quote fallback for anything else. A
-//! `Reader` naming an association is caught below, but a `Computed`
-//! expression is passed to `encode_value` untyped — so
-//! `{ tags: self.tags.map(&:tag).sort }` (lobsters Story) would encode
-//! an Array as the quoted string `"[\"a\", \"b\"]"`. Valid JSON, wrong
-//! data.
-//!
-//! Story happens to decline anyway, on its `submitter_user` association
-//! reader — but that is luck, not coverage. **Computed values need a
-//! type check before this writer is wired to `render json:`**; until
-//! then nothing calls it on a live route, so the gap cannot reach a
-//! response. Closing it needs the value's inferred type, which is also
-//! what the nested-record and Array[String] cases need.
+//! Float/String, and a `to_s`-and-quote fallback for anything else — so
+//! an Array handed to it would ship as the quoted string `"[\"a\"]"`:
+//! valid JSON, wrong data. [`writer_method`] (the PORO path) never meets
+//! one, since its values are declared `attr_*` readers.
+//! [`typed_writer_method`] takes a model's own `as_json`, whose values
+//! are computed (`tags: tags.map(&:tag).sort`), and so takes a
+//! [`PairEncoding`] per pair that the caller settled from the value's
+//! analyzed type; a type with no encoding declines before this is
+//! called.
 
 use crate::dialect::{AccessorKind, MethodDef, MethodReceiver};
 use crate::effect::EffectSet;
@@ -113,6 +109,96 @@ pub fn writer_body(
     table: Option<&Table>,
     assoc_names: &[Symbol],
 ) -> Result<Vec<Expr>, ShapeError> {
+    writer_body_with(pairs, |pair| {
+        // A pair reading an association is a nested record. Declining is
+        // what keeps the writer honest: `encode_value` would fall back
+        // to `to_s` and quote it, which is valid JSON and wrong data.
+        if let PairValue::Reader(name) = &pair.value {
+            if assoc_names.iter().any(|a| a == name) {
+                return Err("a key serializes an associated record");
+            }
+        }
+        Ok(encoded_value(pair, table))
+    })
+}
+
+/// How a TYPED pair's value is written — the answer the caller reached
+/// from the value's analyzed type, so the writer never guesses.
+#[derive(Clone, Debug)]
+pub enum PairEncoding {
+    /// nil / bool / Integer / Float / String: `JsonBuilder.encode_value`.
+    Scalar(Ty),
+    /// `Array[String]`: `JsonBuilder.encode_string_array`.
+    StringArray,
+    /// A temporal COLUMN, as Rails' `TimeWithZone#as_json` renders it —
+    /// `xmlschema(3)` in the app's `config.time_zone`, through the
+    /// runtime's `ActiveSupport.json_time` seam over the stored text.
+    /// `JsonBuilder.encode_datetime` would spell it in UTC with a `Z`,
+    /// which is Rails' answer only for an app that never set a zone.
+    ZonedTime,
+}
+
+/// The writer for pairs whose encodings the caller settled from their
+/// types — a model's own declared `as_json`, which may compute values
+/// (`tags.map(&:tag).sort`) no reader list could.
+pub fn typed_writer_method(
+    owner: &ClassId,
+    pairs: &[JsonPair],
+    encodings: &[PairEncoding],
+) -> Result<MethodDef, ShapeError> {
+    assert_eq!(pairs.len(), encodings.len());
+    let stmts = writer_body_with(pairs, |pair| {
+        let i = pairs.iter().position(|p| std::ptr::eq(p, pair)).expect("pair from this list");
+        Ok(typed_value(pair, &encodings[i]))
+    })?;
+    Ok(MethodDef {
+        name_span: Span::synthetic(),
+        name: Symbol::from(WRITER_METHOD),
+        receiver: MethodReceiver::Instance,
+        params: vec![],
+        body: with_ty(Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts }), Ty::Str),
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    })
+}
+
+fn typed_value(pair: &JsonPair, enc: &PairEncoding) -> Expr {
+    let value = |ty: Ty| match &pair.value {
+        PairValue::Computed(e) => e.clone(),
+        PairValue::Reader(name) => with_ty(self_send(name.as_str()), ty),
+    };
+    match enc {
+        PairEncoding::Scalar(ty) => json_builder_call("encode_value", value(ty.clone())),
+        PairEncoding::StringArray => json_builder_call(
+            "encode_string_array",
+            value(Ty::Array { elem: Box::new(Ty::Str) }),
+        ),
+        PairEncoding::ZonedTime => {
+            let PairValue::Reader(name) = &pair.value else {
+                unreachable!("ZonedTime is a column reader's encoding")
+            };
+            let raw = with_ty(
+                self_send(&format!("{}_raw", name.as_str())),
+                Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+            );
+            let text = with_ty(
+                send(Some(const_ref("ActiveSupport")), "json_time", vec![raw], true),
+                Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+            );
+            json_builder_call("encode_value", text)
+        }
+    }
+}
+
+fn writer_body_with(
+    pairs: &[JsonPair],
+    encode: impl Fn(&JsonPair) -> Result<Expr, ShapeError>,
+) -> Result<Vec<Expr>, ShapeError> {
     if pairs.is_empty() {
         return Err("no pairs to encode");
     }
@@ -124,15 +210,6 @@ pub fn writer_body(
     ];
 
     for (i, pair) in pairs.iter().enumerate() {
-        // A pair reading an association is a nested record. Declining is
-        // what keeps the writer honest: `encode_value` would fall back
-        // to `to_s` and quote it, which is valid JSON and wrong data.
-        if let PairValue::Reader(name) = &pair.value {
-            if assoc_names.iter().any(|a| a == name) {
-                return Err("a key serializes an associated record");
-            }
-        }
-
         let needs_comma = match pairs[..i].iter().any(|p| p.cond.is_none()) {
             true => true,
             // Nothing before it always emits. Only safe when P is the
@@ -142,10 +219,7 @@ pub fn writer_body(
         };
 
         let key_lit = format!("{}\"{}\":", if needs_comma { "," } else { "" }, pair.key.as_str());
-        let stmts = vec![
-            io_append_lit(&key_lit),
-            io_append_call(encoded_value(pair, table)),
-        ];
+        let stmts = vec![io_append_lit(&key_lit), io_append_call(encode(pair)?)];
 
         match &pair.cond {
             None => out.extend(stmts),

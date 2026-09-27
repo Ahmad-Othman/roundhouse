@@ -840,7 +840,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("create_block");
     diags.extend(params_merge::apply_params_merge_lowering(app));
     ran!("params_merge");
-    as_json_poro::apply_as_json_synthesis(app);
+    as_json_poro::apply_as_json_synthesis(app, registry);
     ran!("as_json_poro");
     diags.extend(active_model_model::apply_active_model_model_synthesis(app));
     ran!("active_model_model");
