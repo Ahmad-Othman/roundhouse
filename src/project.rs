@@ -3242,6 +3242,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         files.push(("sig/runtime/request_forgery_protection.rbs".to_string(), rbs));
     }
 
+    // Signed-session sidecar — the ActionDispatch::Session reopen in
+    // runtime/signed_session_cookie.rb (ruby family only).
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/signed_session_cookie.rbs")
+            .map_err(|e| format!("read runtime/spinel/signed_session_cookie.rbs: {e}"))?;
+        files.push(("sig/runtime/signed_session_cookie.rbs".to_string(), rbs));
+    }
+
     // Hash#to_query nesting sidecar — the reopen in
     // runtime/hash_to_query.rb renders a nested Hash/Array value as
     // Rails' bracket grammar; the .rbs keeps the reopened method's

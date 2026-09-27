@@ -445,8 +445,15 @@ module Main
     # configured one, so a literal here would clear the session on every
     # request.
     session_cookie = Rails.application.session_cookie_key
-    session_in = req.cookies.fetch(session_cookie, "")
-    controller.assign_http_session(ActionDispatch::Session.from_cookie(session_in))
+    # SIGNED (runtime/signed_session_cookie.rb): a value that does not
+    # verify restores as an empty session. `session_in` is the restored
+    # session's PLAIN encoding — what the persist step below compares
+    # against, so an untouched session writes no Set-Cookie and a
+    # rejected one is not rewritten until the action changes it.
+    restored = ActionDispatch::Session.from_signed_cookie(
+      req.cookies.fetch(session_cookie, ""), session_cookie)
+    session_in = restored.to_cookie
+    controller.assign_http_session(restored)
     # Controller-level cookie access (`cookies[:k]` reads, `cookies[:k] = v`
     # records writes surfaced as Set-Cookie below). The inbound jar is the
     # request's parsed cookies (String-keyed Tep.str_hash); the CookieJar
@@ -557,7 +564,8 @@ module Main
       if session_out == ""
         Main.clear_flash_cookie(res, session_cookie)
       else
-        Main.set_flash_cookie(res, session_cookie, session_out)
+        Main.set_flash_cookie(res, session_cookie,
+          ActionDispatch::Session.signed_cookie(session_out, session_cookie))
       end
     end
   end

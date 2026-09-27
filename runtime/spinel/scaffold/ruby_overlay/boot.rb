@@ -110,6 +110,9 @@ require_relative "runtime/redirect_back"
 # The real forgery check behind the shared `verify_authenticity_token`
 # — a reopen of ActionController::Base, ruby-family only (see the file).
 require_relative "runtime/request_forgery_protection"
+# The session cookie's signature — a reopen of ActionDispatch::Session
+# the two dispatchers restore and persist through (see the file).
+require_relative "runtime/signed_session_cookie"
 # An Array attribute value — Rails' space-joined form and the `class:`
 # conditional list — a reopen of the shared scalar `attr_value_text`,
 # for the same reason and at the same point as the line above.

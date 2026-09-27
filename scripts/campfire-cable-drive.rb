@@ -79,16 +79,17 @@ $csrf = nil
 EMAIL    = ENV["CAMPFIRE_EMAIL"] || "walker@example.com"
 PASSWORD = ENV["CAMPFIRE_PASSWORD"] || "secret123"
 
-def req(verb, path, form = nil, accept: "text/html", csrf: true, origin: nil)
+def req(verb, path, form = nil, accept: "text/html", csrf: true, origin: nil, token: nil)
   uri = URI("#{BASE}#{path}")
   r = verb == "GET" ? Net::HTTP::Get.new(uri) : Net::HTTP::Post.new(uri)
   r["Accept"] = accept
   r["Cookie"] = $jar.map { |k, v| "#{k}=#{v}" }.join("; ") unless $jar.empty?
   # Every lane enforces CSRF on a POST. The token is whatever the most
   # recent page's `csrf-token` meta carried — which is how campfire's
-  # own JavaScript authenticates its fetches. `csrf: false` and
-  # `origin:` are for the forgery probes, which play the other site.
-  r["X-CSRF-Token"] = $csrf if verb == "POST" && $csrf && csrf
+  # own JavaScript authenticates its fetches. `csrf: false`, `origin:`
+  # and `token:` (a token of the caller's choosing) are for the forgery
+  # probes, which play the other site.
+  r["X-CSRF-Token"] = token || $csrf if verb == "POST" && (token || $csrf) && csrf
   r["Origin"] = origin if origin
   r.set_form_data(form) if form
   res = Net::HTTP.start(uri.host, uri.port) { |h| h.request(r) }
@@ -327,6 +328,23 @@ foreign = req("POST", "/rooms/1/messages",
 check("the right token from a foreign Origin is refused", foreign.code, "422")
 check("neither reaches a socket",
       a.until(2) { a.payloads.drop(before3).any? { |m| m["message"].to_s.include?("forged") } }, false)
+
+# A session cookie the client wrote itself. Whoever can set a cookie for
+# the domain (a sibling subdomain, a script with cookie access) could
+# otherwise plant a CSRF token of their choosing and send the same one in
+# the header: the check compares the two and they agree. Rails' session
+# cookie is authenticated, so a plaintext one restores nothing and the
+# post is refused; so must ours. The real cookie is put back afterwards,
+# signed-in state and all.
+SESSION_COOKIE = "_campfire_session"
+PLANTED = "planted-token-planted-token-planted-tok"
+real_session = $jar[SESSION_COOKIE]
+$jar[SESSION_COOKIE] = "_csrf_token=#{PLANTED}"
+planted = req("POST", "/rooms/1/messages",
+              { "message[body]" => "forged", "message[client_message_id]" => "cable-walk-planted" },
+              accept: "text/vnd.turbo-stream.html, text/html", token: PLANTED)
+real_session.nil? ? $jar.delete(SESSION_COOKIE) : $jar[SESSION_COOKIE] = real_session
+check("a planted session cookie's token is refused", planted.code, "422")
 
 puts
 unless LEDGER_FAILURES.empty?

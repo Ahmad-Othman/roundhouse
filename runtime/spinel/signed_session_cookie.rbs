@@ -1,0 +1,7 @@
+# Typing for runtime/spinel/signed_session_cookie.rb.
+module ActionDispatch
+  class Session
+    def self.from_signed_cookie: (String raw, String name) -> Session
+    def self.signed_cookie: (String plain, String name) -> String
+  end
+end

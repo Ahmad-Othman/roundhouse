@@ -209,6 +209,10 @@ fn real_blog_spinel_tests_pass() {
         // tokens against the session's, the 422, and the Origin rule.
         // Rides in the same way.
         "test/request_forgery_protection_test.rb",
+        // The ruby family's signed session cookie
+        // (runtime/signed_session_cookie.rb): a round trip, and every
+        // client-written variant restoring as an empty session.
+        "test/signed_session_cookie_test.rb",
     ] {
         assert_test_passes(&scratch, &gemfile, test);
     }

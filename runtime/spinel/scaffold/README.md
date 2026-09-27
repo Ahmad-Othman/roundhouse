@@ -345,9 +345,10 @@ from this fixture:
 - **No signed stream names.** ActionCable's
   `signed_stream_name` is treated as a literal stream name on both
   ends. Any WebSocket client can subscribe to any stream by name.
-- **Unsigned cookies.** The flash cookie carries plain text; anyone
-  can construct a `Cookie: flash_notice=Hello` and the next page
-  will display "Hello" as if it came from a successful action.
+- **Unsigned flash cookie.** The session cookie is signed, but the
+  flash cookie carries plain text; anyone can construct a
+  `Cookie: flash_notice=Hello` and the next page will display "Hello"
+  as if it came from a successful action.
 - **No HTTPS.** No `Secure` flag on cookies; `HttpOnly` is set but
   `SameSite` is not.
 - **No authentication, no authorization.** No user model, no login,

@@ -165,8 +165,12 @@ module Main
     # header, and `controller.cookies.pending` already contributes String
     # keys to the same hash.
     session_cookie = Rails.application.session_cookie_key
-    session_in = cookies[session_cookie.to_sym].to_s
-    controller.assign_http_session(ActionDispatch::Session.from_cookie(session_in))
+    # SIGNED — see the spinel main.rb twin: `session_in` is the restored
+    # session's plain encoding, and only a changed session is re-signed.
+    restored = ActionDispatch::Session.from_signed_cookie(
+      cookies[session_cookie.to_sym].to_s, session_cookie)
+    session_in = restored.to_cookie
+    controller.assign_http_session(restored)
     # Expose the inbound cookies to the controller as a CookieJar so
     # `cookies[:k]` reads (and `cookies[:k] = v` records writes, surfaced
     # below as Set-Cookie). CookieJar is the CRuby-only overlay class.
@@ -233,7 +237,8 @@ module Main
     # the spinel main.
     session_out = controller.session.to_cookie
     if session_out != session_in && !controller.request.session_skip?
-      out_cookies[session_cookie] = session_out.empty? ? nil : session_out
+      out_cookies[session_cookie] =
+        session_out.empty? ? nil : ActionDispatch::Session.signed_cookie(session_out, session_cookie)
     end
     is_redirect = controller.status >= 300 && controller.status < 400
     # Headers the action set beyond Content-Type/Location — a
