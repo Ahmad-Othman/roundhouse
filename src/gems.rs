@@ -641,3 +641,13 @@ BUNDLED WITH
         assert_eq!(gem_claiming_method(&lock, "friendly_id"), None, "friendly_id is not in this lock");
     }
 }
+
+/// Gems that put stylesheets on Propshaft's load path, and their stems:
+/// `stylesheet_link_tag :all` links each on every page of an app that
+/// bundles the gem. Read by ingest (the `<link>` list) and by the
+/// Makefile generator (the copy-from-gem rules), so the page and the
+/// build agree by construction.
+pub const GEM_STYLESHEETS: &[(&str, &[&str])] = &[
+    ("action_text-trix", &["trix"]),
+    ("lexxy", &["lexxy-content", "lexxy-editor", "lexxy-variables", "lexxy"]),
+];

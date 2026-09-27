@@ -202,13 +202,18 @@ class ViewHelpersExtTest < Minitest::Test
   end
 
   # The honest boundary that remains: an allow-list naming a rawtext or
-  # foreign container is refused, as is the style attribute.
+  # foreign container is refused.
   def test_sanitize_allowing_refuses_unservable_lists
     assert_raises(NotImplementedError) do
       ViewHelpers.sanitize_allowing("<p>x</p>", ["p", "script"], ["class"])
     end
-    assert_raises(NotImplementedError) do
-      ViewHelpers.sanitize_allowing("<p>x</p>", ["p"], ["class", "style"])
-    end
+  end
+
+  # An allowed `style` is DROPPED: its value wants the CSS scrubber, which
+  # is not ported, and dropping is the safe direction (the lexxy gem
+  # allows it; the raise this replaced emptied campfire's messages).
+  def test_sanitize_allowing_drops_an_allowed_style_attribute
+    assert_equal %(<p class="a">x</p>),
+      ViewHelpers.sanitize_allowing(%(<p class="a" style="color:red">x</p>), ["p"], ["class", "style"])
   end
 end

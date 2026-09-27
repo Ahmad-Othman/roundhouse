@@ -643,3 +643,32 @@ class ActionTextFragmentTest < Minitest::Test
     end
   end
 end
+
+# The two runtime pieces the Lexxy editor brought: `Node#at_css` (a
+# paragraph asked whether it holds an attachment) and the editor's
+# `value` (lexxy's `render_custom_attachments_in`). Written without
+# `assert_nil` and without test-local helpers, for the strict lanes.
+class ActionTextLexxyTest < Minitest::Test
+  def test_a_node_answers_its_first_matching_descendant
+    fragment = ActionText::Fragment.new(%(<p>see <action-text-attachment sgid="x"></action-text-attachment></p><p>none</p>))
+    paragraphs = fragment.find_all("p")
+    assert_equal "action-text-attachment", paragraphs[0].at_css("action-text-attachment").name
+    assert paragraphs[1].at_css("action-text-attachment").nil?
+  end
+
+  def test_a_blank_body_gives_the_editor_no_value
+    assert ActionText.lexxy_editor_value("").nil?
+    assert ActionText.lexxy_editor_value("  \n").nil?
+  end
+
+  def test_an_attachment_without_a_url_carries_its_render_as_json
+    html = %(<p>hi <action-text-attachment sgid="x" content-type="application/vnd.campfire.mention"></action-text-attachment></p>)
+    assert_equal %(<p>hi <action-text-attachment sgid="x" content-type="application/vnd.campfire.mention" content="&quot;&quot;"></action-text-attachment></p>),
+      ActionText.lexxy_editor_value(html).to_s
+  end
+
+  def test_an_attachment_with_a_url_is_left_alone
+    html = %(<action-text-attachment url="https://example.com/a.png" content-type="image/png"></action-text-attachment>)
+    assert_equal html, ActionText.lexxy_editor_value(html).to_s
+  end
+end

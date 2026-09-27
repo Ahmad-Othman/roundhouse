@@ -1222,25 +1222,51 @@ end
         }
     }
     // Propshaft's load path is wider than the app's two dirs: a GEM can
-    // ship stylesheets, and the `:all` expansion links those too. The
-    // one the corpus meets is `trix.css` — `action_text-trix` ships it,
-    // and Rails links it on every Action Text app's pages. The app-tree
-    // evidence that Trix is in the bundle is its own importmap pin
-    // (campfire: `pin "trix"`); inserted in sorted position because the
-    // expansion is alphabetical, and skipped when the app carries its
-    // own copy. The Makefile generator emits the copy-from-gem rule for
-    // exactly this stem (`apply_makefile_asset_list`).
+    // ship stylesheets, and the `:all` expansion links those too — ONLY
+    // `:all`: `:app` is the app's own stylesheets, which is why real-blog
+    // (`stylesheet_link_tag :app`) links no `trix.css` although its
+    // bundle has the gem. So a layout must write `:all` before any gem's
+    // stems join the list.
+    // `action_text-trix` ships `trix.css`, which Rails links on every
+    // Action Text app's pages; `lexxy` ships four (its engine adds its
+    // `app/assets/stylesheets` to the path), and Rails links those on
+    // campfire's since the Lexxy merge — alongside `trix.css`, whose gem
+    // Action Text still depends on. The lockfile is the evidence a gem is
+    // in the bundle; a tree without one falls back to Trix's importmap
+    // pin (campfire before Lexxy: `pin "trix"`). Inserted in sorted
+    // position by FILENAME, because the expansion sorts paths —
+    // `lexxy-content.css` before `lexxy.css`, where the bare stems would
+    // sort the other way — and skipped when the app carries its own
+    // copy. The Makefile generator emits the copy-from-gem rule for each
+    // (`apply_makefile_asset_list`).
     let pins_trix = app
         .importmap
         .iter()
         .flat_map(|m| &m.pins)
         .any(|p| p.name == "trix");
-    if pins_trix && !stylesheets.iter().any(|s| s == "trix") {
-        let pos = stylesheets
-            .iter()
-            .position(|s| s.as_str() > "trix")
-            .unwrap_or(stylesheets.len());
-        stylesheets.insert(pos, "trix".to_string());
+    let links_all = layouts_link_all_stylesheets(vfs, dir);
+    for (gem, stems) in crate::gems::GEM_STYLESHEETS {
+        if !links_all {
+            continue;
+        }
+        let bundled = match app.gem_lock.as_ref() {
+            Some(lock) => lock.has(gem) || (*gem == "action_text-trix" && pins_trix),
+            None => *gem == "action_text-trix" && pins_trix,
+        };
+        if !bundled {
+            continue;
+        }
+        for stem in *stems {
+            if stylesheets.iter().any(|s| s == stem) {
+                continue;
+            }
+            let file = format!("{stem}.css");
+            let pos = stylesheets
+                .iter()
+                .position(|s| format!("{s}.css") > file)
+                .unwrap_or(stylesheets.len());
+            stylesheets.insert(pos, stem.to_string());
+        }
     }
     app.stylesheets = stylesheets;
 
@@ -1387,6 +1413,10 @@ end
     // After everything that consumes a class-body call: what is still
     // an unrecognized macro is reported, not dropped in silence.
     report_unrecognized_controller_macros(&app);
+    // After every library class exists: the additions name constants
+    // (campfire's `ContentFilters::EDITOR_FORMATTING_ATTRIBUTES`) that
+    // are resolved to their literal here.
+    app.content_helper_allowed_attributes = content_helper_attribute_additions(vfs, dir, &app);
     fold_concern_enums_into_models(&mut app, &concern_enums);
     // Last: needs every model's complete `enums` table, including the
     // columns an included concern declared.
@@ -3737,6 +3767,166 @@ fn extract_module_mixins(source: &[u8], file: &str) -> Vec<crate::app::ModuleMix
         out.push(ModuleMixin { target: Symbol::from(target), module: Symbol::from(module), kind });
     }
     out
+}
+
+/// What the app's boot adds to `ActionText::ContentHelper.allowed_attributes`
+/// — the list Action Text's sanitizer (and campfire's `SanitizeAttributes`,
+/// which reads it) allows — as literals, in the order Rails' unions leave
+/// them.
+///
+/// Two contributors, read at compile time rather than replayed:
+///
+/// * The `lexxy` gem, when the lockfile has it: its engine's
+///   `lexxy.sanitization` initializer (0.9.24) sets the list to the
+///   defaults plus `controls poster data-language style value start`.
+/// * The app's own assignment, in a `config/initializers/` or `lib/` file
+///   (campfire's `lib/rails_ext/action_text_allowed_tags.rb`, required by
+///   an initializer), bare or inside `to_prepare`:
+///
+///   ```ruby
+///   ActionText::ContentHelper.allowed_attributes =
+///     (ActionText::ContentHelper.allowed_attributes || defaults.sanitizer_allowed_attributes) |
+///     ContentFilters::EDITOR_FORMATTING_ATTRIBUTES
+///   ```
+///
+///   The CURRENT value and the defaults are what the runtime already
+///   has; each other operand of `|` / `+` must be an Array literal or a
+///   constant holding one. Anything else is a survey gap — the addition
+///   is a computation this does not evaluate — rather than a guess.
+///
+/// (`allowed_tags` has the same shape and is not read: nothing in the
+/// runtime consults Action Text's tag list.)
+fn content_helper_attribute_additions<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &App) -> Vec<String> {
+    use crate::expr::{ExprNode, Literal};
+
+    let mut out: Vec<String> = Vec::new();
+    let add = |names: Vec<String>, out: &mut Vec<String>| {
+        for n in names {
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+    };
+    if app.gem_lock.as_ref().is_some_and(|l| l.has("lexxy")) {
+        add(
+            ["controls", "poster", "data-language", "style", "value", "start"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            &mut out,
+        );
+    }
+
+    fn string_list(e: &crate::expr::Expr) -> Option<Vec<String>> {
+        let ExprNode::Array { elements, .. } = &*e.node else { return None };
+        elements
+            .iter()
+            .map(|el| match &*el.node {
+                ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+    // The current value or the framework defaults — what the runtime's
+    // own list already is.
+    fn is_base(e: &crate::expr::Expr) -> bool {
+        match &*e.node {
+            ExprNode::Send { method, .. } => {
+                matches!(method.as_str(), "allowed_attributes" | "sanitizer_allowed_attributes")
+            }
+            ExprNode::BoolOp { left, right, .. } => is_base(left) && is_base(right),
+            ExprNode::Seq { exprs } if exprs.len() == 1 => is_base(&exprs[0]),
+            _ => false,
+        }
+    }
+    fn operands<'a>(e: &'a crate::expr::Expr, acc: &mut Vec<&'a crate::expr::Expr>) {
+        match &*e.node {
+            ExprNode::Send { recv: Some(l), method, args, block: None, .. }
+                if matches!(method.as_str(), "|" | "+") && args.len() == 1 =>
+            {
+                operands(l, acc);
+                operands(&args[0], acc);
+            }
+            ExprNode::Seq { exprs } if exprs.len() == 1 => operands(&exprs[0], acc),
+            _ => acc.push(e),
+        }
+    }
+    let resolve = |e: &crate::expr::Expr| -> Option<Vec<String>> {
+        if let Some(list) = string_list(e) {
+            return Some(list);
+        }
+        let ExprNode::Const { path } = &*e.node else { return None };
+        let (last, owner) = path.split_last()?;
+        let owner = owner.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+        let lc = app.library_classes.iter().find(|lc| lc.name.0.as_str() == owner)?;
+        let (_, value) = lc.constants.iter().find(|(n, _)| n == last)?;
+        string_list(value)
+    };
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    for sub in ["config/initializers", "lib"] {
+        let d = dir.join(sub);
+        if vfs.is_dir(&d) {
+            files.extend(read_rb_files(vfs, &d).unwrap_or_default());
+        }
+    }
+    for entry in files {
+        let Ok(bytes) = vfs.read(&entry) else { continue };
+        let file = entry.display().to_string();
+        let result = super::prism::parse(&bytes, &file);
+        let src = String::from_utf8_lossy(&bytes).into_owned();
+        let root = result.node();
+        let Some(program) = root.as_program_node() else { continue };
+        for stmt in initializer_statements(&program) {
+            let Some(call) = stmt.as_call_node() else { continue };
+            if super::util::constant_id_str(&call.name()) != "allowed_attributes=" {
+                continue;
+            }
+            let Some(recv) = call.receiver() else { continue };
+            if constant_text(&recv, &src).as_deref() != Some("ActionText::ContentHelper") {
+                continue;
+            }
+            let Some(args) = call.arguments() else { continue };
+            let args: Vec<_> = args.arguments().iter().collect();
+            let [arg] = args.as_slice() else { continue };
+            let Ok(value) = super::expr::ingest_expr(arg, &file) else { continue };
+            let mut ops = Vec::new();
+            operands(&value, &mut ops);
+            for op in ops {
+                if is_base(op) {
+                    continue;
+                }
+                match resolve(op) {
+                    Some(list) => add(list, &mut out),
+                    None => survey::record(&IngestError::Unsupported {
+                        file: file.clone(),
+                        message: "ActionText::ContentHelper.allowed_attributes addition is not a literal list or a constant holding one; the attributes it adds are not allowed by the emitted sanitizer".to_string(),
+                    }),
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Does a layout write `stylesheet_link_tag :all` — the expansion that
+/// walks the whole asset path, gems' stylesheets included? Read off the
+/// layout SOURCES: views are not ingested yet where the stylesheet list
+/// is built, and the call is a literal wherever an app writes it.
+fn layouts_link_all_stylesheets<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> bool {
+    let layouts = dir.join("app/views/layouts");
+    if !vfs.is_dir(&layouts) {
+        return false;
+    }
+    let Ok(entries) = vfs.read_dir(&layouts) else { return false };
+    entries.iter().any(|entry| {
+        vfs.read_to_string(entry)
+            .map(|src| {
+                src.contains("stylesheet_link_tag :all")
+                    || src.contains("stylesheet_link_tag(:all")
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// Top-level statements, plus the body of any `to_prepare`/`to_run`

@@ -1552,6 +1552,7 @@ mod tests {
             route_helper_arity: Default::default(),
             form_wrappers: Default::default(),
             stylesheets: Vec::new(),
+            lexxy: false,
             partial_ivars: Default::default(),
             multipart_partials: Default::default(),
             dyn_pools: Default::default(),

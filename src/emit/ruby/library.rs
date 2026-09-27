@@ -5545,32 +5545,11 @@ fn emit_library_class_decl_inner(
     // where the class body read it. Non-aggregated anchors (runtime/*,
     // app/views, app/controllers/*, test/fixtures/*) keep their
     // requires — nothing else loads those.
-    let mut load_const_paths: BTreeSet<Vec<String>> = BTreeSet::new();
-    for (_, value) in &lc.constants {
-        walk_const_paths(value, &mut load_const_paths);
-    }
-    // A class-body CALL runs while the file is being required, for the
-    // same reason a constant initializer does — it is a statement in
-    // the class body. A DSL macro reads its arguments' constants at
-    // that moment: `handles(Failures::TourNotFound, with: …)` in a
-    // resolver's body needs `Failures::TourNotFound` loaded already,
-    // and got no require for it. The source app never noticed because
-    // Rails autoloads; the emitted tree stopped there with an
-    // `uninitialized constant`.
-    for call in &lc.unknown_calls {
-        walk_const_paths(call, &mut load_const_paths);
-    }
-    let mut body_const_paths: BTreeSet<Vec<String>> = BTreeSet::new();
-    for m in &lc.methods {
-        walk_const_paths(&m.body, &mut body_const_paths);
-    }
-    let mut body_requires: BTreeSet<String> = BTreeSet::new();
-    for path in load_const_paths.iter().chain(&body_const_paths) {
-        let load_time = load_const_paths.contains(path);
-        let first = match path.first() {
-            Some(s) => s,
-            None => continue,
-        };
+    // Resolve one referenced constant path to the require it needs, or
+    // None: no anchor, this file itself, or a body-only ref into
+    // `app/models/*` (which the aggregator loads).
+    let resolve = |path: &Vec<String>, load_time: bool| -> Option<String> {
+        let first = path.first()?;
         // Synthesized siblings (`<Model>Row`, `<Resource>Params`,
         // `<Plural>Fixtures`) match by exact first-segment name; deeper
         // paths (`X::Y`) don't match here since synthesized classes are
@@ -5581,15 +5560,83 @@ fn emit_library_class_decl_inner(
             .iter()
             .find(|(n, _)| n == first)
             .map(|(_, a)| a.clone())
-            .or_else(|| require_path_for_body_const(path, app, name));
-        let Some(anchor) = anchor else { continue };
+            .or_else(|| require_path_for_body_const(path, app, name))?;
         if !load_time && !load_time_bodies && anchor.starts_with("app/models/") {
-            continue;
+            return None;
         }
-        if anchor != self_anchor {
-            body_requires.insert(relpath(&out_dir, &anchor));
+        (anchor != self_anchor).then(|| relpath(&out_dir, &anchor))
+    };
+    let resolve_all = |e: &Expr, load_time: bool| -> BTreeSet<String> {
+        let mut paths: BTreeSet<Vec<String>> = BTreeSet::new();
+        walk_const_paths(e, &mut paths);
+        paths.iter().filter_map(|p| resolve(p, load_time)).collect()
+    };
+    // Every require the file needs at its TOP: the class-body calls and
+    // deferred constants (both run at load), and the method bodies.
+    let mut body_requires: BTreeSet<String> = BTreeSet::new();
+    for call in &lc.unknown_calls {
+        body_requires.extend(resolve_all(call, true));
+    }
+    for &i in &deferred {
+        body_requires.extend(resolve_all(&lc.constants[i].1, true));
+    }
+    for m in &lc.methods {
+        body_requires.extend(resolve_all(&m.body, false));
+    }
+    // …and each eager constant's own, in order, because WHERE those go
+    // matters. A class body runs top to bottom, and a required file can
+    // read this one's earlier constants — campfire's `ContentFilters`
+    // defines `EDITOR_FORMATTING_TAGS`, then builds
+    // `TextMessagePresentationFilters` from `SanitizeTags`, whose own
+    // class body reads `ContentFilters::EDITOR_FORMATTING_TAGS`. Rails
+    // autoloads `SanitizeTags` at that reference, after the constant
+    // exists; a require at the top of the file ran it first, and
+    // `require_relative`'s mid-load short-circuit left the constant
+    // undefined. So the first constant (after at least one other) that
+    // needs a file nothing earlier needs SPLITS the body: the file
+    // closes, requires what the rest needs, and reopens. Spinel splices
+    // a `require_relative` where it stands, so both lanes read the
+    // same order.
+    //
+    // Only when there IS such a reader: a split for a file that never
+    // looks at this class's constants is churn (lobsters' `Markdowner`
+    // requiring `user`), so the trigger is a required file whose own
+    // load-time code reads one of the constants above it.
+    let per_const: Vec<BTreeSet<String>> =
+        eager.iter().map(|&i| resolve_all(&lc.constants[i].1, true)).collect();
+    let readers = constant_readers(lc, app, &resolve);
+    let mut split: Option<(usize, BTreeSet<String>)> = None;
+    for p in 1..per_const.len() {
+        let mut before: BTreeSet<String> = body_requires.clone();
+        before.extend(requires.iter().cloned());
+        for q in &per_const[..p] {
+            before.extend(q.iter().cloned());
+        }
+        let earlier: BTreeSet<&String> = eager[..p]
+            .iter()
+            .filter_map(|&i| readers.get(lc.constants[i].0.as_str()))
+            .flatten()
+            .collect();
+        if per_const[p].iter().any(|r| !before.contains(r) && earlier.contains(r)) {
+            let rest: BTreeSet<String> = per_const[p..]
+                .iter()
+                .flatten()
+                .filter(|r| !before.contains(*r))
+                .cloned()
+                .collect();
+            split = Some((p, rest));
+            break;
         }
     }
+    for (p, reqs) in per_const.iter().enumerate() {
+        for r in reqs {
+            let deferred_here = split.as_ref().is_some_and(|(at, rest)| p >= *at && rest.contains(r));
+            if !deferred_here {
+                body_requires.insert(r.clone());
+            }
+        }
+    }
+    body_requires.retain(|r| !requires.contains(r));
     requires.extend(body_requires);
     for r in &requires {
         writeln!(s, "require_relative {r:?}").unwrap();
@@ -5652,28 +5699,31 @@ fn emit_library_class_decl_inner(
         }
     };
 
-    if lc.is_module {
-        // Modules don't take a parent; ingest already enforces this.
-        for (i, seg) in segments.iter().enumerate() {
-            let header = if i < depth - 1 {
-                outer_header(i, seg)
-            } else {
-                format!("module {seg}")
-            };
-            writeln!(s, "{}{header}", "  ".repeat(i)).unwrap();
+    let open_header = |s: &mut String| {
+        if lc.is_module {
+            // Modules don't take a parent; ingest already enforces this.
+            for (i, seg) in segments.iter().enumerate() {
+                let header = if i < depth - 1 {
+                    outer_header(i, seg)
+                } else {
+                    format!("module {seg}")
+                };
+                writeln!(s, "{}{header}", "  ".repeat(i)).unwrap();
+            }
+        } else {
+            // Outer segments (if any) are namespace modules; the last is the class.
+            for (i, seg) in segments.iter().take(depth - 1).enumerate() {
+                writeln!(s, "{}{}", "  ".repeat(i), outer_header(i, seg)).unwrap();
+            }
+            let last = segments[depth - 1];
+            let pad = "  ".repeat(depth - 1);
+            match lc.parent.as_ref() {
+                Some(p) => writeln!(s, "{pad}class {last} < {}", p.0.as_str()).unwrap(),
+                None => writeln!(s, "{pad}class {last}").unwrap(),
+            }
         }
-    } else {
-        // Outer segments (if any) are namespace modules; the last is the class.
-        for (i, seg) in segments.iter().take(depth - 1).enumerate() {
-            writeln!(s, "{}{}", "  ".repeat(i), outer_header(i, seg)).unwrap();
-        }
-        let last = segments[depth - 1];
-        let pad = "  ".repeat(depth - 1);
-        match lc.parent.as_ref() {
-            Some(p) => writeln!(s, "{pad}class {last} < {}", p.0.as_str()).unwrap(),
-            None => writeln!(s, "{pad}class {last}").unwrap(),
-        }
-    }
+    };
+    open_header(&mut s);
 
     for inc in &lc.includes {
         writeln!(s, "{body_pad}include {}", inc.0.as_str()).unwrap();
@@ -5712,7 +5762,22 @@ fn emit_library_class_decl_inner(
             }
         }
     };
-    render_constants(&mut s, &eager);
+    match &split {
+        Some((at, reqs)) => {
+            render_constants(&mut s, &eager[..*at]);
+            for i in (0..depth).rev() {
+                writeln!(s, "{}end", "  ".repeat(i)).unwrap();
+            }
+            writeln!(s).unwrap();
+            for r in reqs {
+                writeln!(s, "require_relative {r:?}").unwrap();
+            }
+            writeln!(s).unwrap();
+            open_header(&mut s);
+            render_constants(&mut s, &eager[*at..]);
+        }
+        None => render_constants(&mut s, &eager),
+    }
     if !eager.is_empty() && !lc.methods.is_empty() {
         writeln!(s).unwrap();
     }
@@ -5769,6 +5834,55 @@ fn emit_library_class_decl_inner(
     }
 
     EmittedFile { path: out_path, content: s }
+}
+
+/// For each of `lc`'s constants, the requires (as `resolve` spells them
+/// from `lc`'s file) of the OTHER library classes whose load-time code —
+/// constant initializers and class-body calls — reads it: qualified
+/// (`ContentFilters::EDITOR_FORMATTING_TAGS`), or bare from a class
+/// nested inside `lc` (which finds it lexically).
+fn constant_readers(
+    lc: &LibraryClass,
+    app: &App,
+    resolve: &dyn Fn(&Vec<String>, bool) -> Option<String>,
+) -> std::collections::HashMap<String, BTreeSet<String>> {
+    let own = lc.name.0.as_str();
+    let own_segs: Vec<&str> = own.split("::").collect();
+    let names: std::collections::HashSet<&str> =
+        lc.constants.iter().map(|(n, _)| n.as_str()).collect();
+    let mut out: std::collections::HashMap<String, BTreeSet<String>> =
+        std::collections::HashMap::new();
+    for other in &app.library_classes {
+        let other_name = other.name.0.as_str();
+        if other_name == own {
+            continue;
+        }
+        let nested = other_name.starts_with(&format!("{own}::"));
+        let mut paths: BTreeSet<Vec<String>> = BTreeSet::new();
+        for (_, v) in &other.constants {
+            walk_const_paths(v, &mut paths);
+        }
+        for call in &other.unknown_calls {
+            walk_const_paths(call, &mut paths);
+        }
+        for path in &paths {
+            let read = match path.split_last() {
+                Some((last, prefix)) if names.contains(last.as_str()) => {
+                    prefix.iter().map(String::as_str).eq(own_segs.iter().copied())
+                        || (nested && prefix.is_empty())
+                }
+                _ => false,
+            };
+            if !read {
+                continue;
+            }
+            let other_path: Vec<String> = other_name.split("::").map(str::to_string).collect();
+            if let Some(req) = resolve(&other_path, true) {
+                out.entry(path.last().unwrap().clone()).or_default().insert(req);
+            }
+        }
+    }
+    out
 }
 
 /// Split a class's constants into the ones that can be initialized
@@ -6327,9 +6441,14 @@ fn relpath(from_dir: &Path, to_anchor: &str) -> String {
         .filter(|s| !s.is_empty())
         .collect();
     let to_parts: Vec<&str> = to_anchor.split('/').filter(|s| !s.is_empty()).collect();
+    // The anchor's LAST segment is a file, never a shared directory:
+    // `app/models/content_filters/sanitize_tags.rb` requiring its own
+    // namespace module `app/models/content_filters` matched every
+    // segment and wrote `require_relative ""` instead of
+    // "../content_filters".
     let common = from_parts
         .iter()
-        .zip(&to_parts)
+        .zip(&to_parts[..to_parts.len().saturating_sub(1)])
         .take_while(|(a, b)| a == b)
         .count();
     let ups = from_parts.len() - common;

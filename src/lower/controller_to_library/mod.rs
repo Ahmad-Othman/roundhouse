@@ -1584,8 +1584,17 @@ fn body_calls_method(body: &Expr, name: &Symbol) -> bool {
     found
 }
 
-/// Rewrite a receiverless `render(formats: :X)` — and nothing else in
-/// the call — to `render(:<template>, format: :X)`.
+/// Rewrite a receiverless OPTIONS-ONLY render — `formats:` and/or
+/// `layout:`, nothing else — to `render(:<template>, <options>)`.
+///
+/// Both options say "this action's own template, rendered this way":
+/// `formats: :svg` in another format (respelled as the internal singular
+/// `format:` marker), `layout: false` without the layout (kept as is —
+/// the Ruby emit's layout pass honors and strips it, as it does for a
+/// partial). campfire's autocompletion endpoint answers its Lexxy mention
+/// prompt with `format.html { render layout: false }` since the Lexxy
+/// merge; left alone, that `render` reached `Base#render(body, …)` with
+/// no body and raised on every HTML request.
 fn resolve_formats_only_render(e: &mut Expr, template: &Symbol) {
     e.node.for_each_child_mut(&mut |c| resolve_formats_only_render(c, template));
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &mut *e.node else {
@@ -1595,34 +1604,29 @@ fn resolve_formats_only_render(e: &mut Expr, template: &Symbol) {
         return;
     }
     let ExprNode::Hash { entries, kwargs: true } = &*args[0].node else { return };
-    let [(k, v)] = &entries[..] else { return };
-    let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { return };
-    if key.as_str() != "formats" {
+    if entries.is_empty() {
         return;
     }
-    let ExprNode::Lit { value: Literal::Sym { value: fmt } } = &*v.node else { return };
     let span = e.span;
+    let sym = |s: &str| Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from(s) } });
+    let mut options: Vec<(Expr, Expr)> = Vec::new();
+    for (k, v) in entries {
+        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { return };
+        match key.as_str() {
+            "formats" => {
+                let ExprNode::Lit { value: Literal::Sym { value: fmt } } = &*v.node else { return };
+                options.push((sym("format"), sym(fmt.as_str())));
+            }
+            "layout" => options.push((k.clone(), v.clone())),
+            _ => return,
+        }
+    }
     let template_arg = Expr::new(
         span,
         ExprNode::Lit { value: Literal::Sym { value: template.clone() } },
     );
-    let format_kwargs = Expr::new(
-        span,
-        ExprNode::Hash {
-            entries: vec![(
-                Expr::new(
-                    span,
-                    ExprNode::Lit { value: Literal::Sym { value: Symbol::from("format") } },
-                ),
-                Expr::new(
-                    span,
-                    ExprNode::Lit { value: Literal::Sym { value: fmt.clone() } },
-                ),
-            )],
-            kwargs: true,
-        },
-    );
-    *args = vec![template_arg, format_kwargs];
+    let options = Expr::new(span, ExprNode::Hash { entries: options, kwargs: true });
+    *args = vec![template_arg, options];
 }
 
 /// The params spec an OVERRIDING `<x>_params` helper should yield —

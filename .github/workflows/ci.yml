@@ -22,7 +22,7 @@ env:
   # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
-  CAMPFIRE_SHA: f8e36e9761eceb0f22d79910ca9d6fb6d7235dad
+  CAMPFIRE_SHA: 9a258bd1a099e842d32d4dd2b0408aaa959114d4
 
 jobs:
   # -------------------------------------------------------------------
@@ -1248,6 +1248,20 @@ jobs:
       # first of four steps across upstream's Lexxy merge (`9a258bd`),
       # taken alone so each step's fallout is its own. Measured 396 of
       # 396, 68 of 68 files, on both lanes (spinel 3bc554dc).
+      #
+      # `9a258bd1` (2026-09-26) is the Lexxy merge (#224): the editor
+      # replaces Trix. The second of four steps, alone. What it took: the
+      # gem's editor markup (one `<lexxy-editor>` holding the call's block,
+      # no hidden input); its sanitizer allow-list and campfire's own,
+      # read off their boot; its stylesheets and `lexxy.js` built from the
+      # gem; `render layout: false` and a bare `format.json` in the new
+      # autocompletion arms; a namespace split so `ContentFilters`' constant
+      # exists before `SanitizeTags` reads it; bare helper calls in an
+      # `ActionView::TestCase`; `Rails::HTML5::SafeListSanitizer` on spinel;
+      # and the newline Action Text's `_content` partial ends with. An
+      # allowed `style` is DROPPED on spinel (no CSS scrubber; ledgered).
+      # Measured 406 of 406, 69 of 69 files, on both lanes (spinel
+      # 3bc554dc), campfire-compare green on both, room page included.
       #
       # 300 of 300 -> 342 of 397 (2026-09-20), the SAME campfire: the
       # ingest had only ever read `test/models` and `test/controllers`,

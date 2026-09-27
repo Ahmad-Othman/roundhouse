@@ -51,7 +51,7 @@ module ActionView
     # `auto_link` and its scanner. `html` is the caller's attribute hash
     # (campfire passes `{ target: "_blank" }`) — one element type, not a
     # bag; `link` is `:all` / `:urls` / `:email_addresses`.
-    def self.auto_link: (String text, ?html: Hash[Symbol, String], ?link: Symbol, ?sanitize: bool) -> String
+    def self.auto_link: (String text, ?html: Hash[Symbol, String], ?link: Symbol, ?sanitize: bool, ?sanitize_options: Hash[Symbol, Array[String]]) -> String
     def self.auto_link_anchor_open?: (String tag) -> bool
     def self.auto_link_anchor_close?: (String tag) -> bool
     def self.auto_link_url_length: (String s, Integer i) -> Integer

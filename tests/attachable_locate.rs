@@ -292,7 +292,9 @@ fn the_attachment_render_is_a_case_over_the_attachables_with_a_partial() {
     );
     assert!(!runtime.contains("when \"Room\""), "Room names no partial:\n{runtime}");
     assert!(
-        runtime.contains("Views::Layouts::ActionText::Contents.content(render_attachments)"),
+        // Plus the newline ending Action Text's `_content` partial, which
+        // is what the layout yields.
+        runtime.contains("Views::Layouts::ActionText::Contents.content(render_attachments + \"\\n\")"),
         "the layout wraps the rendered nodes:\n{runtime}"
     );
 }

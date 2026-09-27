@@ -388,11 +388,21 @@ module ActionView
     # `title`, `textarea`, `xmp`, `iframe`, `noembed`, `noframes`,
     # `plaintext`), foreign content (`svg`, `math`), or `template`
     # raises — parsing INSIDE those is a different grammar and serving
-    # it wrong is a mutation-XSS vector — as does allowing the `style`
-    # ATTRIBUTE, whose value wants the CSS sanitizer. No caller in the
-    # corpus asks for any of them; Rails itself deletes `mglyph` and
-    # `malignmark` from caller lists (namespace confusion), which this
-    # port does too, silently, as the gem does.
+    # it wrong is a mutation-XSS vector. No caller in the corpus asks for
+    # any of them; Rails itself deletes `mglyph` and `malignmark` from
+    # caller lists (namespace confusion), which this port does too,
+    # silently, as the gem does.
+    #
+    # The `style` ATTRIBUTE is the one allowance served by DROPPING it.
+    # Its value wants Loofah's CSS scrubber (`scrub_css`, over the Crass
+    # tokenizer), which is not ported, and keeping it unscrubbed would be
+    # the unsafe direction; so an allowed `style` is removed from every
+    # element instead, where the gem keeps the declarations its CSS
+    # safe-list passes. The lexxy gem allows it (its engine adds `style`
+    # to Action Text's list, for the editor's highlight colours), which is
+    # how campfire reaches this: on a lane that runs the gem sanitizer
+    # (CRuby) a message's inline styles survive, on this one they do
+    # not. Ledgered in docs/pipeline/runtime.md.
     def self.sanitize(html)
       sanitize_engine(html.to_s, sanitize_default_tags, sanitize_default_attributes)
     end
@@ -516,13 +526,11 @@ module ActionView
       ai = 0
       while ai < attributes.length
         a = attributes[ai].to_s.downcase
-        if a == "style"
-          raise NotImplementedError,
-                "ActionView::ViewHelpers.sanitize: the style attribute wants the " \
-                "CSS sanitizer, which is not modelled — see " \
-                "runtime/ruby/action_view/view_helpers_ext.rb"
-        end
-        attrs.push(a) if a != "" && !attrs.include?(a)
+        # An allowed `style` is left OUT of the list: its value wants
+        # Loofah's CSS scrubber, which is not ported, so the attribute is
+        # dropped where the gem would keep its safe declarations —
+        # stricter, never looser. See the note above `sanitize`.
+        attrs.push(a) if a != "" && a != "style" && !attrs.include?(a)
         ai = ai + 1
       end
 
@@ -1135,12 +1143,24 @@ module ActionView
     # NOT MODELLED: the block form (`auto_link(text) { |url| ... }`,
     # which rewrites the link TEXT). No corpus call site passes one, and
     # a block argument through the strict targets is a shape this file
-    # has no other use for. `sanitize_options:` likewise: the pass runs
-    # with the default lists.
-    def self.auto_link(text, html: {}, link: :all, sanitize: true)
+    # has no other use for.
+    #
+    # `sanitize_options: { tags:, attributes: }` replaces the pass's
+    # lists, each falling back to the default when absent — the gem hands
+    # them to the same sanitizer. campfire passes both (the Lexxy merge:
+    # `MessagesHelper::AUTO_LINK_ALLOWED_TAGS`, the defaults plus the
+    # editor's `s`, `u`, `mark`, table markup and `data-language`); with
+    # the defaults alone every `<pre data-language>` lost its language.
+    def self.auto_link(text, html: {}, link: :all, sanitize: true, sanitize_options: {})
       s = text.to_s
       return "" if s.empty?
-      s = sanitize(s) if sanitize
+      if sanitize
+        s = sanitize_allowing(
+          s,
+          sanitize_options.fetch(:tags, sanitize_default_tags),
+          sanitize_options.fetch(:attributes, sanitize_default_attributes)
+        )
+      end
       return "" if s.empty?
       do_urls = link != :email_addresses
       do_emails = link != :urls

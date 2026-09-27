@@ -168,6 +168,18 @@ fn is_void_element(name: &str) -> bool {
     )
 }
 
+/// A CUSTOM element's method name: `tag.lexxy_prompt` builds
+/// `<lexxy-prompt>`, Rails' proxy turning each `_` into the `-` a custom
+/// element's name must contain (the HTML spec requires one). That hyphen
+/// is what makes the rule closed where "any name" would not be: a name
+/// with no `_` is not a custom element, so `tag.foo` still declines.
+/// campfire's `mention_prompt_tag` (the Lexxy merge) is the first.
+fn is_custom_element(name: &str) -> bool {
+    name.contains('_')
+        && name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
 /// Is this an HTML element name we are willing to build?
 ///
 /// Rails' proxy answers ANY name (`tag.foo_bar` → `<foo-bar>`, its
@@ -324,11 +336,14 @@ fn rewrite(
     if !is_tag_helper(recv) {
         return;
     }
-    let name = method.as_str().to_string();
-    if !is_html_element(&name) {
-        diags.push(residue(expr, &format!("`{name}` is not a known HTML element")));
-        return;
-    }
+    let name = match method.as_str() {
+        n if is_html_element(n) => n.to_string(),
+        n if is_custom_element(n) => n.replace('_', "-"),
+        n => {
+            diags.push(residue(expr, &format!("`{n}` is not a known HTML element")));
+            return;
+        }
+    };
 
     // Split the arguments Rails' way: a trailing Hash is the attributes,
     // anything before it is the content.

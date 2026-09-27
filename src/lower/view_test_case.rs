@@ -42,12 +42,39 @@ const VIEW_TEST_CASE: &str = "ActionView::TestCase";
 
 pub fn apply_view_test_case_lowering(app: &mut App) -> Vec<Diagnostic> {
     let index: HashMap<Symbol, ClassId> = app.helper_method_index.clone();
+    // Each app module's own methods, for the bare-call half below.
+    let module_methods: HashMap<ClassId, std::collections::HashSet<Symbol>> = app
+        .library_classes
+        .iter()
+        .filter(|lc| lc.is_module)
+        .map(|lc| (lc.name.clone(), lc.methods.iter().map(|m| m.name.clone()).collect()))
+        .collect();
     let mut diags = Vec::new();
     for tm in &mut app.test_modules {
         if !tm.parent.as_ref().is_some_and(|p| p.0.as_str() == VIEW_TEST_CASE) {
             continue;
         }
-        let mut rewrite = |e: &mut Expr| rewrite(e, &index, &mut diags);
+        // BARE calls resolve on the test instance, which is not `view`:
+        // Rails mixes into the test class only the helper its name
+        // names (`RichTextHelperTest` -> `RichTextHelper`) and the
+        // modules the class body `include`s (`ContentFiltersTest`'s
+        // `include MessagesHelper`). Later includes win, as Ruby's
+        // ancestor order has it; the test's own methods win over all.
+        let mut bare_modules: Vec<ClassId> = tm.includes.iter().rev().cloned().collect();
+        bare_modules.extend(tm.target.iter().cloned());
+        let own: std::collections::HashSet<Symbol> =
+            tm.helpers.iter().map(|m| m.name.clone()).collect();
+        let bare: HashMap<Symbol, ClassId> = bare_modules
+            .iter()
+            .rev()
+            .filter_map(|m| module_methods.get(m).map(|ms| (m, ms)))
+            .flat_map(|(m, ms)| ms.iter().map(move |name| (name.clone(), m.clone())))
+            .filter(|(name, _)| !own.contains(name))
+            .collect();
+        let mut rewrite = |e: &mut Expr| {
+            rewrite(e, &index, &mut diags);
+            rewrite_bare(e, &bare);
+        };
         if let Some(setup) = &mut tm.setup {
             rewrite(setup);
         }
@@ -82,6 +109,26 @@ fn rewrite(e: &mut Expr, index: &HashMap<Symbol, ClassId>, diags: &mut Vec<Diagn
         diags.push(d);
         return;
     };
+    *recv = Some(Expr::new(
+        span,
+        ExprNode::Const {
+            path: module.0.as_str().split("::").map(Symbol::from).collect(),
+        },
+    ));
+}
+
+/// `editable_body(message)` -> `RichTextHelper.editable_body(message)`:
+/// a receiverless call the test class's mixed-in helpers define, bound
+/// to the module the way a `view.` call is. (`bare` is built with the
+/// winning module last, so the collect's last-writer-wins is Ruby's.)
+fn rewrite_bare(e: &mut Expr, bare: &HashMap<Symbol, ClassId>) {
+    e.node.for_each_child_mut(&mut |c| rewrite_bare(c, bare));
+    let span = e.span;
+    let ExprNode::Send { recv, method, .. } = &mut *e.node else { return };
+    if recv.is_some() {
+        return;
+    }
+    let Some(module) = bare.get(method) else { return };
     *recv = Some(Expr::new(
         span,
         ExprNode::Const {
@@ -150,6 +197,31 @@ mod tests {
         let out = lowered(&app);
         assert!(out.contains("MessagesHelper.message_presentation(message)"), "{out}");
         assert!(out.contains("TimeHelper.local_datetime_tag(t)"), "{out}");
+    }
+
+    /// A BARE call resolves on the test instance: the helper the class
+    /// is named for, and what it `include`s — Rails' mixins for an
+    /// `ActionView::TestCase`, not every helper as `view` has.
+    #[test]
+    fn a_bare_call_binds_the_namesake_or_an_included_helper() {
+        let src = "class RichTextHelperTest < ActionView::TestCase\n  include MessagesHelper\n  test \"t\" do\n    a = editable_body(m)\n    b = message_presentation(m)\n    c = unrelated(m)\n  end\nend\n";
+        let mut mods = crate::ingest::test::ingest_test_files(src.as_bytes(), "t.rb").expect("ingest");
+        let mut app = App::new();
+        app.test_modules.push(mods.remove(0));
+        for module in [
+            "module RichTextHelper\n  def editable_body(m)\n    m\n  end\nend\n",
+            "module MessagesHelper\n  def message_presentation(m)\n    m\n  end\nend\n",
+            "module OtherHelper\n  def unrelated(m)\n    m\n  end\nend\n",
+        ] {
+            app.library_classes.extend(
+                crate::ingest::ingest_library_classes(module.as_bytes(), "h.rb").expect("helper"),
+            );
+        }
+        apply_view_test_case_lowering(&mut app);
+        let out = lowered(&app);
+        assert!(out.contains("RichTextHelper.editable_body(m)"), "{out}");
+        assert!(out.contains("MessagesHelper.message_presentation(m)"), "{out}");
+        assert!(out.contains("c = unrelated(m)"), "not mixed in, so not bound:\n{out}");
     }
 
     /// `ActionView::Base`'s own surface is a gap, reported and left.

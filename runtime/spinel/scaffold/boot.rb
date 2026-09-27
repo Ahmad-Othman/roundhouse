@@ -153,6 +153,10 @@ require_relative "runtime/resolv_spinel"
 # Spinel-only Nokogiri read path: reopens the façade's Document/Element
 # over the ActionText::Fragment scanner. CRuby/JRuby load the gem.
 require_relative "runtime/nokogiri_spinel"
+# Spinel-only `Rails::HTML5::SafeListSanitizer` lists (the gem's class on
+# CRuby/JRuby). Before app/models: campfire's `MessagesHelper` builds
+# constants from them at load.
+require_relative "runtime/rails_html_sanitizer_spinel"
 # Spinel-only ERB::Util shim (html_escape) — CRuby/JRuby get it from the
 # stdlib Rails loads. After action_controller, whose require chain defines
 # the ActionView::ViewHelpers.html_escape this delegates to.

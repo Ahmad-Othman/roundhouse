@@ -31,6 +31,7 @@
 # Attachments wrap Active Storage blobs (a filename is an
 # `ActiveStorage::Filename`), as in Rails.
 require_relative "active_storage"
+require_relative "json_builder"
 
 module ActionText
   # The marker a model mixes in to say "I can be attached to rich text"
@@ -465,6 +466,17 @@ module ActionText
 
     def inner_html
       @inner
+    end
+
+    # Nokogiri's `node.at_css(selector)`: the first descendant matching
+    # it, or nil. A READ — the node answered is detached, as
+    # `Fragment#find_all`'s are — because the one caller asks only
+    # whether a paragraph holds an attachment: campfire's
+    # `RemoveSoloUnfurledLinkText#remove_link_paragraphs` (the Lexxy
+    # merge) keeps a `<p>` when `node.at_css("action-text-attachment")`.
+    def at_css(selector)
+      found = Fragment.new(@inner).find_all(selector)
+      found.empty? ? nil : found[0]
     end
 
     # Nokogiri's `inner_html=`: the children replaced by `markup`, the
@@ -1673,6 +1685,36 @@ end
 # falls back to `sanitizer_class.allowed_attributes + Attachment::
 # ATTRIBUTES`. Both halves are reproduced rather than guessed.
 module ActionText
+  # The `value` Lexxy's editor tag carries, from the rich text's stored
+  # HTML: lexxy 0.9's `render_custom_attachments_in`, which the gem runs
+  # on every editor it renders (`lexxy/rich_text_area_tag.rb`). Each
+  # `<action-text-attachment>` without a `url` gets its rendered partial
+  # in `content`, as JSON, and keeps (or gets) its `content-type` — the
+  # editor rebuilds mentions and embeds from those two attributes. nil
+  # when the body is blank, which omits the attribute, as Rails does
+  # for a new message.
+  #
+  # `content` is JSON-encoded by `JsonBuilder`, which escapes what JSON
+  # requires and not `<`, `>`, `&` as ActiveSupport's encoder also does.
+  # The editor `JSON.parse`s the attribute, so both spellings read as
+  # the same string there; the bytes of the attribute differ.
+  #
+  # Written against `css`'s BOUND nodes rather than `replace`'s block:
+  # each write splices the fragment at its node's offset, so the nodes
+  # are visited last-first and every earlier offset stays true.
+  def self.lexxy_editor_value(html)
+    return nil if html.strip.empty?
+    fragment = Fragment.new(html)
+    fragment.css(Attachment.tag_name).reverse.each do |node|
+      if node["url"].to_s.empty?
+        attachment = Attachment.from_node(node)
+        node["content"] = JsonBuilder.encode_value(Content.render_attachment(attachment))
+        node["content-type"] = attachment.content_type if node["content-type"].nil?
+      end
+    end
+    fragment.to_html
+  end
+
   module ContentHelper
     # The list Action Text sanitizes with — the sanitizer's own set plus
     # the attachment attributes, which is what `sanitizer_allowed_
@@ -1694,9 +1736,23 @@ module ActionText
     # failed to LINK on it. The VALUES are identical either way, so no
     # app that uses the list can tell; only one that asks whether it is
     # nil can, and none does.
+    #
+    # Plus what the APP adds at boot, which Rails keeps in the same
+    # `mattr_accessor`: campfire's `lib/rails_ext/action_text_allowed_tags.rb`
+    # unions in `ContentFilters::EDITOR_FORMATTING_ATTRIBUTES`, and the
+    # lexxy gem's engine adds its own (`data-language`, `style`, …). Both
+    # are read at compile time (`ingest::app::content_helper_attribute_
+    # additions`) into the generated list below — the value, not a
+    # replay of the initializer.
     def self.allowed_attributes
-      SafeListSanitizer.allowed_attributes + Attachment::ATTRIBUTES
+      SafeListSanitizer.allowed_attributes + Attachment::ATTRIBUTES + app_allowed_attributes
     end
+
+    # >>> generated: content-helper-attributes
+    def self.app_allowed_attributes
+      []
+    end
+    # <<< generated: content-helper-attributes
 
     def self.sanitizer
       SafeListSanitizer.new

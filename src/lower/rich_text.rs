@@ -282,6 +282,34 @@ fn push_record_methods(methods: &mut Vec<MethodDef>, model: &Model) {
         },
     );
 
+    // def body_before_type_cast; @body.to_s; end
+    //
+    // The column as stored — HTML, not the Content `body` wraps it in.
+    // Rails' attribute API answers it for every column; this is the one
+    // anything asks for, and the one whose reader is not the raw value:
+    // campfire's `editable_body` (the Lexxy merge) re-parses
+    // `message.body.body_before_type_cast` to rebuild each attachment
+    // before the editor sees it, and lexxy's own tag helper does the
+    // same. `to_s` for a record whose body was never written.
+    replace_or_push(
+        methods,
+        model,
+        MethodDef {
+            name_span: crate::span::Span::synthetic(),
+            name: Symbol::from("body_before_type_cast"),
+            receiver: MethodReceiver::Instance,
+            params: Vec::new(),
+            body: no_arg_send(ivar("body"), "to_s"),
+            signature: Some(fn_sig(vec![], Ty::Str)),
+            effects: crate::effect::EffectSet::default(),
+            enclosing_class: Some(model.name.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        },
+    );
+
     // `delegate :to_s, :nil?, to: :body` plus RichText's own
     // `to_plain_text` and the `blank?`/`empty?`/`present?` trio it
     // delegates to that. Each forwards to the Content the reader

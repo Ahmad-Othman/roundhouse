@@ -2165,6 +2165,37 @@ fn apply_cable_connection(files: &mut [(String, String)], app: &App) {
 /// the Attachment, which delegates to the record, and campfire's
 /// `users/_mention` reads only record methods. A model whose partial
 /// the tree does not have gets no arm.
+/// `ActionText::ContentHelper.app_allowed_attributes` — the attributes the
+/// app's boot adds to Action Text's sanitizer allow-list, read at ingest
+/// (`App::content_helper_allowed_attributes`) and spelled here as the
+/// literal the runtime's `allowed_attributes` appends. An app that adds
+/// none keeps the default body's `[]`.
+fn apply_content_helper_attributes(files: &mut [(String, String)], app: &App) {
+    const HEAD: &str = "    # >>> generated: content-helper-attributes\n";
+    const TAIL: &str = "    # <<< generated: content-helper-attributes\n";
+    if app.content_helper_allowed_attributes.is_empty() {
+        return;
+    }
+    let list = app
+        .content_helper_allowed_attributes
+        .iter()
+        .map(|a| format!("{a:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let body = format!("{HEAD}    def self.app_allowed_attributes\n      [{list}]\n    end\n{TAIL}");
+    for (path, content) in files.iter_mut() {
+        if !path.ends_with("runtime/action_text.rb") {
+            continue;
+        }
+        if let Some(start) = content.find(HEAD) {
+            if let Some(rel_end) = content[start..].find(TAIL) {
+                let end = start + rel_end + TAIL.len();
+                content.replace_range(start..end, &body);
+            }
+        }
+    }
+}
+
 fn apply_content_layout(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "    # >>> generated: content-layout\n";
     const TAIL: &str = "    # <<< generated: content-layout\n";
@@ -2177,9 +2208,16 @@ fn apply_content_layout(files: &mut [(String, String)], app: &App) {
     const BUILT_TAIL: &str = "    # <<< generated: attachable-by-content-type\n";
 
     let has_layout = files.iter().any(|(path, _)| path.ends_with(VIEW));
+    // What the layout YIELDS is Action Text's own partial,
+    // `action_text/contents/_content.html.erb`, rendered: `<%=
+    // render_action_text_content(content) %>` and the newline that
+    // ends that file. The app's layout then writes `<%= yield -%>`,
+    // whose `-` drops ITS newline, so the one before `</div>` is the
+    // partial's — `…boxes.\n</div>` on campfire's room page, where the
+    // emit wrote `…boxes.</div>` without it.
     let layout = format!(
         "{HEAD}    def rendered_html\n      \
-         Views::Layouts::ActionText::Contents.content(render_attachments)\n    end\n{TAIL}"
+         Views::Layouts::ActionText::Contents.content(render_attachments + \"\\n\")\n    end\n{TAIL}"
     );
 
     // Two kinds of arm, in the order campfire's own `from_node` reopen
@@ -3234,6 +3272,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         files.push(("sig/runtime/redirect_back.rbs".to_string(), rbs));
     }
 
+    // `Rails::HTML5::SafeListSanitizer` sidecar — runtime/
+    // rails_html_sanitizer_spinel.rb, which spinel's boot.rb alone loads.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/rails_html_sanitizer_spinel.rbs")
+            .map_err(|e| format!("read runtime/spinel/rails_html_sanitizer_spinel.rbs: {e}"))?;
+        files.push(("sig/runtime/rails_html_sanitizer_spinel.rbs".to_string(), rbs));
+    }
+
     // Forgery-check sidecar — the ActionController::Base reopen in
     // runtime/request_forgery_protection.rb (ruby family only).
     {
@@ -3548,6 +3594,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     apply_cable_connection(&mut files, app);
     apply_cable_channels(&mut files, app);
     apply_content_layout(&mut files, app);
+    apply_content_helper_attributes(&mut files, app);
     // The `only:`-as-finder specializations, also in the shared base:
     // `runtime/global_id_locator.rb` is ONE file that both the spinel
     // tree and the ruby overlay require, and the rewrite that names
@@ -4398,8 +4445,9 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
 /// `article_broadcasts_test` rode along into the blog's list that way.
 /// The prebuilt JS bundles that arrive from a gem rather than from the
 /// app's own tree, keyed by the filename an import map pins them as.
-/// Each is `<gem_dir>/app/assets/javascripts/<file>`, which is why the
-/// generated rule can be a one-liner naming only the gem.
+/// Each is `<gem_dir>/<dir>/<file>` — `app/assets/javascripts` for the
+/// Rails gems; `app/assets/javascript`, singular, for `lexxy`, which is
+/// where that gem keeps its editor bundle.
 ///
 /// Filename-keyed rather than gem-keyed because that is the direction
 /// the lookup runs: a pin gives a served path, and the question is which
@@ -4407,20 +4455,23 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
 /// are listed for the same reason the `to:` kwarg exists at all: the
 /// blog pins `turbo.min.js` and campfire pins `turbo.js`, and neither
 /// spelling is more canonical than the other.
-const GEM_JS_BUNDLES: &[(&str, &str)] = &[
-    ("turbo.js", "turbo-rails"),
-    ("turbo.min.js", "turbo-rails"),
-    ("stimulus.js", "stimulus-rails"),
-    ("stimulus.min.js", "stimulus-rails"),
-    ("stimulus-loading.js", "stimulus-rails"),
-    ("stimulus-autoloader.js", "stimulus-rails"),
-    ("stimulus-importmap-autoloader.js", "stimulus-rails"),
-    ("actioncable.esm.js", "actioncable"),
-    ("actioncable.js", "actioncable"),
-    ("action_cable.js", "actioncable"),
-    ("actiontext.js", "actiontext"),
-    ("actiontext.esm.js", "actiontext"),
+const GEM_JS_BUNDLES: &[(&str, &str, &str)] = &[
+    ("turbo.js", "turbo-rails", RAILS_JS),
+    ("turbo.min.js", "turbo-rails", RAILS_JS),
+    ("stimulus.js", "stimulus-rails", RAILS_JS),
+    ("stimulus.min.js", "stimulus-rails", RAILS_JS),
+    ("stimulus-loading.js", "stimulus-rails", RAILS_JS),
+    ("stimulus-autoloader.js", "stimulus-rails", RAILS_JS),
+    ("stimulus-importmap-autoloader.js", "stimulus-rails", RAILS_JS),
+    ("actioncable.esm.js", "actioncable", RAILS_JS),
+    ("actioncable.js", "actioncable", RAILS_JS),
+    ("action_cable.js", "actioncable", RAILS_JS),
+    ("actiontext.js", "actiontext", RAILS_JS),
+    ("actiontext.esm.js", "actiontext", RAILS_JS),
+    ("lexxy.js", "lexxy", "app/assets/javascript"),
+    ("lexxy.min.js", "lexxy", "app/assets/javascript"),
 ];
+const RAILS_JS: &str = "app/assets/javascripts";
 
 /// De-blog the scaffold Makefile's `ASSET_JS` list and its gem-bundle
 /// rules, the way `apply_makefile_test_list` does for `SPINEL_TESTS`.
@@ -4480,14 +4531,14 @@ fn apply_makefile_asset_list(files: &mut [(String, String)], app: &App) {
     let has = |p: &str| files.iter().any(|(path, _)| path == p);
 
     let mut targets: Vec<String> = Vec::new();
-    let mut gems: Vec<(String, String)> = Vec::new();
+    let mut gems: Vec<(String, String, String)> = Vec::new();
     let mut unsourced: Vec<String> = Vec::new();
     for rel in &rels {
         if has(&format!("app/javascript/{rel}")) || has(&format!("vendor/javascript/{rel}")) {
             targets.push(rel.clone());
-        } else if let Some((_, gem)) = GEM_JS_BUNDLES.iter().find(|(file, _)| file == rel) {
+        } else if let Some((_, gem, gem_dir)) = GEM_JS_BUNDLES.iter().find(|(file, _, _)| file == rel) {
             targets.push(rel.clone());
-            gems.push((rel.clone(), (*gem).to_string()));
+            gems.push((rel.clone(), (*gem).to_string(), (*gem_dir).to_string()));
         } else {
             unsourced.push(rel.clone());
         }
@@ -4518,35 +4569,44 @@ fn apply_makefile_asset_list(files: &mut [(String, String)], app: &App) {
 
     let mut rules = gems
         .iter()
-        .map(|(file, gem)| {
+        .map(|(file, gem, gem_dir)| {
             format!(
                 "$(ASSETS)/{file}:\n\
                  \t@mkdir -p $(dir $@)\n\
-                 \tcp \"$$(bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q({gem})).gem_dir')/app/assets/javascripts/{file}\" $@"
+                 \tcp \"$$(bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q({gem})).gem_dir')/{gem_dir}/{file}\" $@"
             )
         })
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    // The one CSS a gem ships in this corpus: `trix.css`, from
-    // `action_text-trix`. Ingest inserts the `trix` stem into
-    // `app.stylesheets` when the importmap pins Trix (the page links it
-    // because Rails' `:all` expansion walks gem asset paths), so
-    // `ASSET_CSS` names `$(ASSETS)/trix.css` — and with no
-    // `app/assets/**/trix.css` for the pattern rules to copy, the stem
-    // needs the same explicit copy-from-gem rule the JS bundles get.
-    let needs_gem_trix_css = app.stylesheets.iter().any(|s| s == "trix")
-        && !has("app/assets/stylesheets/trix.css")
-        && !has("app/assets/builds/trix.css");
-    if needs_gem_trix_css {
-        if !rules.is_empty() {
-            rules.push_str("\n\n");
+    // CSS a GEM ships (`crate::gems::GEM_STYLESHEETS`: `trix.css` from
+    // `action_text-trix`, Lexxy's four from `lexxy`). Ingest puts each
+    // stem in `app.stylesheets` when the bundle has the gem (the page
+    // links it because Rails' `:all` expansion walks gem asset paths), so
+    // `ASSET_CSS` names `$(ASSETS)/<stem>.css` — and with no
+    // `app/assets/**/<stem>.css` for the pattern rules to copy, each needs
+    // the same explicit copy-from-gem rule the JS bundles get.
+    let mut css_gems: Vec<&str> = Vec::new();
+    for (gem, stems) in crate::gems::GEM_STYLESHEETS {
+        for stem in *stems {
+            let needed = app.stylesheets.iter().any(|s| s == stem)
+                && !has(&format!("app/assets/stylesheets/{stem}.css"))
+                && !has(&format!("app/assets/builds/{stem}.css"));
+            if !needed {
+                continue;
+            }
+            if !rules.is_empty() {
+                rules.push_str("\n\n");
+            }
+            rules.push_str(&format!(
+                "$(ASSETS)/{stem}.css:\n\
+                 \t@mkdir -p $(dir $@)\n\
+                 \tcp \"$$(bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q({gem})).gem_dir')/app/assets/stylesheets/{stem}.css\" $@"
+            ));
+            if !css_gems.contains(gem) {
+                css_gems.push(gem);
+            }
         }
-        rules.push_str(
-            "$(ASSETS)/trix.css:\n\
-             \t@mkdir -p $(dir $@)\n\
-             \tcp \"$$(bundle exec ruby -e 'puts Gem::Specification.find_by_name(%q(action_text-trix)).gem_dir')/app/assets/stylesheets/trix.css\" $@",
-        );
     }
 
     apply_makefile_asset_blocks(files, BLOG_LIST, &list, &rules);
@@ -4559,17 +4619,19 @@ fn apply_makefile_asset_list(files: &mut [(String, String)], app: &App) {
     // `find_by_name` rather than at the copy — an error naming Bundler,
     // three steps from the import map that actually asked for the file.
     let mut names: Vec<&str> = Vec::new();
-    for (_, gem) in &gems {
+    for (_, gem, _) in &gems {
         if !names.contains(&gem.as_str()) {
             names.push(gem);
         }
     }
-    // The trix.css rule shells out to the same `find_by_name`, so its
-    // gem rides the same group. (`actiontext` already depends on it,
-    // but naming it keeps rule and bundle agreeing by construction
-    // rather than by transitivity.)
-    if needs_gem_trix_css && !names.contains(&"action_text-trix") {
-        names.push("action_text-trix");
+    // The stylesheet rules shell out to the same `find_by_name`, so
+    // their gems ride the same group. (`actiontext` already depends on
+    // `action_text-trix`, but naming it keeps rule and bundle agreeing
+    // by construction rather than by transitivity.)
+    for gem in css_gems {
+        if !names.contains(&gem) {
+            names.push(gem);
+        }
     }
     apply_gemfile_asset_group(files, &names);
 }
@@ -6964,10 +7026,12 @@ mod tests {
         let out = &files[0].1;
         // Over `render_attachments`, not `@html`: the attachment
         // nodes are rendered before the layout wraps them, as Rails'
-        // `render_action_text_attachments` runs first.
+        // `render_action_text_attachments` runs first. Plus the newline
+        // that ends Action Text's own `_content` partial, which is what
+        // the layout yields.
         assert!(
             out.contains(
-                "    def rendered_html\n      Views::Layouts::ActionText::Contents.content(render_attachments)\n    end\n"
+                "    def rendered_html\n      Views::Layouts::ActionText::Contents.content(render_attachments + \"\\n\")\n    end\n"
             ),
             "generated dispatch not written:\n{out}"
         );

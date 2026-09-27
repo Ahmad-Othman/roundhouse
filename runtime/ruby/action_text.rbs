@@ -5,6 +5,10 @@
 # rule is the whole reason the scanner returns a flat
 # `Hash[String, String]` per tag rather than a pair or a variant.
 module ActionText
+  def self.lexxy_editor_value: (String html) -> String?
+end
+
+module ActionText
   module Attachable
     # Redefined per app in the emitted tree's global_id_locator.rb —
     # see the module's note in action_text.rb.
@@ -69,6 +73,7 @@ module ActionText
     def name: () -> String
     def []: (String key) -> String?
     def []=: (String key, String value) -> void
+    def at_css: (String selector) -> Node?
     def attributes: () -> Hash[String, String]
     def inner_html: () -> String
     def inner_html=: (String markup) -> void
@@ -158,6 +163,7 @@ end
 module ActionText
   module ContentHelper
     def self.allowed_attributes: () -> Array[String]
+    def self.app_allowed_attributes: () -> Array[String]
     def self.sanitizer: () -> ActionText::SafeListSanitizer
   end
 

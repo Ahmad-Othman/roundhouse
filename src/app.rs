@@ -84,10 +84,19 @@ pub struct App {
     pub rbs_includes: HashMap<ClassId, Vec<ClassId>>,
     /// The app's `Gemfile.lock`, parsed, when the tree carries one.
     /// Read at ingest for the gem census ([`crate::gems`]) and the
-    /// unknown-gem attribution of diagnostics; nothing in analysis or
-    /// emit keys off it.
+    /// unknown-gem attribution of diagnostics, and by the view lowering
+    /// for the one gem that changes a framework helper's markup: `lexxy`
+    /// replaces Action Text's `rich_text_area`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gem_lock: Option<crate::gems::Lockfile>,
+    /// Attributes the app (and its gems) add to Action Text's sanitizer
+    /// allow-list at boot — `ActionText::ContentHelper.allowed_attributes`
+    /// as the initializers leave it, minus the framework defaults the
+    /// runtime already has. Resolved to literals at ingest
+    /// (`ingest::app::content_helper_attribute_additions`); rendered into
+    /// the runtime's generated `ContentHelper.app_allowed_attributes`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_helper_allowed_attributes: Vec<String>,
     /// Call-site-unified parameter types, written by the analyzer's
     /// fixpoint (`unify_params_from_call_sites`) as its last act and
     /// read by lowerings that build method signatures — the controller
@@ -643,6 +652,7 @@ impl App {
             rbs_signatures: HashMap::new(),
             rbs_includes: HashMap::new(),
             gem_lock: None,
+            content_helper_allowed_attributes: Vec::new(),
             inferred_method_params: HashMap::new(),
             helper_method_index: HashMap::new(),
             view_visible_controller_methods: BTreeSet::new(),

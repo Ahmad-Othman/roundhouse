@@ -67,6 +67,7 @@ pub(super) fn emit_form_builder_inline(
             positional.first().copied(),
             opts.as_slice(),
             binding,
+            None,
             ctx,
         ),
         FormBuilderMethod::Submit => emit_submit(
@@ -1129,6 +1130,15 @@ pub(super) fn emit_form_builder_block_inline(
         FormBuilderMethod::FieldsFor => {
             emit_fields_for(binding, &positional, params, body, ctx)
         }
+        // Lexxy's editor takes a block — its children, campfire's
+        // `<lexxy-prompt>` for mentions. Trix's helper takes none.
+        FormBuilderMethod::RichTextArea if ctx.lexxy => Some(emit_rich_text_area(
+            positional.first().copied(),
+            opts.as_slice(),
+            binding,
+            Some((params.as_slice(), body)),
+            ctx,
+        )),
         // Every other builder method is blockless in the corpus.
         _ => None,
     }
@@ -1676,8 +1686,12 @@ fn emit_rich_text_area(
     field: Option<&Expr>,
     opts: &[(Expr, Expr)],
     binding: &FormBuilderBinding,
+    block: Option<(&[Symbol], &Expr)>,
     ctx: &ViewCtx,
 ) -> Vec<Expr> {
+    if ctx.lexxy {
+        return emit_lexxy_editor(field, opts, binding, block, ctx);
+    }
     let Some(field_sym) = field_symbol(field) else {
         return vec![accumulator_append_call(lit_str(String::new()), ctx)];
     };
@@ -1771,6 +1785,152 @@ fn emit_rich_text_area(
         value: format!("></{EDITOR_TAG}>"),
     });
     vec![accumulator_append_call(string_interp(parts), ctx)]
+}
+
+/// `form.rich_text_area :body [, opts] [do … end]` under the `lexxy`
+/// gem, which swaps Action Text's helper for its own
+/// (`lexxy/rich_text_area_tag.rb`, `action_text_tag.rb` — the path Rails
+/// without `ActionText::Editor` takes, campfire's). One element, no
+/// hidden input:
+///
+/// ```html
+/// <lexxy-editor <opts, the upload URLs inside data:> id="message_body"
+///   input="message_body_trix_input_message" name="message[body]"
+///   [value="…"] [class="lexxy-content"]>…the block…</lexxy-editor>
+/// ```
+///
+/// The ORDER is the gem's, traced from its option hash: the call's
+/// options as written (the two upload URLs appended into its `data:`),
+/// then `id` and `input` (`add_default_name_and_id`, the Trix-era input
+/// name kept), then `name`, then `value`, `class` and `data` only when
+/// the call did not give them — each a `||=` onto the hash. Measured
+/// against campfire's room page under Rails.
+///
+/// `value` is the record's rich text through
+/// `ActionText.lexxy_editor_value` (the gem's
+/// `render_custom_attachments_in`), omitted when blank — a new
+/// message's composer carries none. An explicit `value:` String passes
+/// through; anything else is taken to be rich text, as the gem does
+/// with whatever answers `body`.
+fn emit_lexxy_editor(
+    field: Option<&Expr>,
+    opts: &[(Expr, Expr)],
+    binding: &FormBuilderBinding,
+    block: Option<(&[Symbol], &Expr)>,
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let Some(field_sym) = field_symbol(field) else {
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    };
+    let field_str = field_sym.as_str();
+    let editor_id = super::field_id(&binding.id_prefix, &binding.model_name, field_str);
+    let name = if binding.model_name.is_empty() {
+        field_str.to_string()
+    } else {
+        format!("{}[{field_str}]", binding.model_name)
+    };
+
+    let mut opts = opts.to_vec();
+    let rich_text_value = |rich_text: Expr| {
+        let html = send(Some(rich_text), "body_before_type_cast", Vec::new(), None, false);
+        send(
+            Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Const { path: vec![Symbol::from("ActionText")] },
+            )),
+            "lexxy_editor_value",
+            vec![html],
+            None,
+            true,
+        )
+    };
+    let value = match super::attr_parts::take_opt(&mut opts, "value") {
+        Some(v) if matches!(v.ty, Some(crate::ty::Ty::Str)) => Some(v),
+        Some(v) => Some(rich_text_value(v)),
+        None if binding.model_name.is_empty() => None,
+        None => {
+            let record_ref = Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: VarId(0), name: binding.record_var.clone() },
+            );
+            Some(rich_text_value(send(Some(record_ref), field_str, Vec::new(), None, false)))
+        }
+    };
+
+    // The two upload URLs ride in `data:` — the call's own hash when it
+    // wrote one, where they render after its entries.
+    let upload_url = |path: &str| {
+        string_interp(vec![
+            InterpPart::Text { value: "http://".to_string() },
+            InterpPart::Expr { expr: rails_domain_expr() },
+            InterpPart::Text { value: path.to_string() },
+        ])
+    };
+    let sym = |s: &str| {
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Sym { value: Symbol::from(s) } })
+    };
+    let url_entries = vec![
+        (sym("direct_upload_url"), upload_url(DIRECT_UPLOAD_URL)),
+        (sym("blob_url_template"), upload_url(BLOB_URL_TEMPLATE)),
+    ];
+    let has_class = opts.iter().any(|(k, _)| is_sym(k, "class"));
+    let mut data_in_opts = false;
+    for (k, v) in opts.iter_mut() {
+        if is_sym(k, "data") {
+            if let ExprNode::Hash { entries, .. } = &mut *v.node {
+                entries.extend(url_entries.iter().cloned());
+                data_in_opts = true;
+            }
+        }
+    }
+
+    let input_id = match binding.model_name.is_empty() {
+        true => InterpPart::Text { value: format!("{editor_id}_trix_input") },
+        false => {
+            let record = Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: VarId(0), name: binding.record_var.clone() },
+            );
+            InterpPart::Expr {
+                expr: view_helpers_call(
+                    "dom_id",
+                    vec![record, sym(&format!("{editor_id}_trix_input"))],
+                ),
+            }
+        }
+    };
+
+    let mut parts: Vec<InterpPart> = vec![InterpPart::Text { value: "<lexxy-editor".to_string() }];
+    append_attr_parts(&mut parts, &opts);
+    parts.push(InterpPart::Text { value: format!(" id=\"{editor_id}\" input=\"") });
+    parts.push(input_id);
+    parts.push(InterpPart::Text { value: format!("\" name=\"{name}\"") });
+    if let Some(value) = value {
+        parts.push(InterpPart::Expr { expr: view_helpers_call("optional_value_attr", vec![value]) });
+    }
+    if !has_class {
+        parts.push(InterpPart::Text { value: " class=\"lexxy-content\"".to_string() });
+    }
+    if !data_in_opts {
+        let data = Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash { entries: url_entries, kwargs: false },
+        );
+        append_attr_parts(&mut parts, &[(sym("data"), data)]);
+    }
+    parts.push(InterpPart::Text { value: ">".to_string() });
+
+    let mut out = vec![accumulator_append_call(string_interp(parts), ctx)];
+    if let Some((params, body)) = block {
+        let inner = ctx.with_locals(params.iter().map(|p| p.as_str().to_string()));
+        out.extend(walk_body(body, &inner));
+    }
+    out.push(accumulator_append_call(lit_str("</lexxy-editor>".to_string()), ctx));
+    out
+}
+
+fn is_sym(e: &Expr, name: &str) -> bool {
+    matches!(&*e.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == name)
 }
 
 /// `Rails.application.domain` as an Expr — the host half of the

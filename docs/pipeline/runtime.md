@@ -2622,9 +2622,20 @@ never less:
   remaps it to its Windows-1252 character first and allows it.
 
 The refusal that remains, narrowed to where it is honest: an allow-list
-naming a rawtext/foreign/template container, or the `style` attribute
-(the CSS sanitizer), raises `NotImplementedError`. No corpus caller
-does either. The CRuby overlay keeps binding the real gem.
+naming a rawtext/foreign/template container raises `NotImplementedError`.
+No corpus caller does. The CRuby overlay keeps binding the real gem.
+
+**An allowed `style` attribute is DROPPED, not served.** Its value wants
+Loofah's CSS scrubber (`scrub_css` over the Crass tokenizer), which is
+not ported; keeping it unscrubbed is the unsafe direction, so the port
+leaves `style` out of the allow-list and removes it from every element,
+where the gem keeps the declarations its CSS safe-list passes. This used
+to raise, and nothing reached it until campfire's Lexxy merge (`9a258bd`):
+the lexxy gem's engine adds `style` to Action Text's attribute list, and
+the raise inside campfire's `rescue Exception` rendered EVERY message
+body on the spinel binary as `""`. On CRuby (the gem) a message's inline
+styles survive; on spinel they do not. Porting the CSS scrubber closes
+this.
 
 **Act two: `h()` must not escape the chain's product.** With the raise
 gone, the body rendered as its own ESCAPED source: campfire's

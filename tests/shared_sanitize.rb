@@ -300,6 +300,14 @@ check.("the one-argument form uses the gem's default tables",
 check.("tagless input is served unchanged through the default form",
        V.sanitize("plain title"), "plain title")
 
+# An ALLOWED `style` is dropped rather than served: its value wants the
+# CSS scrubber, which is not ported, and dropping is the safe direction.
+# (The lexxy gem allows it; it used to raise, and campfire's rescue turned
+# the raise into an empty message body on this lane.)
+check.("an allowed style attribute is dropped, the rest kept",
+       V.sanitize_allowing("<p class=\"a\" style=\"color:red\">x</p>", ["p"], ["class", "style"]),
+       "<p class=\"a\">x</p>")
+
 refused = lambda do |label, &blk|
   begin
     blk.call
@@ -314,9 +322,6 @@ refused.("an allow-list naming script is refused") do
 end
 refused.("an allow-list naming svg is refused") do
   V.sanitize_allowing("<p>x</p>", ["p", "svg"], ["class"])
-end
-refused.("allowing the style attribute is refused") do
-  V.sanitize_allowing("<p>x</p>", ["p"], ["class", "style"])
 end
 
 if fail_count == 0

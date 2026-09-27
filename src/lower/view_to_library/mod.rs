@@ -663,6 +663,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         route_helper_arity: lx.route_helper_arity.clone(),
         form_wrappers: lx.form_wrappers.clone(),
         stylesheets: app.stylesheets.clone(),
+        lexxy: app.gem_lock.as_ref().is_some_and(|lock| lock.has("lexxy")),
         partial_ivars: closures.clone(),
         dyn_pools: dyn_pools.clone(),
         multipart_partials: lx.multipart_partials.clone(),
@@ -3963,6 +3964,12 @@ pub(super) struct ViewCtx {
     /// ...)` expansion: a `:app` symbol arg fans out to one call per
     /// stylesheet, mirroring how Rails' Propshaft resolves `:app`.
     pub(super) stylesheets: Vec<String>,
+    /// The app's rich-text editor is Lexxy — the `lexxy` gem is in its
+    /// Gemfile.lock. Rails' `rich_text_area` then renders one
+    /// `<lexxy-editor>` holding the call's block, where Trix renders a
+    /// hidden input beside an empty `<trix-editor>` (the gem swaps the
+    /// helper; `form_builder::emit_rich_text_area` follows it).
+    pub(super) lexxy: bool,
     /// Render-tree ivar closure (`view_ivar_closures`), shared across this
     /// view's scopes. `emit_render_partial` looks up a rendered partial's
     /// needed ivars here and passes them as call-site args (the caller's

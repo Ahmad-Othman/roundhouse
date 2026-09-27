@@ -1,0 +1,9 @@
+# Typing for runtime/spinel/rails_html_sanitizer_spinel.rb.
+module Rails
+  module HTML5
+    class SafeListSanitizer
+      def self.allowed_tags: () -> Array[String]
+      def self.allowed_attributes: () -> Array[String]
+    end
+  end
+end

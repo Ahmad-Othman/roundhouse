@@ -118,8 +118,10 @@ fn a_local_named_tag_is_not_the_builder() {
 
 #[test]
 fn unknown_element_name_declines_and_ledgers() {
-    let (out, diags) = helper("tag.not_an_element class: \"x\"");
-    assert!(out.contains("not_an_element"), "call should survive:\n{out}");
+    // No `_`, so not a custom element (see
+    // `an_underscored_name_builds_its_custom_element`): an unknown name.
+    let (out, diags) = helper("tag.frobnicate class: \"x\"");
+    assert!(out.contains("tag.frobnicate"), "call should survive:\n{out}");
     assert_eq!(diags, 1, "an unknown element should be ledgered");
 }
 
@@ -249,4 +251,15 @@ fn button_to_with_computed_options_declines() {
     end"#);
     assert!(out.contains("button_to \""), "computed options should decline:\n{out}");
     assert!(!out.contains("<form action="), "declined site must not expand:\n{out}");
+}
+
+#[test]
+fn an_underscored_name_builds_its_custom_element() {
+    // Rails' proxy spells `tag.lexxy_prompt` `<lexxy-prompt>`: a custom
+    // element's name must hold a hyphen, which is why an `_` is the
+    // signal. campfire's `mention_prompt_tag` (the Lexxy merge).
+    let (out, diags) = helper(r#"tag.lexxy_prompt trigger: "@", name: "mention""#);
+    assert!(out.contains("<lexxy-prompt trigger="), "{out}");
+    assert!(out.contains("></lexxy-prompt>"), "{out}");
+    assert_eq!(diags, 0, "{out}");
 }

@@ -354,7 +354,11 @@ fn json_arm_drop_reason(
     if !with_format_dispatch {
         return Some("this emit path does not dispatch on request_format");
     }
-    if breadth.json_any || is_simple_render_sym(branch_body) || is_encoded_render(branch_body) {
+    // A BARE `format.json` (empty body) renders the action's own JSON
+    // template — the simplest render there is, and exactly what a
+    // `render :sym` arm would bind.
+    let bare = matches!(&*branch_body.node, ExprNode::Seq { exprs } if exprs.is_empty());
+    if bare || breadth.json_any || is_simple_render_sym(branch_body) || is_encoded_render(branch_body) {
         return None;
     }
     Some("inline `render json: <expr>` needs an encoder this tree has none for")

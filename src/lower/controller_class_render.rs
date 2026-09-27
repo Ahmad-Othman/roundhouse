@@ -55,12 +55,7 @@ pub fn apply_controller_class_render(app: &mut App) {
     let none = std::collections::HashSet::new();
     super::for_each_hook_body(app, &mut |e| rewrite(e, &contracts, &none));
     for tm in &mut app.test_modules {
-        let builders: std::collections::HashSet<Symbol> = tm
-            .helpers
-            .iter()
-            .filter(|h| builds_attachment(&h.body))
-            .map(|h| h.name.clone())
-            .collect();
+        let builders = attachment_builders(&tm.helpers);
         if let Some(setup) = &mut tm.setup {
             rewrite(setup, &contracts, &attachment_locals(setup, &builders));
         }
@@ -75,16 +70,62 @@ pub fn apply_controller_class_render(app: &mut App) {
     }
 }
 
-/// Does this body end in `ActionText::Attachment.from_node(…)` — the
-/// constructor, so whatever calls the method holds an Attachment?
-fn builds_attachment(body: &Expr) -> bool {
-    let tail = match &*body.node {
-        ExprNode::Seq { exprs } => match exprs.last() {
-            Some(e) => e,
-            None => return false,
-        },
+/// The test class's helpers that hand back attachments, split into the
+/// ones returning ONE and the ones returning an Array of them.
+///
+/// A helper returns one when its tail is `ActionText::Attachment.
+/// from_node(…)` — the constructor — or a receiverless call to another
+/// such helper; an Array when its tail is an Array literal of those
+/// calls. Iterated to a fixed point, because the helpers chain: campfire
+/// rewrote its opengraph test at the Lexxy merge so that
+/// `attachments_for` answers `[attribute_attachment_for(…),
+/// content_attachment_for(…)]`, each of which ends in
+/// `attachment_from(…)`, which ends in `from_node`.
+struct Builders {
+    one: std::collections::HashSet<Symbol>,
+    many: std::collections::HashSet<Symbol>,
+}
+
+impl Builders {
+    fn is_empty(&self) -> bool {
+        self.one.is_empty() && self.many.is_empty()
+    }
+}
+
+fn attachment_builders(helpers: &[crate::dialect::MethodDef]) -> Builders {
+    let mut b = Builders { one: Default::default(), many: Default::default() };
+    loop {
+        let before = (b.one.len(), b.many.len());
+        for h in helpers {
+            let tail = tail_of(&h.body);
+            if builds_attachment(tail) || calls_builder(tail, &b.one) {
+                b.one.insert(h.name.clone());
+            } else if let ExprNode::Array { elements, .. } = &*tail.node {
+                if !elements.is_empty() && elements.iter().all(|e| calls_builder(e, &b.one)) {
+                    b.many.insert(h.name.clone());
+                }
+            }
+        }
+        if (b.one.len(), b.many.len()) == before {
+            return b;
+        }
+    }
+}
+
+fn tail_of(body: &Expr) -> &Expr {
+    match &*body.node {
+        ExprNode::Seq { exprs } => exprs.last().unwrap_or(body),
         _ => body,
-    };
+    }
+}
+
+fn calls_builder(e: &Expr, builders: &std::collections::HashSet<Symbol>) -> bool {
+    matches!(&*e.node, ExprNode::Send { recv: None, method, .. } if builders.contains(method))
+}
+
+/// Is this expression `ActionText::Attachment.from_node(…)` — the
+/// constructor, so whatever returns it holds an Attachment?
+fn builds_attachment(tail: &Expr) -> bool {
     let ExprNode::Send { recv: Some(recv), method, .. } = &*tail.node else { return false };
     if method.as_str() != "from_node" {
         return false;
@@ -94,21 +135,26 @@ fn builds_attachment(body: &Expr) -> bool {
     joined == "ActionText::Attachment"
 }
 
-/// Locals in `body` assigned from a receiverless call to one of the
-/// attachment `builders`.
-fn attachment_locals(
-    body: &Expr,
-    builders: &std::collections::HashSet<Symbol>,
-) -> std::collections::HashSet<Symbol> {
+/// Locals in `body` holding an attachment: assigned from a call to a
+/// one-attachment builder, or the block parameter of `.map` / `.each`
+/// over a call to an Array one (`attachments_for(…).map do |attachment|`).
+fn attachment_locals(body: &Expr, builders: &Builders) -> std::collections::HashSet<Symbol> {
     let mut out = std::collections::HashSet::new();
     if builders.is_empty() {
         return out;
     }
-    fn walk(e: &Expr, builders: &std::collections::HashSet<Symbol>, out: &mut std::collections::HashSet<Symbol>) {
+    fn walk(e: &Expr, builders: &Builders, out: &mut std::collections::HashSet<Symbol>) {
         if let ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, value } = &*e.node {
-            if let ExprNode::Send { recv: None, method, .. } = &*value.node {
-                if builders.contains(method) {
-                    out.insert(name.clone());
+            if calls_builder(value, &builders.one) {
+                out.insert(name.clone());
+            }
+        }
+        if let ExprNode::Send { recv: Some(r), method, block: Some(b), .. } = &*e.node {
+            if matches!(method.as_str(), "map" | "each") && calls_builder(r, &builders.many) {
+                if let ExprNode::Lambda { params, .. } = &*b.node {
+                    if let [param] = params.as_slice() {
+                        out.insert(param.clone());
+                    }
                 }
             }
         }
@@ -125,6 +171,36 @@ type Contracts = std::collections::HashMap<
 
 fn rewrite(expr: &mut Expr, contracts: &Contracts, attachment_locals: &std::collections::HashSet<Symbol>) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, contracts, attachment_locals));
+    // `render_action_text_attachment(attachment)` — Action Text's own
+    // helper for the same render: `ActionText::ContentHelper`'s, which
+    // renders the attachment's partial with the attachment as its local.
+    // That is what the generated `Content.render_attachment` dispatch
+    // is, so the helper names it directly. campfire's `editable_body`
+    // (the Lexxy merge) calls it from a helper module, where it was an
+    // unbound method. A `locals:` second argument is not modeled and
+    // declines.
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
+        if method.as_str() == "render_action_text_attachment" && args.len() == 1 {
+            let span = expr.span;
+            let attachment = args[0].clone();
+            *expr = Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        span,
+                        ExprNode::Const {
+                            path: vec![Symbol::from("ActionText"), Symbol::from("Content")],
+                        },
+                    )),
+                    method: Symbol::from("render_attachment"),
+                    args: vec![attachment],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            return;
+        }
+    }
     let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*expr.node else {
         return;
     };
