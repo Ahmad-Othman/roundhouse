@@ -3234,6 +3234,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         files.push(("sig/runtime/redirect_back.rbs".to_string(), rbs));
     }
 
+    // Forgery-check sidecar — the ActionController::Base reopen in
+    // runtime/request_forgery_protection.rb (ruby family only).
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/request_forgery_protection.rbs")
+            .map_err(|e| format!("read runtime/spinel/request_forgery_protection.rbs: {e}"))?;
+        files.push(("sig/runtime/request_forgery_protection.rbs".to_string(), rbs));
+    }
+
     // Hash#to_query nesting sidecar — the reopen in
     // runtime/hash_to_query.rb renders a nested Hash/Array value as
     // Rails' bracket grammar; the .rbs keeps the reopened method's

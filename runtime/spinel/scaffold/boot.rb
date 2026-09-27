@@ -164,6 +164,9 @@ require_relative "runtime/hash_to_query"
 # `redirect_back_or_to` — a reopen of ActionController::Base reading the
 # parked request; ruby-family only (see the file).
 require_relative "runtime/redirect_back"
+# The real forgery check behind the shared `verify_authenticity_token`
+# — a reopen of ActionController::Base, ruby-family only (see the file).
+require_relative "runtime/request_forgery_protection"
 # An Array attribute value — Rails' space-joined form and the `class:`
 # conditional list — a reopen of the shared scalar `attr_value_text`,
 # for the same reason and at the same point as the line above.

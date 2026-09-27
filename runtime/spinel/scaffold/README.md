@@ -336,8 +336,12 @@ from this fixture:
 
 ### Security
 
-- **No CSRF tokens.** `ViewHelpers.csrf_meta_tags` emits stub meta
-  tags with empty content. Any form on the site is forgeable.
+- **CSRF is checked where the app declares it.** Forms and
+  `csrf_meta_tags` carry the session's token, and a controller under
+  `protect_from_forgery with: :exception` refuses a non-GET request
+  that does not present it (see the guide's
+  [security posture](https://github.com/rubys/roundhouse/blob/main/docs/guide/rails-coverage.md#security-posture)
+  for how this differs from Rails).
 - **No signed stream names.** ActionCable's
   `signed_stream_name` is treated as a literal stream name on both
   ends. Any WebSocket client can subscribe to any stream by name.

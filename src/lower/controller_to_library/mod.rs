@@ -35,6 +35,7 @@ use crate::dialect::{
     MethodDef, MethodReceiver, Param,
 };
 use crate::effect::EffectSet;
+use crate::ingest::controller::VERIFY_AUTHENTICITY_TOKEN;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
@@ -1285,8 +1286,12 @@ fn inline_before_filters(
 /// those (the blog shape) gets an empty preamble and a byte-identical
 /// dispatcher. `skip_before_action` targets anywhere in the chain drop
 /// the matching filter. A filter naming a method that resolves nowhere
-/// in the chain (a framework built-in like `verify_authenticity_token`)
-/// is dropped, matching the previous silently-skipped behavior.
+/// in the chain (a framework built-in) is dropped, matching the
+/// previous silently-skipped behavior — except
+/// `verify_authenticity_token`, the forgery check, which the ruby
+/// family's runtime defines (Rails' `default_protect_from_forgery`,
+/// which would also put it at the head of every chain, is gated off
+/// below).
 fn build_filter_preamble(
     controller: &Controller,
     all_controllers: &[Controller],
@@ -1363,6 +1368,13 @@ fn build_filter_preamble(
         let Some(f) = narrow(f) else { return };
         let f = &f;
         let Some(target) = find_target(&f.target) else {
+            // The one framework-defined target the chain carries: the
+            // ruby family's `Base#verify_authenticity_token`, which
+            // answers 422 on a forged request — so the chain halts
+            // after it.
+            if f.target.as_str() == VERIFY_AUTHENTICITY_TOKEN {
+                preamble.push(PreambleStmt::Call { filter: f.clone(), halt_check: true });
+            }
             return;
         };
         preamble.push(PreambleStmt::Call {
@@ -1378,6 +1390,39 @@ fn build_filter_preamble(
             ),
         });
     };
+
+    // Rails' default: `load_defaults` 5.2+ sets
+    // `default_protect_from_forgery`, and ActionController::Base then
+    // runs `protect_from_forgery with: :exception` on ITSELF — so the
+    // filter heads every chain rooted there, before anything the app
+    // declares. An app that writes the macro re-registers the same
+    // callback, which ActiveSupport moves to the new position (campfire
+    // declares it after `require_authentication`, so its `unless:
+    // bot_key?` sees who signed in); the default then yields to it.
+    // ActionController::API does not include the module.
+    //
+    // OFF, the `allow_browser` generator form's posture and for its
+    // reason: the default would put the call into every app, real-blog
+    // included, and real-blog is emitted for twelve targets of which
+    // only the ruby family defines `verify_authenticity_token` (the
+    // strict emitters compiled neither the method nor the dispatcher's
+    // call to it). An app that WRITES the macro — campfire — reaches
+    // only the ruby lanes and is protected; one that relies on the
+    // default is not, which the guide's security posture states. This
+    // is the switch when the strict runtimes carry the method.
+    const IMPLICIT_DEFAULT: bool = false;
+    let root_parent = chain.first().copied().unwrap_or(controller).parent.as_ref();
+    let redeclared = chain.iter().copied().chain(std::iter::once(controller)).any(|c| {
+        c.filters().any(|f| {
+            matches!(f.kind, FilterKind::Before) && f.target.as_str() == VERIFY_AUTHENTICITY_TOKEN
+        })
+    });
+    if IMPLICIT_DEFAULT
+        && root_parent.is_some_and(|p| p.0.as_str() == "ActionController::Base")
+        && !redeclared
+    {
+        push_call(&default_forgery_protection(), &mut preamble);
+    }
 
     // Ancestors and the controller itself walk the same way, in body
     // order, so a block-form filter on a parent — one written there, or
@@ -1430,6 +1475,26 @@ fn build_filter_preamble(
         }
     }
     (preamble, wraps)
+}
+
+/// The filter ActionController::Base registers on itself under Rails'
+/// `default_protect_from_forgery` — see `build_filter_preamble`.
+fn default_forgery_protection() -> Filter {
+    Filter {
+        kind: FilterKind::Before,
+        target: Symbol::from(VERIFY_AUTHENTICITY_TOKEN),
+        target_span: crate::span::Span::synthetic(),
+        from_concern: None,
+        only: Vec::new(),
+        except: Vec::new(),
+        only_style: Default::default(),
+        except_style: Default::default(),
+        if_cond: None,
+        unless_cond: None,
+        if_cond_expr: None,
+        unless_cond_expr: None,
+        block: None,
+    }
 }
 
 /// Method names ending in `_path` / `_url` that this controller or one

@@ -45,6 +45,20 @@ pub fn inquirer_methods(app: &App) -> HashSet<Symbol> {
             note(method);
         }
     }
+    // Controllers too: a concern's private methods are SPLICED into the
+    // controllers that include it, and campfire's `authenticated_by`
+    // (`@authenticated_by ||= "".inquiry`) is read from a filter guard —
+    // `protect_from_forgery … unless: -> { authenticated_by.bot_key? }` —
+    // which no body typer reaches, so this fact is its only evidence.
+    for controller in &app.controllers {
+        for item in &controller.body {
+            if let crate::dialect::ControllerBodyItem::Action { action, .. } = item {
+                if tail_is_inquiry(&action.body) {
+                    out.insert(action.name.clone());
+                }
+            }
+        }
+    }
     out
 }
 

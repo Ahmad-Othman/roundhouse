@@ -403,7 +403,11 @@ pub(super) fn parse_filter_call(
     if call.receiver().is_some() {
         return None;
     }
-    let kind = match constant_id_str(&call.name()) {
+    let macro_name = constant_id_str(&call.name());
+    if macro_name == "protect_from_forgery" || macro_name == "skip_forgery_protection" {
+        return parse_forgery_macro(&call, macro_name == "protect_from_forgery", file);
+    }
+    let kind = match macro_name {
         "before_action" => FilterKind::Before,
         "around_action" => FilterKind::Around,
         "after_action" => FilterKind::After,
@@ -491,6 +495,119 @@ pub(super) fn parse_filter_call(
             })
             .collect(),
     )
+}
+
+/// The framework method both forgery macros name. Rails defines them as
+/// callbacks on it (actionpack's `request_forgery_protection.rb`):
+///
+/// ```ruby
+/// def protect_from_forgery(options = {})
+///   # …strategy/storage setup…
+///   before_action :verify_authenticity_token, options
+/// end
+///
+/// def skip_forgery_protection(options = {})
+///   skip_before_action :verify_authenticity_token, options.reverse_merge(raise: false)
+/// end
+/// ```
+///
+/// so they ingest as exactly those filters, and every downstream pass
+/// (concern splice, skip narrowing, `if:`/`unless:` guards, the IDE's
+/// filter chain) treats them like any other. The method itself is the
+/// ruby family's runtime (`runtime/spinel/request_forgery_protection.rb`
+/// reopens `ActionController::Base`); the strict targets define none.
+pub const VERIFY_AUTHENTICITY_TOKEN: &str = "verify_authenticity_token";
+
+/// `protect_from_forgery with: :exception, unless: -> { … }` /
+/// `skip_forgery_protection only: […]` → the filter Rails registers.
+///
+/// Only the `:exception` strategy is modeled. Rails' bare
+/// `protect_from_forgery` defaults to `:null_session` (the request runs
+/// with an empty session), and `:reset_session` clears it; neither is a
+/// 422, and lowering them as one would turn a request Rails lets through
+/// into a failure. Those forms, a `prepend:` (which moves the callback
+/// to the head of the chain) and a custom `store:` return `None`, so the
+/// call stays a controller-body macro and the unrecognized-macro survey
+/// names it.
+fn parse_forgery_macro(
+    call: &ruby_prism::CallNode<'_>,
+    protect: bool,
+    file: &str,
+) -> Option<Vec<crate::dialect::Filter>> {
+    use crate::dialect::{Filter, FilterKind};
+
+    let mut only: Vec<Symbol> = Vec::new();
+    let mut except: Vec<Symbol> = Vec::new();
+    let mut only_style = crate::expr::ArrayStyle::default();
+    let mut except_style = crate::expr::ArrayStyle::default();
+    let mut if_cond: Option<Symbol> = None;
+    let mut unless_cond: Option<Symbol> = None;
+    let mut if_cond_expr: Option<Expr> = None;
+    let mut unless_cond_expr: Option<Expr> = None;
+    let mut exception_strategy = false;
+
+    for arg in call.arguments().iter().flat_map(|a| a.arguments().iter()) {
+        let kh = arg.as_keyword_hash_node()?;
+        for el in kh.elements().iter() {
+            let assoc = el.as_assoc_node()?;
+            let key = symbol_value(&assoc.key())?;
+            let value = assoc.value();
+            match key.as_str() {
+                "with" if protect => {
+                    exception_strategy = symbol_value(&value).as_deref() == Some("exception");
+                }
+                "only" => {
+                    only = symbol_list_value(&value);
+                    only_style = symbol_list_style(&value);
+                }
+                "except" => {
+                    except = symbol_list_value(&value);
+                    except_style = symbol_list_style(&value);
+                }
+                "if" => {
+                    if_cond = symbol_value(&value).map(|s| Symbol::from(s.as_str()));
+                    if_cond_expr = lambda_body_expr(&value, file);
+                    if if_cond.is_none() && if_cond_expr.is_none() {
+                        return None;
+                    }
+                }
+                "unless" => {
+                    unless_cond = symbol_value(&value).map(|s| Symbol::from(s.as_str()));
+                    unless_cond_expr = lambda_body_expr(&value, file);
+                    if unless_cond.is_none() && unless_cond_expr.is_none() {
+                        return None;
+                    }
+                }
+                // `skip_forgery_protection`'s own default; nothing to model.
+                "raise" if !protect => {}
+                _ => return None,
+            }
+        }
+    }
+    if protect && !exception_strategy {
+        return None;
+    }
+
+    let loc = call.message_loc().unwrap_or_else(|| call.location());
+    Some(vec![Filter {
+        kind: if protect { FilterKind::Before } else { FilterKind::Skip },
+        target: Symbol::from(VERIFY_AUTHENTICITY_TOKEN),
+        target_span: Span {
+            file: super::sources::file_id(file),
+            start: loc.start_offset() as u32,
+            end: loc.end_offset() as u32,
+        },
+        from_concern: None,
+        only,
+        except,
+        only_style,
+        except_style,
+        if_cond,
+        unless_cond,
+        if_cond_expr,
+        unless_cond_expr,
+        block: None,
+    }])
 }
 
 /// Body expression of a lambda/proc-form filter guard (`-> { … }` /

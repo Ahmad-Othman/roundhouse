@@ -420,6 +420,11 @@ module Main
     # found it.
     request_obj.user_agent = user_agent
     request_obj.env["HTTP_X_REQUESTED_WITH"] = req.req_headers.fetch("x-requested-with", "")
+    # The two headers the forgery check reads
+    # (runtime/request_forgery_protection.rb): the token JavaScript
+    # posts, and the Origin it compares with the Host.
+    request_obj.env["HTTP_X_CSRF_TOKEN"] = req.req_headers.fetch("x-csrf-token", "")
+    request_obj.env["HTTP_ORIGIN"] = req.req_headers.fetch("origin", "")
     # The body's declared type, for the one route that checks it
     # against what was promised: Active Storage's direct-upload PUT.
     request_obj.env["CONTENT_TYPE"] = req.req_headers.fetch("content-type", "")

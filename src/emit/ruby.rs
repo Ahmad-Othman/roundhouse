@@ -1601,7 +1601,12 @@ fn render_test_helper(fixture_lcs: &[LibraryClass], truncate_lines: &[String]) -
          # harness does (`CgiIo.parse_form_into`, below), so a `?query=`\n\
          # test was the only thing in the tree to reach an undefined\n\
          # constant. Test-only, like the resolver and HTTP stubs beside it.\n\
-         require_relative \"../runtime/cgi_io\"",
+         require_relative \"../runtime/cgi_io\"\n\
+         # Rails' generated config/environments/test.rb:\n\
+         # `config.action_controller.allow_forgery_protection = false`.\n\
+         # boot.rb loaded the ruby family's forgery check; a test posts\n\
+         # without a token, as Rails' own integration tests do.\n\
+         ActionController::Base.allow_forgery_protection = false",
     );
 
     // (2)

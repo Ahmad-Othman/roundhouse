@@ -2122,9 +2122,10 @@ fn qualify_model_class_method_ar_calls(app: &mut App) {
 /// Class-body calls the pipeline consumes from an `Unknown` item
 /// without turning it into a typed item: the concern splice reads
 /// `include`, the ingester's side channel reads `layout`, the lowering
-/// reads `helper_method` and `rescue_from`, and the runtime's
-/// dispatcher protects every non-GET request whether or not
-/// `protect_from_forgery` is written. Visibility keywords are markers.
+/// reads `helper_method` and `rescue_from`. Visibility keywords are
+/// markers. (`protect_from_forgery` / `skip_forgery_protection` are not
+/// here: `parse_filter_call` types the forms that are modeled, and one
+/// left in the body — `with: :null_session`, say — is a real gap.)
 const CONSUMED_CONTROLLER_MACROS: &[&str] = &[
     "include",
     "extend",
@@ -2144,12 +2145,6 @@ const CONSUMED_CONTROLLER_MACROS: &[&str] = &[
     // decision recorded in docs/pipeline/runtime.md ("Conditional GET
     // is ALWAYS FRESH"), so the importmap ETag macro has nothing to do.
     "stale_when_importmap_changes",
-    // CSRF: the runtime issues tokens but does not verify them on the
-    // request, on every lane — the security posture the guide states —
-    // so both the default and its opt-out are no-ops today. When
-    // verification lands, both leave this list.
-    "protect_from_forgery",
-    "skip_forgery_protection",
 ];
 
 /// A receiverless, blockless call left in a controller's class body

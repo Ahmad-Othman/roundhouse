@@ -204,6 +204,11 @@ fn real_blog_spinel_tests_pass() {
         // secret, so a match is interoperation rather than
         // self-consistency, plus the refusals. Rides in the same way.
         "test/turbo_streams_test.rb",
+        // The ruby family's forgery check
+        // (runtime/request_forgery_protection.rb): param and header
+        // tokens against the session's, the 422, and the Origin rule.
+        // Rides in the same way.
+        "test/request_forgery_protection_test.rb",
     ] {
         assert_test_passes(&scratch, &gemfile, test);
     }

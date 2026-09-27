@@ -131,14 +131,46 @@ Anything not in that section that differs from Rails is a bug, and the
 
 ## Security posture
 
-One divergence is worth stating on its own, because it decides whether
-an emitted app can face the public internet today: **CSRF tokens are
-issued but not verified.** Forms carry an `authenticity_token` and
-pages carry the meta tags, exactly as Rails renders them — the compare
-oracle requires it — but no lane checks the token on the request, so
-`protect_from_forgery` and `skip_forgery_protection` are both no-ops.
-Sessions and signed cookies are real (HMAC, Rails-compatible), as is
-`has_secure_password`; what is missing is the one check that stops a
-third-party page from submitting a form on a signed-in user's behalf.
-Until it lands, put an emitted app behind something you trust, or
-treat it as the demo it is.
+**CSRF is verified on the ruby family where the app declares it** —
+the CRuby and Spinel lanes, which is where Campfire deploys.
+`protect_from_forgery with: :exception` runs as the `before_action`
+Rails registers, at the same place in the chain, with its `only:` /
+`except:` / `if:` / `unless:`; `skip_forgery_protection` removes it.
+A non-GET request must carry the session's token in the
+`authenticity_token` param or the `X-CSRF-Token` header, and a present
+`Origin` must name the request's own host; otherwise the answer is
+Rails' 422. The emitted test harness
+turns the check off, as a generated `config/environments/test.rb`
+does.
+
+What differs from Rails, and why:
+
+- **Tokens are not masked.** Rails hands out a per-render masked token
+  (a BREACH mitigation); the emit issues the session token itself.
+- **The Origin check compares hosts, not schemes.** Rails compares
+  `request.base_url`, which it gets right behind a TLS proxy through
+  `assume_ssl` / `X-Forwarded-Proto`. Neither is modeled, so a scheme
+  comparison would refuse every POST behind TLS termination.
+- **The session cookie is not signed.** The token lives in it, so the
+  scheme amounts to a double-submit cookie: it stops another site, which
+  can neither read nor set the cookie, but not a party that can write
+  cookies for your domain. `cookies.signed` (Campfire's login cookie) is
+  real HMAC.
+- **Rails' implicit default is not applied.** Under `load_defaults`
+  5.2+, Rails protects every `ActionController::Base` controller even
+  when the app never writes the macro. Here only a written
+  `protect_from_forgery with: :exception` is enforced: an app that
+  relies on the default (the blog, the Rails tutorial) is not
+  protected on any lane. The default would put the check into every
+  target's emit, and the strict targets have no token to check.
+- **`with: :null_session` / `:reset_session` and `prepend:` are not
+  modeled.** Such a macro is reported as a gap and not enforced.
+- **Action Cable does not check `Origin`** (Rails'
+  `allowed_request_origins`). A cross-site socket needs the user's
+  cookie, which a `SameSite=Lax` cookie such as Campfire's is not sent
+  for.
+
+The strict targets issue no token (`form_authenticity_token` is empty
+there) and check none: an app emitted for them is not protected
+against cross-site forgery. Put an unprotected app behind something
+you trust.

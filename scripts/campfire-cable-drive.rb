@@ -79,16 +79,17 @@ $csrf = nil
 EMAIL    = ENV["CAMPFIRE_EMAIL"] || "walker@example.com"
 PASSWORD = ENV["CAMPFIRE_PASSWORD"] || "secret123"
 
-def req(verb, path, form = nil, accept: "text/html")
+def req(verb, path, form = nil, accept: "text/html", csrf: true, origin: nil)
   uri = URI("#{BASE}#{path}")
   r = verb == "GET" ? Net::HTTP::Get.new(uri) : Net::HTTP::Post.new(uri)
   r["Accept"] = accept
   r["Cookie"] = $jar.map { |k, v| "#{k}=#{v}" }.join("; ") unless $jar.empty?
-  # Real Rails enforces CSRF on every POST; the emitted lanes accept the
-  # header and ignore it. The token is whatever the most recent page's
-  # `csrf-token` meta carried — which is how campfire's own JavaScript
-  # authenticates its fetches.
-  r["X-CSRF-Token"] = $csrf if verb == "POST" && $csrf
+  # Every lane enforces CSRF on a POST. The token is whatever the most
+  # recent page's `csrf-token` meta carried — which is how campfire's
+  # own JavaScript authenticates its fetches. `csrf: false` and
+  # `origin:` are for the forgery probes, which play the other site.
+  r["X-CSRF-Token"] = $csrf if verb == "POST" && $csrf && csrf
+  r["Origin"] = origin if origin
   r.set_form_data(form) if form
   res = Net::HTTP.start(uri.host, uri.port) { |h| h.request(r) }
   Array(res.get_fields("set-cookie")).each do |c|
@@ -303,6 +304,29 @@ if frame2
   check("the script tag does not",
         html2.include?("<script>") || html2.include?("&lt;script&gt;"), false)
 end
+
+# ── a forged request, which must be refused ───────────────────────────
+#
+# The other site's view of the room: the victim's cookies ride along (a
+# browser attaches them), but the page's token cannot — so a POST
+# without it is Rails' `InvalidAuthenticityToken`, a 422, and no message
+# is created or broadcast. A token lifted some other way still fails
+# from a foreign Origin. Real Rails answers both this way, which is what
+# makes these probes ground truth rather than the emit agreeing with
+# itself; before the forgery check landed, both emitted lanes posted the
+# message.
+puts "\n\e[1;34m==>\e[0m a forged post, which must be refused"
+before3 = a.payloads.size
+forged = req("POST", "/rooms/1/messages",
+             { "message[body]" => "forged", "message[client_message_id]" => "cable-walk-forged" },
+             accept: "text/vnd.turbo-stream.html, text/html", csrf: false)
+check("a POST without the token is refused", forged.code, "422")
+foreign = req("POST", "/rooms/1/messages",
+              { "message[body]" => "forged", "message[client_message_id]" => "cable-walk-foreign" },
+              accept: "text/vnd.turbo-stream.html, text/html", origin: "https://attacker.example")
+check("the right token from a foreign Origin is refused", foreign.code, "422")
+check("neither reaches a socket",
+      a.until(2) { a.payloads.drop(before3).any? { |m| m["message"].to_s.include?("forged") } }, false)
 
 puts
 unless LEDGER_FAILURES.empty?
