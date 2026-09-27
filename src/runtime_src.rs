@@ -413,10 +413,9 @@ pub fn parse_library_with_rbs(
     // method orphan filter). Done up front so the class registry below
     // can be built from typed methods.
     // (Done inside the per-class loop below.)
-    let constants = parse_module_constants(
-        std::str::from_utf8(ruby_src).unwrap_or(""),
-    )
-    .unwrap_or_default();
+    let constants = std::sync::Arc::new(
+        parse_module_constants(std::str::from_utf8(ruby_src).unwrap_or("")).unwrap_or_default(),
+    );
 
     // Step 1: attach RBS signatures to each method, with arity check.
     // After this loop every method has its `signature` populated.
@@ -811,7 +810,7 @@ pub fn parse_methods_with_rbs_in_ctx(
     // `STATUS_CODES.fetch(...)` etc. resolves through the constant's
     // typed value (Hash[Sym, Int]) rather than falling through as
     // `Ty::Class { STATUS_CODES }` to unknown.
-    let constants = parse_module_constants(ruby_src).unwrap_or_default();
+    let constants = std::sync::Arc::new(parse_module_constants(ruby_src).unwrap_or_default());
 
     let build_ctx = |m: &MethodDef,
                      ivars: &std::collections::HashMap<Symbol, Ty>|

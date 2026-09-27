@@ -44,7 +44,14 @@ pub struct Ctx {
     /// by the `ExprNode::Const` arm so subsequent dispatch on the constant
     /// (`STATUS_CODES.fetch(...)`) lands in the right primitive method
     /// table instead of falling through to the user-class registry.
-    pub constants: HashMap<Symbol, Ty>,
+    ///
+    /// SHARED, not owned: written once when a context is built and only
+    /// read after, while `Ctx` is cloned for every block, branch and
+    /// method the typer enters. As an owned map each of those clones
+    /// copied the whole registry — every constant in the app, merged
+    /// into each class's view of it — and on Mastodon that copying was
+    /// most of the analysis time.
+    pub constants: std::sync::Arc<HashMap<Symbol, Ty>>,
     /// When set, the body-typer writes back `Some(SelfRef)` on the
     /// recv slot of bare Sends that resolve via `self_ty`'s dispatch
     /// table. Off by default — opt-in per call site so targets that
