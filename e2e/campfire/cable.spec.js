@@ -113,10 +113,15 @@ test('a message posted in one tab arrives live in another', async ({ browser }) 
       ).toBeAttached({ timeout: 20_000 })
     }
 
-    // Post through the real composer. Trix is a custom element, so it
-    // takes focus + typed keys — `fill()` targets the hidden input and
-    // would submit an empty body while looking like it worked.
-    await pageA.locator('trix-editor#message_body').click()
+    // Post through the real composer. The editor is a custom element
+    // either way — Lexxy's contenteditable since campfire's Lexxy merge
+    // (the element campfire's own system tests drive), Trix's before —
+    // so it takes focus + typed keys; `fill()` would target the wrong
+    // node and submit an empty body while looking like it worked.
+    await pageA
+      .locator('lexxy-editor#message_body .lexxy-editor__content, trix-editor#message_body')
+      .first()
+      .click()
     await pageA.keyboard.type(BODY)
     await pageA.locator('button[name="send"]').click()
 

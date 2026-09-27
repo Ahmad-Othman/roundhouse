@@ -182,10 +182,19 @@ E2E_NAME="E2E Walker"
 
 if [[ "$(curl -fsS -o /dev/null -w '%{http_code}' "$BASE/first_run")" == "200" ]]; then
     step "completing /first_run as $E2E_EMAIL"
-    code=$(curl -fsS -o /dev/null -w '%{http_code}' -X POST "$BASE/first_run" \
+    # The form's CSRF token and the session it lives in, as a browser
+    # would carry them: the app refuses a POST without both (422), as
+    # Rails does since the emit enforces `protect_from_forgery`.
+    JAR="$(mktemp)"
+    TOKEN=$(curl -fsS -c "$JAR" "$BASE/first_run" \
+        | sed -n 's/.*<meta name="csrf-token" content="\([^"]*\)".*/\1/p' | head -1)
+    [[ -n "$TOKEN" ]] || fail "no csrf-token meta on /first_run"
+    code=$(curl -fsS -o /dev/null -w '%{http_code}' -b "$JAR" -c "$JAR" -X POST "$BASE/first_run" \
+        --data-urlencode "authenticity_token=$TOKEN" \
         --data-urlencode "user[name]=$E2E_NAME" \
         --data-urlencode "user[email_address]=$E2E_EMAIL" \
         --data-urlencode "user[password]=$E2E_PASSWORD" || true)
+    rm -f "$JAR"
     [[ "$code" == "302" || "$code" == "200" ]] \
         || { tail -30 "$LOG"; fail "POST /first_run answered $code"; }
     echo "  account created (HTTP $code)"
