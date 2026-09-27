@@ -346,6 +346,28 @@ planted = req("POST", "/rooms/1/messages",
 real_session.nil? ? $jar.delete(SESSION_COOKIE) : $jar[SESSION_COOKIE] = real_session
 check("a planted session cookie's token is refused", planted.code, "422")
 
+# ── the flash, which only the server may write ────────────────────────
+#
+# A notice set on a redirect must reach the next page — through this
+# runtime's signed flash cookie, or Rails' session — and a flash cookie
+# the client wrote itself must not: Rails keeps the flash in the
+# authenticated session and ignores a `flash_notice` cookie outright, and
+# ours must reject one it did not sign. The layout renders the notice in
+# its screen-reader span, which is what both checks read.
+puts "\n\e[1;34m==>\e[0m a flash notice, which only the server may write"
+FLASH_SPAN = %(aria-atomic="true">)
+utf8 = ->(res) { res.body.to_s.dup.force_encoding("UTF-8") }
+req("GET", "/account/custom_styles/edit")
+styled = req("POST", "/account/custom_styles", { "_method" => "patch", "account[custom_styles]" => "" })
+check("the custom styles update redirects", %w[302 303].include?(styled.code), true)
+shown = req("GET", "/account/custom_styles/edit")
+check("the next page shows the notice it set", utf8.(shown).include?("#{FLASH_SPAN}✓</span>"), true)
+PLANTED_NOTICE = "Planted-by-the-client"
+$jar["flash_notice"] = PLANTED_NOTICE
+room_again = req("GET", "/rooms/1")
+$jar.delete("flash_notice")
+check("a flash cookie the client wrote is not shown", utf8.(room_again).include?(PLANTED_NOTICE), false)
+
 puts
 unless LEDGER_FAILURES.empty?
   puts "\e[33m#{LEDGER_FAILURES.length} known gap(s) on the way past:\e[0m " \

@@ -233,7 +233,7 @@ Turbo clients) is layered on top of that log by `cable.rb`'s
 | View helpers | `link_to`, `button_to`, `dom_id`, `content_for`, `turbo_stream_from`, `truncate`, `pluralize`, `stylesheet_link_tag`, `javascript_importmap_tags`, FormBuilder (label/text_field/text_area/submit) |
 | Layouts | `Views::Layouts.application(body)` consumes `content_for(:title)`, emits importmap referencing Turbo |
 | Broadcasts | Turbo Stream fragments via after-commit hooks; in-memory log for tests + file IPC for dev-server fan-out |
-| Flash | Cookie-based round-trip (`flash_notice`, `flash_alert` cookies); render-path clears, redirect-path emits |
+| Flash | Cookie-based round-trip (signed `flash_notice`, `flash_alert` cookies); render-path clears, redirect-path emits |
 | Forms | POST/PATCH/DELETE via hidden `_method` field; method override on the dev-server side; full create/update/destroy flow |
 | HTTP entry point | `main.rb` parses CGI, dispatches, writes response with status + headers + body |
 | HTTP server (CRuby) | Puma + Rack adapter (`config.ru`) — terminates HTTP/1.1, lifts requests into CGI shape, calls `Main.run`, parses the response back to a Rack tuple. `Rack::Static` serves `/assets/*` and root icons. |
@@ -345,10 +345,10 @@ from this fixture:
 - **No signed stream names.** ActionCable's
   `signed_stream_name` is treated as a literal stream name on both
   ends. Any WebSocket client can subscribe to any stream by name.
-- **Unsigned flash cookie.** The session cookie is signed, but the
-  flash cookie carries plain text; anyone can construct a
-  `Cookie: flash_notice=Hello` and the next page will display "Hello"
-  as if it came from a successful action.
+- **Signed, not encrypted, session and flash cookies.** A client can
+  read its session and its flash messages but cannot forge either: a
+  constructed `Cookie: flash_notice=Hello` is not signed and shows
+  nothing.
 - **No HTTPS.** No `Secure` flag on cookies; `HttpOnly` is set but
   `SameSite` is not.
 - **No authentication, no authorization.** No user model, no login,

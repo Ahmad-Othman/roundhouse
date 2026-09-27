@@ -151,13 +151,15 @@ What differs from Rails, and why:
   `request.base_url`, which it gets right behind a TLS proxy through
   `assume_ssl` / `X-Forwarded-Proto`. Neither is modeled, so a scheme
   comparison would refuse every POST behind TLS termination.
-- **The session cookie is signed, not encrypted.** Rails' cookie store
-  encrypts the session; the ruby family signs it (the same HMAC
-  `cookies.signed` uses, keyed from `SECRET_KEY_BASE`), so a client can
-  read its session but not forge one — a cookie that does not verify
-  restores as an empty session. The payload is not Rails' JSON either,
-  so a migration from Rails starts every session afresh; Campfire's
-  login rides its own signed cookie and carries over.
+- **The session and flash cookies are signed, not encrypted.** Rails'
+  cookie store encrypts the session and keeps the flash inside it; the
+  ruby family signs the session and gives each flash message
+  (`flash_notice`, `flash_alert`) a signed cookie of its own — the same
+  HMAC `cookies.signed` uses, keyed from `SECRET_KEY_BASE`. A client can
+  read them but not forge them: a cookie that does not verify reads as
+  an empty session or no message. The session payload is not Rails'
+  JSON either, so a migration from Rails starts every session afresh;
+  Campfire's login rides its own signed cookie and carries over.
 - **Rails' implicit default is not applied.** Under `load_defaults`
   5.2+, Rails protects every `ActionController::Base` controller even
   when the app never writes the macro. Here only a written

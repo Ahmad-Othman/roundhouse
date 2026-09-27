@@ -1,14 +1,14 @@
 # Minitest-shaped, like request_forgery_protection_test.rb: a CRuby-only
-# framework test of the ruby family's signed session cookie
-# (runtime/signed_session_cookie.rb over the shared MessageVerifier).
-# A session survives its own round trip; anything the client could
-# have written instead — an edit, a plaintext cookie, a value signed
-# for another cookie name — restores as an empty session.
+# framework test of the ruby family's signed session and flash cookies
+# (runtime/signed_cookies.rb over the shared MessageVerifier). Each
+# survives its own round trip; anything the client could have written
+# instead — an edit, a plaintext cookie, a value signed for another
+# cookie name — reads as absent.
 require "minitest/autorun"
 require_relative "test_helper"
-require_relative "../runtime/signed_session_cookie"
+require_relative "../runtime/signed_cookies"
 
-class SignedSessionCookieTest < Minitest::Test
+class SignedCookiesTest < Minitest::Test
   NAME = "_campfire_session"
 
   def signed_session(pairs)
@@ -44,5 +44,22 @@ class SignedSessionCookieTest < Minitest::Test
 
   def test_a_value_signed_for_another_cookie_name_restores_empty
     assert_equal "", restored(signed_session("_csrf_token" => "abc"), "_other_session")
+  end
+
+  # campfire's notices include "✓", so a message is not ASCII-safe.
+  def test_a_flash_message_round_trips_including_non_ascii
+    %w[flash_notice flash_alert].each do |name|
+      ["Saved.", "✓", %(Can't "quote" & <tag>)].each do |text|
+        assert_equal text, ActionDispatch::SignedCookie.verified(ActionDispatch::SignedCookie.sign(text, name), name)
+      end
+    end
+  end
+
+  def test_a_planted_or_misnamed_flash_reads_as_no_message
+    assert_equal "", ActionDispatch::SignedCookie.verified("Hello", "flash_notice")
+    assert_equal "", ActionDispatch::SignedCookie.verified("", "flash_notice")
+    notice = ActionDispatch::SignedCookie.sign("Hello", "flash_notice")
+    assert_equal "", ActionDispatch::SignedCookie.verified(notice, "flash_alert")
+    assert_equal "", ActionDispatch::SignedCookie.verified(notice, NAME)
   end
 end

@@ -3242,12 +3242,12 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         files.push(("sig/runtime/request_forgery_protection.rbs".to_string(), rbs));
     }
 
-    // Signed-session sidecar — the ActionDispatch::Session reopen in
-    // runtime/signed_session_cookie.rb (ruby family only).
+    // Signed-cookie sidecar — ActionDispatch::SignedCookie and the
+    // Session reopen in runtime/signed_cookies.rb (ruby family only).
     {
-        let rbs = crate::runtime_files::read_to_string("runtime/spinel/signed_session_cookie.rbs")
-            .map_err(|e| format!("read runtime/spinel/signed_session_cookie.rbs: {e}"))?;
-        files.push(("sig/runtime/signed_session_cookie.rbs".to_string(), rbs));
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/signed_cookies.rbs")
+            .map_err(|e| format!("read runtime/spinel/signed_cookies.rbs: {e}"))?;
+        files.push(("sig/runtime/signed_cookies.rbs".to_string(), rbs));
     }
 
     // Hash#to_query nesting sidecar — the reopen in

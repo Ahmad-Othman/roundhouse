@@ -445,7 +445,7 @@ module Main
     # configured one, so a literal here would clear the session on every
     # request.
     session_cookie = Rails.application.session_cookie_key
-    # SIGNED (runtime/signed_session_cookie.rb): a value that does not
+    # SIGNED (runtime/signed_cookies.rb): a value that does not
     # verify restores as an empty session. `session_in` is the restored
     # session's PLAIN encoding — what the persist step below compares
     # against, so an untouched session writes no Set-Cookie and a
@@ -460,16 +460,18 @@ module Main
     # normalizes keys so Symbol-constant indexing (`cookies[:tag_filters]`)
     # resolves. Same shared ActionController::CookieJar the CRuby overlay uses.
     controller.cookies = ActionController::CookieJar.new(req.cookies)
-    # Inbound flash: each message rides its own cookie (flash_notice /
-    # flash_alert) so the value carries verbatim, no serialization. Load
+    # Inbound flash: each message rides its own SIGNED cookie
+    # (flash_notice / flash_alert; runtime/signed_cookies.rb) — one that
+    # does not verify reads as no message, so a client cannot make the
+    # next page show text of its choosing. Load
     # through the constructor (NOT flash[:k]=) so to_persisted's show-once
     # diff sees them as carried-in (value == @notice_was) and sweeps them.
     # `fetch(name, "")` avoids a missing-key raise; a flash message is
     # never empty, so non-empty == present.
     inbound_flash = Tep.str_hash
-    cin = req.cookies.fetch("flash_notice", "")
+    cin = ActionDispatch::SignedCookie.verified(req.cookies.fetch("flash_notice", ""), "flash_notice")
     inbound_flash["notice"] = cin if cin.length > 0
-    ain = req.cookies.fetch("flash_alert", "")
+    ain = ActionDispatch::SignedCookie.verified(req.cookies.fetch("flash_alert", ""), "flash_alert")
     inbound_flash["alert"] = ain if ain.length > 0
     controller.flash = ActionDispatch::Flash.new(inbound_flash)
     controller.request_format = request_format
@@ -525,13 +527,13 @@ module Main
     persisted = controller.flash.to_persisted
     pn = persisted.fetch("notice", "")
     if pn.length > 0
-      Main.set_flash_cookie(res, "flash_notice", pn)
+      Main.set_flash_cookie(res, "flash_notice", ActionDispatch::SignedCookie.sign(pn, "flash_notice"))
     elsif req.cookies.fetch("flash_notice", "").length > 0
       Main.clear_flash_cookie(res, "flash_notice")
     end
     pa = persisted.fetch("alert", "")
     if pa.length > 0
-      Main.set_flash_cookie(res, "flash_alert", pa)
+      Main.set_flash_cookie(res, "flash_alert", ActionDispatch::SignedCookie.sign(pa, "flash_alert"))
     elsif req.cookies.fetch("flash_alert", "").length > 0
       Main.clear_flash_cookie(res, "flash_alert")
     end

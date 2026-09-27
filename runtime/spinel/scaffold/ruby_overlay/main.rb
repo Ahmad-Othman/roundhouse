@@ -178,9 +178,14 @@ module Main
     # Load inbound flash through the constructor (NOT `flash[:k]=`) so the
     # Flash snapshots these as carried-in; `to_persisted` then sweeps the
     # ones merely displayed (show-once). See ActionDispatch::Flash.
+    # SIGNED — see the spinel main.rb twin: a cookie that does not verify
+    # is no message (and is still cleared below, as a consumed one is).
     inbound_flash = {}
-    inbound_flash["notice"] = cookies[:flash_notice] if cookies.key?(:flash_notice)
-    inbound_flash["alert"]  = cookies[:flash_alert]  if cookies.key?(:flash_alert)
+    %w[notice alert].each do |kind|
+      name = "flash_#{kind}"
+      value = ActionDispatch::SignedCookie.verified(cookies[name.to_sym].to_s, name)
+      inbound_flash[kind] = value unless value.empty?
+    end
     controller.flash = ActionDispatch::Flash.new(inbound_flash)
 
     controller.request_method = request[:method]
@@ -217,12 +222,12 @@ module Main
     out_cookies = {}
     persisted = controller.flash.to_persisted
     if persisted.key?("notice")
-      out_cookies[:flash_notice] = persisted["notice"]
+      out_cookies[:flash_notice] = ActionDispatch::SignedCookie.sign(persisted["notice"], "flash_notice")
     elsif cookies.key?(:flash_notice)
       out_cookies[:flash_notice] = nil
     end
     if persisted.key?("alert")
-      out_cookies[:flash_alert] = persisted["alert"]
+      out_cookies[:flash_alert] = ActionDispatch::SignedCookie.sign(persisted["alert"], "flash_alert")
     elsif cookies.key?(:flash_alert)
       out_cookies[:flash_alert] = nil
     end
