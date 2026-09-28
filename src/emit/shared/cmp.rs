@@ -61,12 +61,18 @@ pub fn classify_cmp(lhs: &Expr, rhs: &Expr) -> CmpCase {
     let rhs_ty = rhs_ty.unwrap();
 
     match (lhs_ty, rhs_ty) {
+        // Not SameType: Go's `time.Time` has no native `<`, so leave the rendering to each target.
+        (l, r) if is_time(l) && is_time(r) => CmpCase::Unknown,
         (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float) => CmpCase::SameType,
         (Ty::Str, Ty::Str) | (Ty::Sym, Ty::Sym) => CmpCase::SameType,
         (Ty::Int, Ty::Float) | (Ty::Float, Ty::Int) => CmpCase::NumericPromote,
         (Ty::Class { .. }, Ty::Class { .. }) => CmpCase::ClassSubclass,
         _ => CmpCase::Incompatible,
     }
+}
+
+fn is_time(ty: &Ty) -> bool {
+    matches!(ty, Ty::Time) || matches!(ty, Ty::Class { id, .. } if id.0.as_str() == "Time")
 }
 
 #[cfg(test)]
@@ -172,6 +178,29 @@ mod tests {
         // raises NoMethodError. Classify accordingly.
         let l = var_typed("a", Ty::Bool);
         let r = var_typed("b", Ty::Bool);
+        assert!(matches!(classify_cmp(&l, &r), CmpCase::Incompatible));
+    }
+
+    #[test]
+    fn time_vs_time_is_not_incompatible() {
+        use crate::ident::ClassId;
+        let legacy = Ty::Class { id: ClassId(Symbol::from("Time")), args: vec![] };
+        for (l, r) in [
+            (Ty::Time, Ty::Time),
+            (Ty::Time, legacy.clone()),
+            (legacy.clone(), Ty::Time),
+            (legacy.clone(), legacy),
+        ] {
+            let l = var_typed("a", l);
+            let r = var_typed("b", r);
+            assert!(matches!(classify_cmp(&l, &r), CmpCase::Unknown));
+        }
+    }
+
+    #[test]
+    fn nullable_time_vs_time_is_incompatible() {
+        let l = var_typed("a", Ty::Union { variants: vec![Ty::Time, Ty::Nil] });
+        let r = var_typed("b", Ty::Time);
         assert!(matches!(classify_cmp(&l, &r), CmpCase::Incompatible));
     }
 

@@ -2308,6 +2308,51 @@ end
 }
 
 #[test]
+fn time_operands_compare_without_incompatible_binop() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define(version: 1) do
+  create_table "events", force: :cascade do |t|
+    t.datetime "starts_at", null: false
+    t.datetime "ends_at", null: false
+    t.datetime "cancelled_at"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/event.rb",
+            r#"class Event < ApplicationRecord
+  def window
+    [starts_at < ends_at, starts_at <= Time.current, Time.current > ends_at, Time.now >= starts_at]
+  end
+
+  def cancelled_late?
+    cancelled_at > starts_at
+  end
+end
+"#,
+        ),
+    ]);
+
+    let binops: Vec<String> = diagnose(&app)
+        .into_iter()
+        .filter(|d| matches!(d.kind, DiagnosticKind::IncompatibleBinop { .. }))
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(
+        binops,
+        vec!["`>` with incompatible operand types: Time? > Time".to_string()],
+        "Time vs Time compares; only the nullable reader still flags"
+    );
+}
+
+#[test]
 fn gem_catalog_resolves_third_party_surface() {
     // The gem catalog (src/catalog/gems.rs) resolves the third-party
     // surface apps call: class methods (`Arel.sql`, `ROTP::Base32.random`),
