@@ -21,6 +21,12 @@ class JsonBuilderTest < Minitest::Test
     assert_equal "a\\nb\\tc\\rd", JsonBuilder.encode_string("a\nb\tc\rd")
   end
 
+  # ActiveSupport's HTML-entity escaping, byte for byte:
+  # `ActiveSupport::JSON.encode(%q{<b>&</b>})` is `"\u003cb\u003e\u0026\u003c/b\u003e"`.
+  def test_encode_string_escapes_html_entities
+    assert_equal "\\u003cb\\u003e\\u0026\\u003c/b\\u003e", JsonBuilder.encode_string("<b>&</b>")
+  end
+
   # ── encode_value ───────────────────────────────────────────────
 
   def test_encode_value_nil

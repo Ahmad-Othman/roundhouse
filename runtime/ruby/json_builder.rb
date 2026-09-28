@@ -28,6 +28,13 @@ module JsonBuilder
     "\t" => "\\t",
     "\b" => "\\b",
     "\f" => "\\f",
+    # ActiveSupport's `escape_html_entities_in_json` (on by default), so
+    # a value can sit inside a `<script>` or an HTML attribute: Lexxy's
+    # attachment `content` does. The JS line separators U+2028/U+2029
+    # are left alone, as `load_defaults` 8.1+ leaves them.
+    "<" => "\\u003c",
+    ">" => "\\u003e",
+    "&" => "\\u0026",
   }.freeze
 
   # `\x08` rather than `\b` for the backspace because Rust's `regex`
@@ -35,7 +42,7 @@ module JsonBuilder
   # otherwise be word-boundary, which makes no sense inside `[]`).
   # Ruby/JS/Crystal/RE2 all accept the hex escape, so this is the
   # cross-target spelling.
-  ESCAPE_PATTERN = /[\\"\n\r\t\x08\f]/.freeze
+  ESCAPE_PATTERN = /[\\"\n\r\t\x08\f<>&]/.freeze
 
   # Escape a string for embedding inside JSON double-quotes. Does
   # NOT add the surrounding quotes — `encode_value` wraps a String

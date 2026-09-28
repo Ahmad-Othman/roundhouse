@@ -1694,10 +1694,9 @@ module ActionText
   # when the body is blank, which omits the attribute, as Rails does
   # for a new message.
   #
-  # `content` is JSON-encoded by `JsonBuilder`, which escapes what JSON
-  # requires and not `<`, `>`, `&` as ActiveSupport's encoder also does.
-  # The editor `JSON.parse`s the attribute, so both spellings read as
-  # the same string there; the bytes of the attribute differ.
+  # `content` is JSON-encoded by `JsonBuilder`, which escapes `<`, `>`
+  # and `&` as ActiveSupport's encoder does (the JSON text is its, byte
+  # for byte, for a String).
   #
   # Written against `css`'s BOUND nodes rather than `replace`'s block:
   # each write splices the fragment at its node's offset, so the nodes
