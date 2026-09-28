@@ -413,6 +413,28 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("backtrace", Ty::Array { elem: Box::new(Ty::Str) }),
         ]);
     }
+    let exception_surface = [
+        ("message", Ty::Str),
+        ("to_s", Ty::Str),
+        ("full_message", Ty::Str),
+        ("inspect", Ty::Str),
+        ("backtrace", Ty::Array { elem: Box::new(Ty::Str) }),
+    ];
+    for (exc, extra) in [
+        ("ActiveRecord::RecordNotFound", None),
+        ("ActiveRecord::RecordNotUnique", None),
+        ("ActiveRecord::ValueTooLong", None),
+        // Not `ActiveRecord::Base`: no instance surface is registered there, so `e.record.errors` would still fail.
+        ("ActiveRecord::RecordInvalid", Some(("record", Ty::Untyped))),
+        ("ActionController::ParameterMissing", Some(("param", Ty::Str))),
+        ("ActionController::UnpermittedParameters", None),
+        ("ActionController::UnknownFormat", None),
+    ] {
+        let mut methods = exception_surface.to_vec();
+        methods.extend(extra);
+        let methods: Vec<(&str, Ty)> = methods;
+        register_stdlib_class(classes, exc, &[], &methods);
+    }
     // The response. `code` is a String here as it is in CRuby ("200",
     // not 200) — campfire compares `response.code == "200"`, which folds
     // to a constant false against an Int.

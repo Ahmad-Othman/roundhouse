@@ -2353,6 +2353,50 @@ end
 }
 
 #[test]
+fn rescue_binding_takes_the_rescued_class() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/quota_error.rb",
+            r#"class QuotaError < StandardError
+  def remaining
+    3
+  end
+end
+"#,
+        ),
+        (
+            "app/models/thing.rb",
+            r#"class Thing < ApplicationRecord
+  def attempt
+    save!
+  rescue ActiveRecord::RecordInvalid => e
+    [e.record.errors, e.message]
+  rescue ActionController::ParameterMissing => e
+    e.param
+  rescue QuotaError => e
+    e.remaining
+  rescue SomeGem::Timeout => e
+    e.message
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in ["record", "message", "param", "remaining"] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "`{m}` should resolve on the rescued class; failures = {failures:?}"
+        );
+    }
+}
+
+#[test]
 fn gem_catalog_resolves_third_party_surface() {
     // The gem catalog (src/catalog/gems.rs) resolves the third-party
     // surface apps call: class methods (`Arel.sql`, `ROTP::Base32.random`),

@@ -503,18 +503,22 @@ impl<'a> BodyTyper<'a> {
                     for c in rc.classes.iter_mut() {
                         self.analyze_expr(c, ctx);
                     }
-                    // `rescue X => e` binds the exception object. Typed
-                    // as StandardError (Ruby's implicit rescue class) —
-                    // enough for the corpus's uses (`raise e`, message
-                    // reads) without modeling the per-clause class list.
                     if let Some(name) = &rc.binding {
+                        // An unregistered class (a gem's error) stays StandardError: typed as itself, even `e.message` would fail.
+                        let rescued = match rc.classes.as_slice() {
+                            [c] => match &c.ty {
+                                Some(ty @ Ty::Class { id, .. }) if self.classes().contains_key(id) => Some(ty.clone()),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
                         let mut inner = ctx.clone();
                         inner.local_bindings.insert(
                             name.clone(),
-                            Ty::Class {
+                            rescued.unwrap_or_else(|| Ty::Class {
                                 id: crate::ident::ClassId(Symbol::from("StandardError")),
                                 args: vec![],
-                            },
+                            }),
                         );
                         self.analyze_expr(&mut rc.body, &inner);
                         continue;
