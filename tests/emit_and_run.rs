@@ -23,7 +23,7 @@ fn the_unedited_blog_runs() {
 /// 'human_attribute_name' for class Article`. It belongs once, in
 /// `runtime/ruby/active_record/base.rb`, where every target gets it.
 #[test]
-#[ignore = "check is clean but the emitted view raises NoMethodError: no runtime defines human_attribute_name (#139)"]
+#[ignore = "check is clean but the emitted view raises NoMethodError: no runtime defines human_attribute_name (#147)"]
 fn human_attribute_name_runs() {
     emit_and_run::real_blog()
         .edit(
@@ -43,7 +43,7 @@ fn human_attribute_name_runs() {
 /// inline. Passing needs a builder the emitted view can call; until
 /// then, the honest state is an error in `check`.
 #[test]
-#[ignore = "check is clean but the emitted tree fails to load: no runtime FormBuilder, and the inlined form has no builder object (#140)"]
+#[ignore = "check is clean but the emitted tree fails to load: no runtime FormBuilder, and the inlined form has no builder object (#148)"]
 fn a_custom_form_builder_runs() {
     emit_and_run::real_blog()
         .write(
