@@ -65,4 +65,27 @@ class RequestForgeryProtectionTest < Minitest::Test
     refute controller(method: "POST", params: ok, headers: { "HTTP_ORIGIN" => "https://evil.example" }).verified_request?
     refute controller(method: "POST", params: ok, headers: { "HTTP_ORIGIN" => "null" }).verified_request?
   end
+
+  # Action Cable's handshake check: same host, or any localhost port in
+  # development; an absent Origin is refused, unlike the form check.
+  def test_a_cable_handshake_must_come_from_its_own_host
+    rfp = ActionController::RequestForgeryProtection
+    host = "chat.example.com:3000"
+    assert rfp.cable_origin_allowed?("http://chat.example.com:3000", host, false)
+    assert rfp.cable_origin_allowed?("https://chat.example.com:3000", host, false)
+    refute rfp.cable_origin_allowed?("https://evil.example", host, false)
+    refute rfp.cable_origin_allowed?("http://chat.example.com:4000", host, false)
+    refute rfp.cable_origin_allowed?("", host, false)
+    refute rfp.cable_origin_allowed?("null", host, false)
+  end
+
+  def test_development_also_allows_any_localhost_port
+    rfp = ActionController::RequestForgeryProtection
+    host = "chat.example.com"
+    refute rfp.cable_origin_allowed?("http://localhost:3000", host, false)
+    assert rfp.cable_origin_allowed?("http://localhost:3000", host, true)
+    assert rfp.cable_origin_allowed?("https://localhost:8443", host, true)
+    refute rfp.cable_origin_allowed?("http://localhost:3000.evil.example", host, true)
+    refute rfp.cable_origin_allowed?("", host, true)
+  end
 end

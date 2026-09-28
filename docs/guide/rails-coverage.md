@@ -169,10 +169,14 @@ What differs from Rails, and why:
   target's emit, and the strict targets have no token to check.
 - **`with: :null_session` / `:reset_session` and `prepend:` are not
   modeled.** Such a macro is reported as a gap and not enforced.
-- **Action Cable does not check `Origin`** (Rails'
-  `allowed_request_origins`). A cross-site socket needs the user's
-  cookie, which a `SameSite=Lax` cookie such as Campfire's is not sent
-  for.
+- **Action Cable's Origin check uses Rails' defaults only.** On the
+  ruby family, a `/cable` handshake must carry an `Origin` naming the
+  request's own host (compared by host, as above), or in development
+  any `localhost` port. Otherwise the answer is Rails' 404 and the app's
+  `connect` never runs; a handshake with no `Origin` is refused, as in
+  Rails. An app's own `config.action_cable.allowed_request_origins` and
+  `disable_request_forgery_protection` are not read. The strict
+  targets' sockets check no Origin.
 
 The strict targets issue no token (`form_authenticity_token` is empty
 there) and check none: an app emitted for them is not protected

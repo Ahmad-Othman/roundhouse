@@ -525,6 +525,18 @@ module Cable
       return true
     end
 
+    # THE ORIGIN FIRST, as Action Cable orders it
+    # (runtime/request_forgery_protection.rb): a handshake from another
+    # site is refused with Rails' own 404 before the app's `connect`
+    # runs, and the CRuby overlay's config.ru answers it the same way.
+    unless ActionController::RequestForgeryProtection.cable_origin_allowed?(
+        req.req_headers.fetch("origin", ""), req.req_headers.fetch("host", ""),
+        Rails.env.development?)
+      res.status = 404
+      res.body = "Page not found"
+      return true
+    end
+
     # IDENTITY RESOLVES BEFORE THE SOCKET IS TAKEN OVER. `res.status`
     # below is only answerable while this is still an ordinary HTTP
     # response; once `res.start_websocket` runs, Tep::Server::Threaded

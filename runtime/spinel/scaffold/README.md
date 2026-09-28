@@ -345,8 +345,9 @@ from this fixture:
 - **Signed stream names.** `turbo_stream_from` writes the name signed
   the way turbo-rails signs it, and a subscribe whose name does not
   verify is refused (runtime/turbo_streams.rb). A client cannot join a
-  stream by editing the name in the page. `/cable` does not check the
-  WebSocket `Origin` against `allowed_request_origins` as Rails does.
+  stream by editing the name in the page, and a `/cable` handshake from
+  another site's `Origin`, or with none, is refused with Rails' 404
+  (runtime/request_forgery_protection.rb).
 - **Signed, not encrypted, session and flash cookies.** A client can
   read its session and its flash messages but cannot forge either: a
   constructed `Cookie: flash_notice=Hello` is not signed and shows

@@ -113,17 +113,16 @@ end
 class Client
   attr_reader :messages, :url
 
-  def initialize(url, cookie)
+  def initialize(url, cookie, origin: "#{URL.scheme}://#{URL.host}:#{URL.port}")
     @url = url            # set BEFORE the driver: it reads `url` on build
     @socket = TCPSocket.new(URL.host, URL.port)
     @messages = []
     @driver = WebSocket::Driver.client(self, protocols: ["actioncable-v1-json"])
     @driver.set_header("Cookie", cookie)
-    # Same-origin, spelled out: Action Cable's request-forgery check
-    # rejects a handshake whose Origin doesn't match the host, and a
-    # bare websocket-driver client sends none. The emitted lanes don't
-    # check; real Rails does.
-    @driver.set_header("Origin", "#{URL.scheme}://#{URL.host}:#{URL.port}")
+    # Same-origin by default, spelled out: Action Cable's request-forgery
+    # check rejects a handshake whose Origin doesn't match the host, and
+    # a bare websocket-driver client sends none. `origin: nil` sends none.
+    @driver.set_header("Origin", origin) if origin
     @driver.on(:message) { |e| @messages << (JSON.parse(e.data) rescue {}) }
     @driver.start
   end
@@ -209,6 +208,18 @@ at_exit { a.close; b.close }
 # Connection#connect` and it did not refuse — item 3, over a real socket.
 check("both connections are welcomed",
       [a.until { a.typed("welcome") }, b.until { b.typed("welcome") }], [true, true])
+
+# A handshake from another site carries the victim's cookie (a browser
+# attaches it) but not the page's Origin. Action Cable refuses it with a
+# 404 before `connect` runs, and it refuses a handshake with no Origin at
+# all. Before the check landed, both emitted lanes welcomed both.
+foreign_ws = Client.new(ws, cookie, origin: "https://attacker.example")
+bare_ws = Client.new(ws, cookie, origin: nil)
+at_exit { foreign_ws.close; bare_ws.close }
+check("a socket from a foreign Origin is not welcomed",
+      foreign_ws.until(2) { foreign_ws.typed("welcome") }, false)
+check("a socket with no Origin is not welcomed",
+      bare_ws.until(2) { bare_ws.typed("welcome") }, false)
 
 identifier = JSON.generate({ "channel" => channel, "signed_stream_name" => signed })
 [a, b].each { |c| c.subscribe(identifier) }

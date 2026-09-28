@@ -47,7 +47,15 @@ app = lambda do |env|
   # rather than a socket that opens and then goes quiet. It needs a DB
   # handle for the same reason a request does — campfire's `connect`
   # loads a `Session` — so it leases one the same way.
+  #
+  # The Origin is checked before any of that, as Action Cable orders it
+  # (runtime/request_forgery_protection.rb): a handshake from another
+  # site is Rails' 404, and the app's `connect` never runs for it.
   if env["PATH_INFO"] == "/cable"
+    unless ActionController::RequestForgeryProtection.cable_origin_allowed?(
+        env["HTTP_ORIGIN"].to_s, env["HTTP_HOST"].to_s, Rails.env.development?)
+      return [404, { "content-type" => "text/plain" }, ["Page not found"]]
+    end
     if Db.with_connection { Cable.upgrade(env) }
       return [-1, {}, []]
     else

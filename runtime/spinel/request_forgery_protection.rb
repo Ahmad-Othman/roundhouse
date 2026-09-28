@@ -84,6 +84,29 @@ module ActionController
       origin[at + 3, origin.length].to_s == host
     end
 
+    # Action Cable's `allow_request_origin?`, the check a `/cable`
+    # handshake passes before any connection code runs. Rails' defaults
+    # (`allow_same_origin_as_host` true, and `allowed_request_origins`
+    # set to `/https?:\/\/localhost:\d+/` in development only):
+    #
+    # * the Origin must name the request's own Host -- compared by host,
+    #   as `valid_origin?` above is, and for its reason;
+    # * in development, any `localhost` port is allowed besides;
+    # * an ABSENT Origin is refused. This is where the socket check and
+    #   the form check differ in Rails too: `env["HTTP_ORIGIN"]` is nil,
+    #   and nil equals no allowed origin.
+    #
+    # Not modeled: `config.action_cable.allowed_request_origins` and
+    # `disable_request_forgery_protection` as an app sets them (ingest
+    # reads no `config.action_cable` key). The localhost pattern is
+    # anchored, where Rails' `===` is not, so `http://localhost:1.evil`
+    # passes Rails in development and fails here.
+    def self.cable_origin_allowed?(origin, host, development)
+      return false if origin.empty?
+      return true if valid_origin?(origin, host)
+      development && origin.match?(/\Ahttps?:\/\/localhost:\d+\z/)
+    end
+
     # Constant-time (the verifier's `secure_compare`, which the signed
     # cookies check their digests with too). An empty expected token — a
     # session no form was ever rendered for — matches nothing.
