@@ -466,14 +466,43 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // Mutators return the receiver (self) for chaining; element-typed
     // accessors are `Untyped` (Set isn't parameterized here).
     let set_self = Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![] };
-    register_stdlib_class(classes, "Set", &[], &[
+    // Enumerable's filters and sorts answer an Array, not a Set.
+    let untyped_array = Ty::Array { elem: Box::new(Ty::Untyped) };
+    register_stdlib_class(classes, "Set", &[("[]", set_self.clone())], &[
         ("<<", set_self.clone()), ("add", set_self.clone()),
         ("delete", set_self.clone()), ("merge", set_self.clone()),
-        ("add?", Ty::Untyped), ("each", Ty::Untyped),
-        ("map", Ty::Array { elem: Box::new(Ty::Untyped) }),
+        ("subtract", set_self.clone()), ("clear", set_self.clone()),
+        ("keep_if", set_self.clone()), ("delete_if", set_self.clone()),
+        ("|", set_self.clone()), ("&", set_self.clone()),
+        ("-", set_self.clone()), ("+", set_self.clone()), ("^", set_self.clone()),
+        ("union", set_self.clone()), ("intersection", set_self.clone()),
+        ("difference", set_self.clone()),
+        ("dup", set_self.clone()), ("to_set", set_self.clone()),
+        ("add?", Ty::Untyped),
+        ("delete?", Ty::Union { variants: vec![set_self.clone(), Ty::Nil] }),
+        ("each", Ty::Untyped),
+        ("map", untyped_array.clone()), ("flat_map", untyped_array.clone()),
+        ("filter_map", untyped_array.clone()),
+        ("select", untyped_array.clone()), ("filter", untyped_array.clone()),
+        ("reject", untyped_array.clone()),
+        ("sort", untyped_array.clone()), ("sort_by", untyped_array.clone()),
+        ("partition", Ty::Array { elem: Box::new(untyped_array.clone()) }),
+        ("to_a", untyped_array.clone()),
+        ("find", Ty::Untyped), ("detect", Ty::Untyped),
+        ("first", Ty::Untyped),
+        ("max", Ty::Untyped), ("min", Ty::Untyped),
+        ("max_by", Ty::Untyped), ("min_by", Ty::Untyped),
+        ("sum", Ty::Untyped), ("inject", Ty::Untyped), ("reduce", Ty::Untyped),
+        ("each_with_object", Ty::Untyped),
+        ("group_by", Ty::Hash {
+            key: Box::new(Ty::Untyped),
+            value: Box::new(untyped_array.clone()),
+        }),
         ("include?", Ty::Bool), ("member?", Ty::Bool), ("empty?", Ty::Bool),
+        ("any?", Ty::Bool), ("all?", Ty::Bool), ("none?", Ty::Bool), ("one?", Ty::Bool),
+        ("intersect?", Ty::Bool), ("disjoint?", Ty::Bool),
+        ("exclude?", Ty::Bool),
         ("size", Ty::Int), ("length", Ty::Int), ("count", Ty::Int),
-        ("to_a", Ty::Array { elem: Box::new(Ty::Untyped) }),
         ("subset?", Ty::Bool), ("superset?", Ty::Bool),
     ]);
 

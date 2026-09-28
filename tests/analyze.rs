@@ -1728,6 +1728,47 @@ end
 }
 
 #[test]
+fn set_enumerable_and_operator_surface_resolves() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/thing.rb",
+            r#"class Thing < ApplicationRecord
+  def compute
+    a = Set[1, 2]
+    b = [2, 3].to_set
+    picked = a.select { |x| x > 1 }
+    found = a.find { |x| x > 1 }
+    both = (a | b) - b + [4]
+    b.subtract([3])
+    [a.any?, a.intersect?(b), a.exclude?(9), [1].exclude?(2), picked, found, both, a.max]
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in [
+        "[]", "to_set", "select", "find", "|", "-", "+", "subtract", "any?", "intersect?",
+        "exclude?", "max",
+    ] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "Set `{m}` should resolve; failures = {failures:?}"
+        );
+    }
+    let binops = diagnose(&app)
+        .into_iter()
+        .filter(|d| matches!(d.kind, DiagnosticKind::IncompatibleBinop { .. }))
+        .count();
+    assert_eq!(binops, 0, "Set `-`/`+` take any enumerable — must not flag");
+}
+
+#[test]
 fn stdlib_singletons_and_set_resolve() {
     // The hardcoded Ruby stdlib catalog (SecureRandom, CGI, Digest::*,
     // Math, File, Dir, Set) resolves the common call surface, and unary

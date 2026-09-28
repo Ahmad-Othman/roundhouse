@@ -51,8 +51,12 @@ pub fn classify_sub<'a>(lhs: &'a Expr, rhs: &'a Expr) -> SubCase<'a> {
     let lhs_ty = lhs.ty.as_ref();
     let rhs_ty = rhs.ty.as_ref();
 
-    use super::operand::is_gradual_operand;
+    use super::operand::{is_gradual_operand, is_set_receiver};
     if is_gradual_operand(lhs_ty) || is_gradual_operand(rhs_ty) {
+        return SubCase::Unknown;
+    }
+    // Not `Incompatible` (a raise) nor `ArrayDifference` (an Array, not a Set).
+    if is_set_receiver(lhs_ty) {
         return SubCase::Unknown;
     }
 
@@ -216,5 +220,18 @@ mod tests {
         let l = int_lit(1);
         let r = untyped_var("b");
         assert!(matches!(classify_sub(&l, &r), SubCase::Unknown));
+    }
+
+    #[test]
+    fn set_lhs_is_unknown_but_array_minus_set_is_incompatible() {
+        let set = || Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![] };
+        let ints = || Ty::Array { elem: Box::new(Ty::Int) };
+        let s = var_typed("s", set());
+        assert!(matches!(classify_sub(&s, &var_typed("t", set())), SubCase::Unknown));
+        assert!(matches!(classify_sub(&s, &var_typed("a", ints())), SubCase::Unknown));
+        assert!(matches!(
+            classify_sub(&var_typed("a", ints()), &s),
+            SubCase::Incompatible
+        ));
     }
 }

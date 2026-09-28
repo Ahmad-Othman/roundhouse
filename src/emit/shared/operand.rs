@@ -37,6 +37,11 @@ pub fn is_gradual_operand(t: Option<&Ty>) -> bool {
     }
 }
 
+/// Only the lhs is checked: `Array - Set` raises `TypeError` in Ruby.
+pub fn is_set_receiver(t: Option<&Ty>) -> bool {
+    matches!(t, Some(Ty::Class { id, .. }) if id.0.as_str() == "Set")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -59,8 +59,12 @@ pub fn classify_add(lhs: &Expr, rhs: &Expr) -> AddCase {
     let lhs_ty = lhs.ty.as_ref();
     let rhs_ty = rhs.ty.as_ref();
 
-    use super::operand::is_gradual_operand;
+    use super::operand::{is_gradual_operand, is_set_receiver};
     if is_gradual_operand(lhs_ty) || is_gradual_operand(rhs_ty) {
+        return AddCase::Unknown;
+    }
+    // Not `Incompatible` (a raise) nor `ArrayConcat` (an Array, not a Set).
+    if is_set_receiver(lhs_ty) {
         return AddCase::Unknown;
     }
 
