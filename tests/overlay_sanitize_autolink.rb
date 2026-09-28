@@ -91,11 +91,13 @@ check.("auto_link on empty text is empty", V.auto_link("").to_s, "")
 check.("h escapes a plain String", V.h("<b>x</b>"), "&lt;b&gt;x&lt;/b&gt;")
 check.("h passes an html_safe value through", V.h(SafeString.new("<b>x</b>")), "<b>x</b>")
 
-# The whole campfire expression, end to end.
+# The whole campfire expression, end to end. `to_s` renders through the
+# content layout: with none in this fixture, Action Text's own
+# `<div class="trix-content">`, which is also what campfire's reads.
 content = ActionText::Content.new("Deploy <b>3.4.10</b> — https://ex.co/a")
 check.("the message-body chain renders markup AND links",
        V.auto_link(V.h(content), html: { target: "_blank" }).to_s,
-       %q{Deploy <b>3.4.10</b> — <a target="_blank" href="https://ex.co/a">https://ex.co/a</a>})
+       %Q{<div class="trix-content">\n  Deploy <b>3.4.10</b> — <a target="_blank" href="https://ex.co/a">https://ex.co/a</a>\n</div>\n})
 
 puts(fail_count.zero? ? "ALL OK" : "#{fail_count} FAILED")
 exit(fail_count.zero? ? 0 : 1)

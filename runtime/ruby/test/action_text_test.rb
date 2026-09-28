@@ -611,26 +611,26 @@ class ActionTextFragmentTest < Minitest::Test
     ActionText::Content.define_singleton_method(:render_attachment) { |_attachment| "" }
   end
 
-  def test_to_s_renders_each_attachment_node_inside_its_tag
+  def test_render_attachments_renders_each_attachment_node_inside_its_tag
     with_render(->(a) { "<b>#{a["filename"]}</b>" }) do
       html = %(<div>Hey <action-text-attachment sgid="x" filename="one"></action-text-attachment> and <action-text-attachment filename="two"></action-text-attachment>!</div>)
       assert_equal %(<div>Hey <action-text-attachment sgid="x" filename="one"><b>one</b></action-text-attachment> and <action-text-attachment filename="two"><b>two</b></action-text-attachment>!</div>),
-        ActionText::Content.new(html).to_s
+        ActionText::Content.new(html).render_attachments
     end
   end
 
-  def test_to_s_replaces_children_a_node_already_carries
+  def test_render_attachments_replaces_children_a_node_already_carries
     with_render(->(_a) { "NEW" }) do
       html = %(<action-text-attachment sgid="x"><figure>old</figure></action-text-attachment>)
-      assert_equal %(<action-text-attachment sgid="x">NEW</action-text-attachment>), ActionText::Content.new(html).to_s
+      assert_equal %(<action-text-attachment sgid="x">NEW</action-text-attachment>), ActionText::Content.new(html).render_attachments
     end
   end
 
-  def test_to_s_leaves_a_self_closing_node_and_plain_markup_alone
+  def test_render_attachments_leaves_a_self_closing_node_and_plain_markup_alone
     with_render(->(_a) { "NEW" }) do
       html = %(<div><action-text-attachment sgid="x"/> <p>text</p></div>)
-      assert_equal html, ActionText::Content.new(html).to_s
-      assert_equal "<div>no nodes</div>", ActionText::Content.new("<div>no nodes</div>").to_s
+      assert_equal html, ActionText::Content.new(html).render_attachments
+      assert_equal "<div>no nodes</div>", ActionText::Content.new("<div>no nodes</div>").render_attachments
     end
   end
 
@@ -640,7 +640,7 @@ class ActionTextFragmentTest < Minitest::Test
     with_render(->(a) { "[#{a["sgid"]}]" }) do
       html = %(<div>Hey <action-text-attachment sgid="x" content="<div class=&quot;mention&quot;>y</div>"></action-text-attachment></div>)
       assert_equal %(<div>Hey <action-text-attachment sgid="x" content="<div class=&quot;mention&quot;>y</div>">[x]</action-text-attachment></div>),
-        ActionText::Content.new(html).to_s
+        ActionText::Content.new(html).render_attachments
       assert_equal ["x"], ActionText::Content.new(html).attachments.map { |a| a["sgid"] }
     end
   end
