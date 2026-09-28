@@ -27,9 +27,11 @@ require_relative "test_helper"
 # literal and an unknown, which the strict target refuses. Spelling the
 # call out keeps both lanes on the same file.
 class ActionTextContentTest < Minitest::Test
-  def test_the_default_render_is_the_bare_node
+  # With no app layout, `to_s` is Action Text's own: the gem's
+  # `layouts/action_text/contents/_content.html.erb` around the node.
+  def test_the_default_render_is_action_texts_own_layout
     html = %(<action-text-attachment sgid="x"></action-text-attachment>)
-    assert_equal html, ActionText::Content.new(html).to_s
+    assert_equal "<div class=\"trix-content\">\n  " + html + "\n</div>\n", ActionText::Content.new(html).to_s
     assert_equal html, ActionText::Content.new(html).to_html
   end
 
@@ -225,11 +227,11 @@ class ActionTextContentTest < Minitest::Test
     assert_equal [], ActionText::Content.new(html).attachables
   end
 
-  def test_to_html_and_to_s_are_the_stored_markup
+  def test_to_html_is_the_stored_markup_and_to_s_wraps_it
     html = "<div>Hello <b>world</b></div>"
     content = ActionText::Content.new(html)
     assert_equal html, content.to_html
-    assert_equal html, content.to_s
+    assert_equal "<div class=\"trix-content\">\n  " + html + "\n</div>\n", content.to_s
   end
 
   def test_blank_tracks_plain_text_not_markup
@@ -251,7 +253,7 @@ class ActionTextContentTest < Minitest::Test
     # ignored; ABSENT it was an ArgumentError on every filtered
     # message, inside an app-level rescue that turned it into an empty
     # body.
-    assert_equal "<p>x</p>", ActionText::Content.new("<p>x</p>", canonicalize: false).to_s
+    assert_equal "<p>x</p>", ActionText::Content.new("<p>x</p>", canonicalize: false).to_html
   end
 end
 

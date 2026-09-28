@@ -1002,16 +1002,23 @@ module ActionText
     # statically, so the dispatch below is GENERATED: when the emitted
     # tree carries the layout view module, `project.rs` rewrites the
     # marked span to call it (`apply_content_layout`, the same
-    # re-appliable span replace as `apply_cable_connection`); a tree
-    # without the layout keeps the bare fragment, which is Rails'
-    # fallback too.
+    # re-appliable span replace as `apply_cable_connection`). A tree
+    # without the layout gets Action Text's OWN, which is Rails' fallback:
+    # the gem ships `layouts/action_text/contents/_content.html.erb`,
+    #
+    #   <div class="trix-content">
+    #     <%= yield -%>
+    #   </div>
+    #
+    # and it yields the partial's output, which ends in a newline (see
+    # `apply_content_layout`), so the bytes below are that file rendered.
     def to_s
       rendered_html
     end
 
     # >>> generated: content-layout
     def rendered_html
-      render_attachments
+      "<div class=\"trix-content\">\n  " + render_attachments + "\n</div>\n"
     end
     # <<< generated: content-layout
 

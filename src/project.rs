@@ -7036,7 +7036,7 @@ mod tests {
             "generated dispatch not written:\n{out}"
         );
         assert!(
-            !out.contains("    def rendered_html\n      render_attachments\n    end\n"),
+            !out.contains("    def rendered_html\n      \"<div class=\\\"trix-content\\\">"),
             "default body survived alongside the generated one:\n{out}"
         );
         // No attachable model in this App: the render seam keeps its
@@ -7050,8 +7050,8 @@ mod tests {
         apply_content_layout(&mut files, &App::new());
         assert_eq!(files[0].1, once, "second application changed the file");
 
-        // No layout in the tree: the default bare fragment ships
-        // untouched — the blog fixture has no Action Text layout.
+        // No layout in the tree: the default (Action Text's own layout)
+        // ships untouched — the blog fixture has no Action Text layout.
         let mut files = vec![("runtime/action_text.rb".to_string(), runtime.clone())];
         apply_content_layout(&mut files, &App::new());
         assert_eq!(files[0].1, runtime, "a layout-less app had its runtime rewritten");

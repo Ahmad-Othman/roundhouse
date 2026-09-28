@@ -76,34 +76,9 @@ module ActionText
       SafeString.new(rendered_html)
     end
 
-    # Rails renders `to_s` THROUGH `layouts/action_text/contents/
-    # _content`, which is why a rich text arrives wrapped. campfire
-    # ships that layout (`<div class="trix-content">`), the emit
-    # produces it as `Views::Layouts::ActionText::Contents.content` —
-    # and nothing called it, so every message body rendered one div
-    # short of Rails. The shared runtime's comment asserted the wrapper
-    # was "view-side decoration that the emitted views apply
-    # themselves"; measured, no emitted view applies it.
-    #
-    # Guarded on the constant because the layout is per-APP: an app that
-    # ships no `_content` template has no wrapper to apply, which is
-    # also Rails' behaviour (Action Text falls back to rendering the
-    # fragment bare).
-    #
-    # Over `render_attachments`, not `@html`: Rails renders each
-    # attachment node's partial into the node BEFORE the layout wraps
-    # it (`render_action_text_attachments`), and the shared runtime's
-    # `Content#render_attachments` is that step, dispatching through the
-    # generated `Content.render_attachment`. This reopen shadows the
-    # shared `rendered_html` on the CRuby lane, so it has to take the
-    # same step or a mention never reaches `users/_mention` here.
-    def rendered_html
-      if defined?(::Views::Layouts::ActionText::Contents)
-        ::Views::Layouts::ActionText::Contents.content(render_attachments)
-      else
-        render_attachments
-      end
-    end
+    # `rendered_html` is the shared runtime's: the app's content layout
+    # when the tree carries one, else Action Text's own (see
+    # runtime/action_text.rb). This file only marks the result safe.
 
     # …and the other half of the same decision, which is why it sits
     # here rather than anywhere else.
