@@ -1846,6 +1846,41 @@ end
 }
 
 #[test]
+fn array_filter_map_index_sample_and_bang_maps_resolve() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/thing.rb",
+            r#"class Thing < ApplicationRecord
+  def compute
+    nums = [5, 6, 7]
+    doubled = nums.filter_map { |x| x * 2 if x.odd? }.first
+    at = nums.index(6)
+    found = nums.find_index { |x| x > 5 }
+    picked = nums.sample
+    many = nums.sample(2).size
+    nums.map! { |x| x + 1 }
+    nums.collect! { |x| x - 1 }
+    [doubled, at, found, picked, many, nums.size]
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in ["filter_map", "first", "index", "find_index", "sample", "size", "map!", "collect!"] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "Array `{m}` should resolve; failures = {failures:?}"
+        );
+    }
+}
+
+#[test]
 fn create_view_columns_register_with_real_schema_types() {
     // A model backed by a SQL `create_view` gets its columns from the
     // SELECT `AS <alias>` list. A direct `table.column` projection

@@ -241,7 +241,8 @@ impl<'a> BodyTyper<'a> {
                 "each" | "map" | "collect" | "flat_map" | "collect_concat"
                 | "select" | "filter" | "reject"
                 | "find" | "detect" | "sort_by" | "group_by" | "min_by" | "max_by"
-                | "partition" | "sum"
+                | "partition" | "sum" | "filter_map" | "map!" | "collect!"
+                | "index" | "find_index"
                 | "any?" | "all?" | "none?" | "one?"
                 | "to_h" => Some(vec![(**elem).clone()]),
                 "each_with_index" => Some(vec![(**elem).clone(), Ty::Int]),
@@ -1602,7 +1603,7 @@ fn counted_first_last(method: &Symbol, args: &[crate::expr::Expr]) -> bool {
     // `take(n)` is the same counted terminal as `first(n)`: the Rails
     // tutorial seeds with `User.order(:created_at).take(6)` and then
     // `.each`es the result.
-    matches!(method.as_str(), "first" | "last" | "take")
+    matches!(method.as_str(), "first" | "last" | "take" | "sample")
         && args.len() == 1
         && matches!(
             args[0].ty.as_ref(),
@@ -1745,7 +1746,10 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
             variants: vec![elem.clone(), Ty::Nil],
         },
         // `map` / `collect` produce Array of the block's return type.
-        "map" | "collect" => Ty::Array { elem: Box::new(transformed_elem()) },
+        "map" | "collect" | "map!" | "collect!" => {
+            Ty::Array { elem: Box::new(transformed_elem()) }
+        }
+        "filter_map" => Ty::Array { elem: Box::new(non_nil_elem(&transformed_elem())) },
         // `flat_map` expects the block to return an Array, flattens by one.
         "flat_map" | "collect_concat" => match block_ret {
             Some(Ty::Array { elem: inner }) => Ty::Array { elem: inner.clone() },
@@ -1793,9 +1797,10 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         "delete" | "delete_at" => Ty::Union {
             variants: vec![elem.clone(), Ty::Nil],
         },
-        "pop" | "shift" => Ty::Union {
+        "pop" | "shift" | "sample" => Ty::Union {
             variants: vec![elem.clone(), Ty::Nil],
         },
+        "index" | "find_index" => Ty::Union { variants: vec![Ty::Int, Ty::Nil] },
         "dup" | "clone" => Ty::Array { elem: Box::new(elem.clone()) },
         // `clear` empties in place and returns SELF, so it keeps the
         // element type — the array is empty, not differently-typed.
