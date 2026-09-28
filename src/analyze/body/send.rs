@@ -1829,6 +1829,9 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
             Ty::Float => Ty::Float,
             _ => Ty::Untyped,
         },
+        "exclude?" => Ty::Bool,
+        // `Set` isn't parameterized, so the element type can't be carried.
+        "to_set" => Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![] },
         // JSON serialization of a collection is a String whatever the
         // elements are.
         "to_json" => Ty::Str,
