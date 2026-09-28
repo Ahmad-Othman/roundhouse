@@ -2397,6 +2397,48 @@ end
 }
 
 #[test]
+fn time_parse_types_by_receiver_and_arity() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/thing.rb",
+            r#"class Thing < ApplicationRecord
+  def stamps(raw)
+    a = Time.parse(raw)
+    b = Time.zone.parse(raw)
+    [a.strftime("%Y"), b.beginning_of_day, a < Time.now, b < Time.now]
+  end
+
+  def with_now(raw)
+    Time.zone.parse(raw, Time.now)
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    assert_eq!(
+        failures.iter().filter(|f| f.as_str() == "parse").count(),
+        1,
+        "only the `(str, now)` form is left unresolved; failures = {failures:?}"
+    );
+    let binops: Vec<String> = diagnose(&app)
+        .into_iter()
+        .filter(|d| matches!(d.kind, DiagnosticKind::IncompatibleBinop { .. }))
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(
+        binops,
+        vec!["`<` with incompatible operand types: Time? < Time".to_string()],
+        "`Time.parse` raises on no date, `Time.zone.parse` answers nil"
+    );
+}
+
+#[test]
 fn gem_catalog_resolves_third_party_surface() {
     // The gem catalog (src/catalog/gems.rs) resolves the third-party
     // surface apps call: class methods (`Arel.sql`, `ROTP::Base32.random`),

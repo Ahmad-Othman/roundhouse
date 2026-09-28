@@ -4866,8 +4866,44 @@ pub(crate) fn apply_time_format_lowering(lcs: &mut [LibraryClass]) {
     for lc in lcs.iter_mut() {
         for m in &mut lc.methods {
             rewrite_rfc2822(&mut m.body);
+            rewrite_time_parse(&mut m.body);
         }
     }
+}
+
+// Not left as `Time.parse`: spinel ships no stdlib `time` (matz/spinel#1118), so it grounds like `rfc2822` above.
+fn rewrite_time_parse(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut |c| rewrite_time_parse(c));
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node else {
+        return;
+    };
+    if method.as_str() != "parse" || args.len() != 1 {
+        return;
+    }
+    let is_time = |e: &Expr| {
+        matches!(&*e.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Time")
+    };
+    let target = if is_time(r) {
+        "parse_time"
+    } else if matches!(&*r.node,
+        ExprNode::Send { recv: Some(z), method, args, block: None, .. }
+            if method.as_str() == "zone" && args.is_empty() && is_time(z))
+    {
+        "zone_parse"
+    } else {
+        return;
+    };
+    let arg = args[0].clone();
+    *expr.node = ExprNode::Send {
+        recv: Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+        )),
+        method: Symbol::from(target),
+        args: vec![arg],
+        block: None,
+        parenthesized: true,
+    };
 }
 
 fn rewrite_rfc2822(expr: &mut Expr) {

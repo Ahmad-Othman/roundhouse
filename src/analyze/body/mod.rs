@@ -955,6 +955,9 @@ impl<'a> BodyTyper<'a> {
                 ) {
                     return t;
                 }
+                if let Some(t) = recv.as_ref().and_then(|r| time_parse_ty(r, method, args)) {
+                    return t;
+                }
                 self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref(), args)
             }
 
@@ -3026,4 +3029,26 @@ fn never_falsy(ty: &Ty) -> bool {
         Ty::Union { variants } => variants.iter().all(never_falsy),
         _ => false,
     }
+}
+
+// Not the `(str, now)` form: only one argument is grounded to `ActiveSupport.parse_time` / `zone_parse`.
+fn time_parse_ty(recv: &Expr, method: &Symbol, args: &[Expr]) -> Option<Ty> {
+    if method.as_str() != "parse" || args.len() != 1 {
+        return None;
+    }
+    if is_time_const(recv) {
+        return Some(Ty::Time);
+    }
+    match &*recv.node {
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "zone" && args.is_empty() && is_time_const(r) =>
+        {
+            Some(Ty::Union { variants: vec![Ty::Time, Ty::Nil] })
+        }
+        _ => None,
+    }
+}
+
+fn is_time_const(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Time")
 }
