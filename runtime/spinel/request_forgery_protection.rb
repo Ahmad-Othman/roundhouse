@@ -84,21 +84,12 @@ module ActionController
       origin[at + 3, origin.length].to_s == host
     end
 
-    # Constant-time over equal lengths, as ActiveSupport's
-    # `secure_compare`: the loop never exits early on a mismatch, so the
-    # time taken does not say how many leading bytes were right. An
-    # empty expected token — a session no form was ever rendered for —
-    # matches nothing.
+    # Constant-time (the verifier's `secure_compare`, which the signed
+    # cookies check their digests with too). An empty expected token — a
+    # session no form was ever rendered for — matches nothing.
     def self.token_matches?(given, expected)
       return false if expected.empty?
-      return false if given.bytesize != expected.bytesize
-      diff = 0
-      i = 0
-      while i < given.bytesize
-        diff = diff | (given.getbyte(i) ^ expected.getbyte(i))
-        i += 1
-      end
-      diff == 0
+      ActionController::MessageVerifier.secure_compare(given, expected)
     end
   end
 end

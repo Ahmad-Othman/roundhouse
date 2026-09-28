@@ -182,6 +182,29 @@ class ActionControllerMessageVerifierTest < Minitest::Test
     )
   end
 
+  # A non-ASCII value comes back as text: on CRuby the base64 decode
+  # answers ASCII-8BIT, which is not `==` to the UTF-8 literal (and would
+  # raise Encoding::CompatibilityError spliced into a page).
+  def test_a_non_ascii_value_verifies_as_utf8_text
+    signed = ActionController::MessageVerifier.generate(
+      SECRET, ActionController::MessageVerifier::SIGNED_COOKIE_SALT,
+      "caf\u00e9 \u2713", "cookie.name", true
+    )
+    assert_equal "caf\u00e9 \u2713", ActionController::MessageVerifier.verified(
+      SECRET, ActionController::MessageVerifier::SIGNED_COOKIE_SALT,
+      signed, "cookie.name", true
+    )
+  end
+
+  # ── secure_compare ───────────────────────────────────────────
+
+  def test_secure_compare
+    assert ActionController::MessageVerifier.secure_compare("abc", "abc")
+    refute ActionController::MessageVerifier.secure_compare("abc", "abd")
+    refute ActionController::MessageVerifier.secure_compare("abc", "ab")
+    assert ActionController::MessageVerifier.secure_compare("", "")
+  end
+
   # ── iso8601_ms ───────────────────────────────────────────────
 
   def test_iso8601_ms_is_utc_with_three_fractional_digits

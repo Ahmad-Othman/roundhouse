@@ -99,7 +99,7 @@ module Turbo
         digest = text[sep + 2, text.length - sep - 2]
         expected = ActionController::MessageVerifier.digest_for(
           Rails.application.secret_key_base, SALT, payload, false)
-        return nil if digest != expected
+        return nil unless ActionController::MessageVerifier.secure_compare(digest, expected)
         begin
           value = JSON.parse(Base64.strict_decode64(payload))
         rescue ArgumentError, JSON::ParserError

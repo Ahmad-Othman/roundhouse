@@ -295,6 +295,19 @@ fn ac_cookies_test_passes_under_cruby() {
     );
 }
 
+/// `ActionController::MessageVerifier` against vectors a real Rails app
+/// minted (signed cookies, signed ids, signed GlobalIDs), plus the
+/// constant-time digest compare and the UTF-8 answer. Ruby-family lanes
+/// only, like the jar that signs through it.
+#[test]
+#[ignore]
+fn ac_message_verifier_test_passes_under_cruby() {
+    build_and_run(
+        Path::new("runtime/ruby/test/action_controller/message_verifier_test.rb"),
+        "ac_message_verifier",
+    );
+}
+
 /// `rate_limit`'s counter (`ActionController::RateLimiter` over
 /// `Rails::Cache#increment_str`). Ruby-family lanes only: the store is
 /// the shared runtime's, which the strict-target runtimes do not stage.

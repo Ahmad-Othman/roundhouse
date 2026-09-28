@@ -342,9 +342,11 @@ from this fixture:
   that does not present it (see the guide's
   [security posture](https://github.com/rubys/roundhouse/blob/main/docs/guide/rails-coverage.md#security-posture)
   for how this differs from Rails).
-- **No signed stream names.** ActionCable's
-  `signed_stream_name` is treated as a literal stream name on both
-  ends. Any WebSocket client can subscribe to any stream by name.
+- **Signed stream names.** `turbo_stream_from` writes the name signed
+  the way turbo-rails signs it, and a subscribe whose name does not
+  verify is refused (runtime/turbo_streams.rb). A client cannot join a
+  stream by editing the name in the page. `/cable` does not check the
+  WebSocket `Origin` against `allowed_request_origins` as Rails does.
 - **Signed, not encrypted, session and flash cookies.** A client can
   read its session and its flash messages but cannot forge either: a
   constructed `Cookie: flash_notice=Hello` is not signed and shows

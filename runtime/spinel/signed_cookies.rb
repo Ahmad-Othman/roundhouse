@@ -47,20 +47,15 @@ module ActionDispatch
     end
 
     # The value `raw` carries when it verifies for `name`, else "" — the
-    # same answer as an absent cookie.
-    #
-    # UTF-8 on the way out, as `CgiIo.url_decode` does (a no-op on spinel,
-    # which assumes UTF-8): the message comes back through a base64 decode,
-    # which CRuby tags ASCII-8BIT, and campfire's `notice: "✓"` spliced
-    # into the UTF-8 layout as binary is an Encoding::CompatibilityError.
-    # `+` because the rejection path answers a frozen literal.
+    # same answer as an absent cookie. UTF-8, as the verifier answers every
+    # message (the flash's `notice: "✓"` is why that matters).
     def self.verified(raw, name)
       return "" if raw == ""
-      (+ActionController::MessageVerifier.verified(
+      ActionController::MessageVerifier.verified(
         Rails.application.secret_key_base,
         ActionController::MessageVerifier::SIGNED_COOKIE_SALT,
         raw, "cookie." + name, true
-      )).force_encoding("UTF-8")
+      )
     end
   end
 

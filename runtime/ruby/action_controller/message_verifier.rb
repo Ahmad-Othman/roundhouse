@@ -148,10 +148,17 @@ module ActionController
     # tampered cookie is indistinguishable from an absent one, which is
     # what Rails does too (it returns nil and the app treats it as signed
     # out).
+    #
+    # UTF-8, as Rails' JSON deserializer answers: the message comes back
+    # through a base64 decode, which CRuby tags ASCII-8BIT, and a
+    # non-ASCII value (campfire's `notice: "✓"`, a `cookies.signed`
+    # value) spliced into a UTF-8 page as binary is an
+    # Encoding::CompatibilityError. A no-op on spinel, which assumes
+    # UTF-8. `+` because `json_value` may answer its argument.
     def self.verified(secret, salt, signed, purpose, sha1)
       json = verified_json(secret, salt, signed, purpose, sha1)
       return "" if json == ""
-      json_value(json)
+      (+json_value(json)).force_encoding("UTF-8")
     end
 
     # The message JSON carried by `signed`, or "" for every rejection:
@@ -163,7 +170,7 @@ module ActionController
       return "" if sep.nil?
       payload = signed[0, sep]
       supplied = signed[sep + 2, signed.length - sep - 2]
-      return "" if supplied != digest_for(secret, salt, payload, sha1)
+      return "" unless secure_compare(supplied, digest_for(secret, salt, payload, sha1))
       env = Base64.strict_decode64(payload)
       return "" if extract(env, "\"pur\":\"") != purpose
       # `"exp":null` does not match the quoted prefix, so an
@@ -245,7 +252,7 @@ module ActionController
       return "" if sep.nil?
       payload = signed[0, sep]
       supplied = signed[sep + 2, signed.length - sep - 2]
-      return "" if supplied != digest_for(secret, salt, payload, sha1)
+      return "" unless secure_compare(supplied, digest_for(secret, salt, payload, sha1))
       env = Base64.urlsafe_decode64(payload)
       return "" if extract(env, "\"pur\":\"") != purpose
       exp = extract(env, "\"exp\":\"")
@@ -266,6 +273,22 @@ module ActionController
       close = comma.nil? ? brace : (brace.nil? ? comma : (comma < brace ? comma : brace))
       return "" if close.nil?
       envelope[rest, close - rest]
+    end
+
+    # `ActiveSupport::SecurityUtils.secure_compare`, which is what Rails'
+    # verifier checks a digest with: the loop never exits early on a
+    # mismatch, so the time taken does not say how many leading
+    # characters of a forged digest were right. The length is not
+    # secret — every digest of one kind has the same one.
+    def self.secure_compare(a, b)
+      return false if a.bytesize != b.bytesize
+      diff = 0
+      i = 0
+      while i < a.bytesize
+        diff = diff | (a.getbyte(i) ^ b.getbyte(i))
+        i += 1
+      end
+      diff == 0
     end
 
     def self.digest_for(secret, salt, payload, sha1)

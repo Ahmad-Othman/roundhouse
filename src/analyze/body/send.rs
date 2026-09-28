@@ -2145,6 +2145,10 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         "casecmp?" => Ty::Bool,
         // `ord` → the codepoint of the first character.
         "ord" => Ty::Int,
+        // `getbyte(i)` → the byte at `i`, nil past the end. Kept Int, as
+        // `[]` below keeps Str: the readers index inside `bytesize` (the
+        // verifier's constant-time `secure_compare`).
+        "getbyte" => Ty::Int,
         // `=~` (regex-match operator, desugars to `str.=~(re)`) → the
         // match position or nil. `match` (below) is the MatchData form.
         "=~" => Ty::Union { variants: vec![Ty::Int, Ty::Nil] },
