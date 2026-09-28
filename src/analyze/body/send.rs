@@ -241,7 +241,7 @@ impl<'a> BodyTyper<'a> {
                 "each" | "map" | "collect" | "flat_map" | "collect_concat"
                 | "select" | "filter" | "reject"
                 | "find" | "detect" | "sort_by" | "group_by" | "min_by" | "max_by"
-                | "partition"
+                | "partition" | "sum"
                 | "any?" | "all?" | "none?" | "one?"
                 | "to_h" => Some(vec![(**elem).clone()]),
                 "each_with_index" => Some(vec![(**elem).clone(), Ty::Int]),
@@ -1156,6 +1156,10 @@ impl<'a> BodyTyper<'a> {
                 if let Some(t) = sub_array_slice(method, args, elem) {
                     return t;
                 }
+                // An initial value decides the result type (`[1, 2].sum(0.0)` is a Float).
+                if method.as_str() == "sum" && !args.is_empty() {
+                    return Ty::Untyped;
+                }
                 array_method(method, elem, block_ret)
             }
             // Relation-typed receiver — a chain started from a scope
@@ -1818,6 +1822,13 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         "any?" | "all?" | "none?" | "one?" | "empty?" | "include?" => Ty::Bool,
         // ActiveSupport `Enumerable#many?` — more than one element.
         "many?" => Ty::Bool,
+        // Not the element type as-is: `[nil].sum` raises, and a non-numeric
+        // `sum` needs an initial value this arm doesn't see.
+        "sum" => match block_ret.unwrap_or(elem) {
+            Ty::Int => Ty::Int,
+            Ty::Float => Ty::Float,
+            _ => Ty::Untyped,
+        },
         // JSON serialization of a collection is a String whatever the
         // elements are.
         "to_json" => Ty::Str,

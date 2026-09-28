@@ -1769,6 +1769,42 @@ end
 }
 
 #[test]
+fn array_sum_types_from_elements_or_block() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/thing.rb",
+            r#"class Thing < ApplicationRecord
+  def compute
+    ints = [1, 2].sum + 1
+    floats = [1.5, 2.0].sum.round(1)
+    halves = [1, 2].sum { |x| x * 0.5 }.round(1)
+    seeded = [1, 2].sum(0.0)
+    [ints, floats, halves, seeded]
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in ["sum", "round"] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "`{m}` should resolve on an Array sum; failures = {failures:?}"
+        );
+    }
+    let binops = diagnose(&app)
+        .into_iter()
+        .filter(|d| matches!(d.kind, DiagnosticKind::IncompatibleBinop { .. }))
+        .count();
+    assert_eq!(binops, 0, "`[1, 2].sum + 1` is Int + Int — must not flag");
+}
+
+#[test]
 fn create_view_columns_register_with_real_schema_types() {
     // A model backed by a SQL `create_view` gets its columns from the
     // SELECT `AS <alias>` list. A direct `table.column` projection
