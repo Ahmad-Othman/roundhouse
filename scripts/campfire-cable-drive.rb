@@ -240,6 +240,20 @@ check("the manifest is served as JSON", manifest["content-type"].to_s[/\A[^;]+/]
 manifest_name = (JSON.parse(manifest.body.to_s)["name"] rescue nil)
 check("the manifest parses and names the app", manifest_name.is_a?(String) && !manifest_name.empty?, true)
 
+# ── a direct room in the sidebar ──────────────────────────────────────
+#
+# The sidebar's direct-room partial asks `members.many?` of
+# `room.users.without(user).presence || [user]` — a Relation or an Array.
+# The Array half had no `many?` on spinel, and every sidebar render with
+# a direct room 500'd on the deployed binary. Creating one (with user 2
+# on a seeded tree; alone, on a fresh one — the Array branch) and
+# rendering the sidebar exercises both.
+puts "\n\e[1;34m==>\e[0m a direct room in the sidebar"
+direct = req("POST", "/rooms/directs", { "user_ids[]" => "2" })
+check("POST /rooms/directs", direct.code, "302")
+sidebar = req("GET", "/users/me/sidebar")
+check("GET /users/me/sidebar with a direct room", sidebar.code, "200")
+
 # ── two connections ───────────────────────────────────────────────────
 puts "\n\e[1;34m==>\e[0m two /cable connections"
 ws = "#{URL.scheme == "https" ? "wss" : "ws"}://#{URL.host}:#{URL.port}/cable"
