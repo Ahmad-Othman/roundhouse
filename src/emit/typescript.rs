@@ -925,7 +925,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // the runtime_loader manifest.
     let jbuilder_funcs = crate::lower::flatten_lcs_to_functions(&jbuilder_lcs);
     let json_views: Vec<&crate::dialect::View> =
-        app.views.iter().filter(|v| v.format.as_str() == "json").collect();
+        app.views.iter().filter(|v| v.jbuilder).collect();
     for (view, func) in json_views.iter().zip(jbuilder_funcs.iter()) {
         let out_path = jbuilder_view_output_path(view.name.as_str());
         files.extend(library::emit_function_file(func, app, out_path));

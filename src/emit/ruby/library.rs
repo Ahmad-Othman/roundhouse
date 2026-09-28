@@ -3062,8 +3062,8 @@ fn rewrite_helper_calls(
     // Bare `<x>_url` whose `<x>_path` sibling is generated — the
     // absolute variant grounds to protocol + configured domain + the
     // path helper (same convention as `rewrite_url_helpers_absolute`'s
-    // host-kwarg form): `"http://#{Rails.application.domain}#{
-    // RouteHelpers.<x>_path(args)}"`. Lobsters' hats page links
+    // host-kwarg form): `"#{Rails.application.protocol}#{
+    // Rails.application.domain}#{RouteHelpers.<x>_path(args)}"`. Lobsters' hats page links
     // `request_hat_url` bare.
     if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
         if let Some(stem) = method.as_str().strip_suffix("_url") {
@@ -3108,7 +3108,9 @@ fn rewrite_helper_calls(
                 );
                 *expr.node = ExprNode::StringInterp {
                     parts: vec![
-                        crate::expr::InterpPart::Text { value: "http://".to_string() },
+                        crate::expr::InterpPart::Expr {
+                            expr: crate::lower::view_to_library::rails_application_call("protocol"),
+                        },
                         crate::expr::InterpPart::Expr { expr: domain },
                         crate::expr::InterpPart::Expr { expr: path_call },
                     ],

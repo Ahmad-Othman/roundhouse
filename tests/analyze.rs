@@ -3997,10 +3997,12 @@ end
     assert_eq!(ty("form.object.try(:name)", 12), "String?");
 }
 
-/// `.text.erb` and `.json.erb` templates are ingested for the analyzer
-/// (their Ruby types, the IDE sees them) and dropped before lowering.
+/// `.text.erb` templates are ingested for the analyzer (their Ruby
+/// types, the IDE sees them) and dropped before lowering. A `.json.erb`
+/// is not: it lowers through the view path as `<action>_json` (campfire's
+/// PWA manifest), and is no jbuilder.
 #[test]
-fn text_and_json_erb_templates_are_analysis_only() {
+fn text_erb_templates_are_analysis_only_and_json_erb_is_rendered() {
     let mut app = app_from_files(&[
         ("app/mailers/application_mailer.rb", "class ApplicationMailer < ActionMailer::Base\nend\n"),
         ("app/mailers/product_mailer.rb", "class ProductMailer < ApplicationMailer\n  def in_stock\n    @name = \"x\"\n  end\nend\n"),
@@ -4015,7 +4017,10 @@ fn text_and_json_erb_templates_are_analysis_only() {
         .filter(|v| v.analysis_only)
         .map(|v| format!("{}.{}", v.name.as_str(), v.format.as_str()))
         .collect();
-    assert_eq!(analysis_only, vec!["product_mailer/in_stock.text", "pwa/manifest.json"]);
+    assert_eq!(analysis_only, vec!["product_mailer/in_stock.text"]);
+    let manifest = app.views.iter().find(|v| v.name.as_str() == "pwa/manifest").expect("manifest ingested");
+    assert!(!manifest.jbuilder, "a json.erb is text, not jbuilder");
+    assert!(roundhouse::lower::view::lowers_through_view_path(manifest));
     let file = roundhouse::ide::file_id(&app, "app/views/product_mailer/in_stock.text.erb").expect("file");
     let text = &roundhouse::ide::source(&app, file).unwrap().text;
     let offset = text.find("@name.upcase").unwrap() as u32 + 7;
