@@ -1572,6 +1572,15 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
         | "beginning_of_day" | "end_of_day" | "beginning_of_hour" | "end_of_hour"
         | "beginning_of_week" | "end_of_week" | "beginning_of_month" | "end_of_month"
         | "beginning_of_year" | "end_of_year" | "midnight" | "noon"
+        | "beginning_of_minute" | "end_of_minute" | "middle_of_day" | "at_midnight"
+        | "at_beginning_of_day" | "at_end_of_day" | "at_noon" | "at_middle_of_day"
+        | "at_beginning_of_hour" | "at_end_of_hour" | "at_beginning_of_minute" | "at_end_of_minute"
+        | "at_beginning_of_week" | "at_end_of_week" | "at_beginning_of_month" | "at_end_of_month"
+        | "at_beginning_of_year" | "at_end_of_year"
+        | "yesterday" | "tomorrow" | "prev_day" | "next_day" | "days_ago" | "days_since"
+        | "weeks_ago" | "weeks_since" | "next_week" | "prev_week" | "last_week"
+        | "prev_month" | "next_month" | "last_month" | "months_ago" | "months_since"
+        | "prev_year" | "next_year" | "last_year" | "years_ago" | "years_since"
         | "change" | "advance" | "ago" | "since" | "from_now"
         | "round" | "floor" | "ceil" | "to_date" | "to_datetime" => time(),
         // `Time - x` is `Time` for a Duration arg but a Float for a
@@ -1593,7 +1602,7 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
         // this arm); the ordered comparisons aren't, so type them here:
         // `created_at >= cutoff` → Bool.
         "<" | ">" | "<=" | ">=" | "between?"
-        | "after?" | "before?" | "past?" | "future?" | "today?"
+        | "after?" | "before?" | "past?" | "future?" | "today?" | "yesterday?" | "tomorrow?"
         | "monday?" | "tuesday?" | "wednesday?" | "thursday?" | "friday?"
         | "saturday?" | "sunday?" | "on_weekend?" | "on_weekday?" => Ty::Bool,
         _ => return None,

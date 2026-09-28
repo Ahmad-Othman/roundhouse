@@ -46,6 +46,7 @@ pub mod create_block;
 pub mod as_json_poro;
 pub mod active_model_model;
 pub mod enumerable_ext;
+pub mod time_calendar;
 pub mod params_merge;
 pub mod duration;
 pub mod and_return;
@@ -319,6 +320,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `list.index_by { … }` → `ActiveSupport.index_by(list) { … }`.
     // Same receiver-shape rewrite, same absence of constraints.
     ("enumerable_ext", &[]),
+    // No runs_after: it reads only analyzer types and produces calls no other pass consumes.
+    ("time_calendar", &[]),
     // `Rooms::Open.count` → `Room.where(type: "Rooms::Open").count`.
     // Produces a `where` at a model Const root, which is vocabulary
     // every later pass already reads; consumes nothing any pass
@@ -720,6 +723,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("presence_in");
     enumerable_ext::apply_enumerable_ext_grounding(app);
     ran!("enumerable_ext");
+    time_calendar::apply_time_calendar_grounding(app);
+    ran!("time_calendar");
     sti_scope::apply_sti_scope_lowering(app);
     ran!("sti_scope");
     relation_ivar_materialize::apply_relation_ivar_materialize(app);
