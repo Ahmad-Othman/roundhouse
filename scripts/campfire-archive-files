@@ -77,6 +77,9 @@ The server is a green thread per connection, run on the runtime's OS
 workers (one per core, autodetected); set \`SPINEL_WORKERS=N\` in the
 environment to choose the count.
 
+Signed cookies and links use \`SECRET_KEY_BASE\` when it is set. Otherwise
+a key is generated on first run and kept in \`storage/secret_key_base\`.
+
 ## End-to-end
 
 Browser tests (Playwright) driving the built binary. The config boots the

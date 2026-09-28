@@ -75,7 +75,10 @@ Rails.env_name = ENV["RAILS_ENV"]
 # The key every signed message derives from (signed cookies, signed ids).
 # Read here rather than in the framework runtime for the same reason
 # RAILS_ENV is: the runtime typing gate doesn't model `ENV[]`.
-Rails.secret_key_base = ENV["SECRET_KEY_BASE"]
+# Unset, it is generated once and kept in storage/ (runtime/local_secret.rb):
+# never the empty string, which anyone could sign with.
+require_relative "runtime/local_secret"
+Rails.secret_key_base = LocalSecret.resolve(ENV["SECRET_KEY_BASE"])
 # Per-app Rails::Application reopen — the app's real config methods
 # (`Rails.application.name` in layouts). Emitted unconditionally (a
 # stub reopen when the source app has none); loads right after the

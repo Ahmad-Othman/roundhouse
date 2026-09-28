@@ -213,6 +213,10 @@ fn real_blog_spinel_tests_pass() {
         // (runtime/signed_cookies.rb): a round trip, and every
         // client-written variant reading as absent.
         "test/signed_cookies_test.rb",
+        // The key everything above signs with when SECRET_KEY_BASE is
+        // unset (runtime/local_secret.rb): generated, kept owner-only,
+        // read back, never empty.
+        "test/local_secret_test.rb",
     ] {
         assert_test_passes(&scratch, &gemfile, test);
     }

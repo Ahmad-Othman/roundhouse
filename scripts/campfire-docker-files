@@ -110,6 +110,22 @@ docker run --rm -p 3000:3000 -v campfire-data:/app/storage campfire
 \`-e PORT=n\` changes the port inside the container; \`-e SPINEL_WORKERS=n\`
 caps the OS worker threads (default: one per core).
 
+The key that signs cookies and links (sessions, sign-in transfer links,
+stream names) is generated on first run and kept in \`/app/storage\`
+beside the database, so it survives restarts with the volume. To supply
+your own instead — several containers sharing one key, or a key kept out
+of the data volume — generate it once (\`openssl rand -hex 64\`), keep it,
+and pass the same value on every run:
+
+\`\`\`sh
+docker run --rm -p 3000:3000 -v campfire-data:/app/storage \\
+  -e SECRET_KEY_BASE="\$CAMPFIRE_SECRET" campfire
+\`\`\`
+
+An image built from an archive published before 2026-09-28 signed with
+an empty key when \`SECRET_KEY_BASE\` was unset: rebuild from a current
+archive, or pass the variable.
+
 ## Without Docker
 
 The Dockerfile is a recipe, not a requirement. On Linux with a C

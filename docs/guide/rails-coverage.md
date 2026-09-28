@@ -160,6 +160,13 @@ What differs from Rails, and why:
   an empty session or no message. The session payload is not Rails'
   JSON either, so a migration from Rails starts every session afresh;
   Campfire's login rides its own signed cookie and carries over.
+- **An unset `SECRET_KEY_BASE` is generated, not fatal.** Rails
+  development keeps a generated key in `tmp/local_secret.txt`, and
+  production refuses to boot without one. The ruby family generates the
+  key on first boot and keeps it in `storage/secret_key_base` (mode
+  0600), the directory a deployment already persists for its database.
+  Set the variable to share one key across instances, or to carry a key
+  over from a Rails deployment.
 - **Rails' implicit default is not applied.** Under `load_defaults`
   5.2+, Rails protects every `ActionController::Base` controller even
   when the app never writes the macro. Here only a written

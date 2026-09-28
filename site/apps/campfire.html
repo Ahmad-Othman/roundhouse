@@ -46,8 +46,10 @@ docker run --rm -p 3000:3000 -v campfire-data:/app/storage campfire</code></pre>
     <p>
       Then open <a href="http://localhost:3000/">http://localhost:3000/</a>:
       campfire's own first-run page creates the account, the first user, and
-      the first room. The archive's README covers ports, worker counts, and
-      building without Docker.
+      the first room. The key that signs sessions and links is generated on
+      first run and kept in the volume; the archive's README covers
+      supplying your own (<code>-e SECRET_KEY_BASE</code>), ports, worker
+      counts, and building without Docker.
     </p>
     <p class="note">
       Prefer to read the emitted Ruby? The
