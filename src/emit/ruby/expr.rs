@@ -537,6 +537,9 @@ fn emit_bool_op_operand(
         ExprNode::Assign { .. } | ExprNode::OpAssign { .. } => {
             return format!("({s})");
         }
+        ExprNode::Seq { exprs } if exprs.len() > 1 => {
+            return format!("({s})");
+        }
         // A CONDITIONAL AS AN OPERAND, same argument one construct over.
         // The modifier form binds looser than every boolean operator, so
         // `x.m if c || fallback` re-parses as `x.m if (c || fallback)` —
@@ -700,7 +703,7 @@ fn is_simple_ident(s: &str) -> bool {
 /// and `f((g a: 1 do ... end))` parses identically everywhere.
 /// Everything else passes through unchanged.
 fn emit_arg(e: &Expr) -> String {
-    if renders_as_trailing_modifier(e) || renders_as_command_with_block(e) {
+    if renders_as_trailing_modifier(e) || renders_as_command_with_block(e) || is_multi_seq(e) {
         format!("({})", emit_expr(e))
     } else {
         emit_expr(e)
@@ -744,8 +747,18 @@ fn renders_as_trailing_modifier(e: &Expr) -> bool {
 /// (`a.b`), an index (`a[i]`), or a parenthesized call (`f(x)`) — parse
 /// correctly as receivers and don't. Exercised by the view auto-escape
 /// path, which wraps interpolated expressions in `html_escape(<expr>.to_s)`.
+/// A statement sequence of more than one expression — the shape a
+/// lowering leaves behind when it inlines a hydrate loop (`stmt = …;
+/// results = []; while …; results`) at a value site. Bare, the
+/// newlines end the enclosing call; wrapped in parens Ruby reads
+/// `(a\nb)` as one grouped expression answering `b`.
+fn is_multi_seq(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Seq { exprs } if exprs.len() > 1)
+}
+
 fn recv_needs_parens(r: &Expr) -> bool {
     match &*r.node {
+        ExprNode::Seq { exprs } if exprs.len() > 1 => true,
         ExprNode::BoolOp { .. } | ExprNode::Range { .. } | ExprNode::RescueModifier { .. } => true,
         // An assignment as receiver (`(rd = session[:k]).present?`,
         // lobsters login) MUST keep its parens: rendered bare, Ruby
