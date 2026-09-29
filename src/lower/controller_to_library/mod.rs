@@ -2186,6 +2186,12 @@ fn action_to_method(
     for (n, default) in &a.kw_params {
         params.push(Param::keyword(n.clone(), default.clone()));
     }
+    // `**rest` last, the only position Ruby accepts it in.
+    if let Some(n) = &a.kwrest_param {
+        let mut p = Param::keyword(n.clone(), None);
+        p.rest = true;
+        params.push(p);
+    }
     // Order matters: turbo_stream is tested before json, so an action
     // with both templates picks the one the request actually asked for.
     let mut variants: Vec<&str> = Vec::new();

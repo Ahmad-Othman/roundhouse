@@ -406,6 +406,7 @@ fn controller_new_action_is_reserved_word_escaped() {
                 params: Row::closed(),
                 opt_params: vec![],
                 kw_params: vec![],
+                kwrest_param: None,
                 block_param: None,
                 body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
                 renders: RenderTarget::Inferred,

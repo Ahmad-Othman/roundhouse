@@ -81,6 +81,7 @@ fn tiny_blog_round_trips() {
         params: Row::closed(),
         opt_params: vec![],
         kw_params: vec![],
+        kwrest_param: None,
         block_param: None,
         body: action_body,
         renders: RenderTarget::Inferred,

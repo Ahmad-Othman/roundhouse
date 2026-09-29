@@ -1159,6 +1159,12 @@ pub struct Action {
     /// time the action runs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kw_params: Vec<(Symbol, Option<Expr>)>,
+    /// The keyword-rest parameter name (`def f(**options)`), if any.
+    /// Emitted as `**options` after the keywords; a concern spliced
+    /// into a controller keeps it instead of turning it into a required
+    /// positional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kwrest_param: Option<Symbol>,
     /// The captured block parameter name (`def f(&block)`), if the method
     /// names its block. Occupies the `def`-site `&`-slot, distinct from
     /// the positional `params`.

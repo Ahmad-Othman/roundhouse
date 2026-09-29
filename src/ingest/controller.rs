@@ -289,6 +289,7 @@ fn ingest_controller_body_item(
         let mut opt_params: Vec<(Symbol, Expr)> = Vec::new();
         let mut kw_params: Vec<(Symbol, Option<Expr>)> = Vec::new();
         let mut block_param: Option<Symbol> = None;
+        let mut kwrest_param: Option<Symbol> = None;
         if let Some(pn) = def.parameters() {
             for req in pn.requireds().iter() {
                 if let Some(rp) = req.as_required_parameter_node() {
@@ -321,6 +322,13 @@ fn ingest_controller_body_item(
                     kw_params.push((name, Some(default)));
                 }
             }
+            if let Some(krest) = pn.keyword_rest() {
+                if let Some(krp) = krest.as_keyword_rest_parameter_node() {
+                    if let Some(loc) = krp.name() {
+                        kwrest_param = Some(Symbol::from(constant_id_str(&loc)));
+                    }
+                }
+            }
             // Block param (`&block`) — methods that name their block so
             // the body can pass it on (`&block`) or that crash without the
             // arity slot.
@@ -341,6 +349,7 @@ fn ingest_controller_body_item(
                 params,
                 opt_params,
                 kw_params,
+                kwrest_param,
                 block_param,
                 body: body_expr,
                 renders,

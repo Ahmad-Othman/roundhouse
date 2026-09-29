@@ -1910,7 +1910,26 @@ fn splice_concerns_into_controllers(app: &mut App) {
                 }
                 let mut params = Row::closed();
                 let mut opt_params = Vec::new();
+                let mut kw_params = Vec::new();
+                let mut kwrest_param = None;
                 for p in &method.params {
+                    // A keyword stays a keyword: flattened to a
+                    // positional it no longer parses when its name is
+                    // reserved (`next: nil`) or when a required keyword
+                    // sits beside it, and `**rest` flattened to a
+                    // required positional breaks every call.
+                    // `**rest` arrives either as a keyword-rest or, when the
+                    // library ingest flattened it, as a positional marked
+                    // `from_kwrest`. Either way it is the keyword-rest, after
+                    // the keywords; as a positional it would land before them.
+                    if (p.keyword && p.rest) || p.from_kwrest {
+                        kwrest_param = Some(p.name.clone());
+                        continue;
+                    }
+                    if p.keyword {
+                        kw_params.push((p.name.clone(), p.default.clone()));
+                        continue;
+                    }
                     match &p.default {
                         Some(d) => opt_params.push((p.name.clone(), d.clone())),
                         None => {
@@ -1928,7 +1947,8 @@ fn splice_concerns_into_controllers(app: &mut App) {
                         name: method.name.clone(),
                         params,
                         opt_params,
-                        kw_params: Vec::new(),
+                        kw_params,
+                        kwrest_param,
                         block_param: method.block_param.as_ref().map(|p| p.name.clone()),
                         body,
                         renders: RenderTarget::Inferred,
@@ -3417,6 +3437,7 @@ fn synthesize_redirect_controller(
                     params: crate::ty::Row::default(),
                     opt_params: Vec::new(),
                     kw_params: Vec::new(),
+                    kwrest_param: None,
                     block_param: None,
                     name_span: Span::synthetic(),
                     body,
