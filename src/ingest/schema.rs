@@ -294,7 +294,9 @@ fn apply_migration_verb(
             if let (Some(t), Some(columns)) = (arg_name(0), args.get(1).map(column_name_list)) {
                 if !columns.is_empty() {
                     if let Some(table) = schema.tables.get_mut(&Symbol::from(t.clone())) {
-                        table.indexes.push(build_index(&t, columns, args.iter().skip(2)));
+                        if columns.iter().all(|c| table.columns.iter().any(|col| col.name == *c)) {
+                            table.indexes.push(build_index(&t, columns, args.iter().skip(2)));
+                        }
                     }
                 }
             }
@@ -550,6 +552,10 @@ fn table_from_create_table(
         }
     }
 
+    // An index over a column the walk dropped (unsupported type,
+    // ledgered above) cannot apply: sqlite refuses the seed at `no such
+    // column`. The index goes with the column.
+    indexes.retain(|idx| idx.columns.iter().all(|c| columns.iter().any(|col| col.name == *c)));
     Some((
         Symbol::from(table_name.clone()),
         Table {
