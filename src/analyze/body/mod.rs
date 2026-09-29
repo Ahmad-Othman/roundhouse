@@ -199,6 +199,7 @@ fn resolve_owner_path(
     written: &str,
     ctx: &Ctx,
     classes: &HashMap<ClassId, ClassInfo>,
+    index: &ConstIndex,
 ) -> Option<ClassId> {
     if let Some(Ty::Class { id, .. }) = &ctx.self_ty {
         let mut scope: Vec<&str> = id.0.as_str().split("::").collect();
@@ -216,34 +217,54 @@ fn resolve_owner_path(
     if classes.contains_key(&written_id) {
         return Some(written_id);
     }
-    expand_qualified_const(written, classes).map(ClassId)
+    index.unique_suffix(written).map(ClassId)
 }
 
-/// The fully-qualified class a written owner path names, when exactly
-/// one registered class ends with it. The single-match rule is
-/// `expand_bare_const`'s, for the same reason — more than one match is
-/// not a guess worth making.
-fn expand_qualified_const(
-    written: &str,
-    classes: &HashMap<ClassId, ClassInfo>,
-) -> Option<Symbol> {
-    let suffix = format!("::{written}");
-    let mut found: Option<&str> = None;
-    for key in classes.keys() {
-        let raw = key.0.as_str();
-        if raw.ends_with(&suffix) {
-            if found.is_some() {
-                return None;
-            }
-            found = Some(raw);
-        }
-    }
-    found.map(Symbol::from)
+/// The registry's qualified class names (those with a `::`), keyed by
+/// their last segment: the lookup behind `expand_bare_const` and the
+/// owner-path expansion. Both used to scan every registered class per
+/// constant read, which is quadratic in app size — on Shopify core
+/// (~30k classes) that scan was most of a typing pass.
+#[derive(Default)]
+pub struct ConstIndex {
+    by_last: HashMap<String, Vec<Symbol>>,
 }
+
+impl ConstIndex {
+    pub fn build(classes: &HashMap<ClassId, ClassInfo>) -> Self {
+        let mut by_last: HashMap<String, Vec<Symbol>> = HashMap::new();
+        for key in classes.keys() {
+            if let Some((_, last)) = key.0.as_str().rsplit_once("::") {
+                by_last.entry(last.to_string()).or_default().push(key.0.clone());
+            }
+        }
+        Self { by_last }
+    }
+
+    /// The one qualified class whose name ends in `::written`, when
+    /// exactly one does. More than one match is not a guess worth
+    /// making.
+    fn unique_suffix(&self, written: &str) -> Option<Symbol> {
+        let last = written.rsplit("::").next()?;
+        let suffix = format!("::{written}");
+        let mut found: Option<&Symbol> = None;
+        for full in self.by_last.get(last)? {
+            if full.as_str().ends_with(&suffix) {
+                if found.is_some() {
+                    return None; // ambiguous
+                }
+                found = Some(full);
+            }
+        }
+        found.cloned()
+    }
+}
+
 
 fn expand_bare_const(
     name: &Symbol,
     classes: &HashMap<ClassId, ClassInfo>,
+    index: &ConstIndex,
 ) -> Option<Symbol> {
     let target = name.as_str();
     // A class registered under exactly this bare name wins outright —
@@ -255,18 +276,7 @@ fn expand_bare_const(
     if classes.contains_key(&ClassId(name.clone())) {
         return None;
     }
-    let suffix = format!("::{target}");
-    let mut found: Option<&str> = None;
-    for key in classes.keys() {
-        let raw = key.0.as_str();
-        if raw.contains("::") && raw.ends_with(&suffix) {
-            if found.is_some() {
-                return None; // ambiguous
-            }
-            found = Some(raw);
-        }
-    }
-    found.map(Symbol::from)
+    index.unique_suffix(target)
 }
 
 /// Reusable body-type walker. Holds a borrow of the dispatch table so
@@ -274,6 +284,9 @@ fn expand_bare_const(
 /// without cloning.
 pub struct BodyTyper<'a> {
     classes: &'a HashMap<ClassId, ClassInfo>,
+    /// Suffix lookup over `classes`, built on first use unless the
+    /// caller hands in one it keeps current (the analyzer does).
+    const_index: std::sync::OnceLock<std::sync::Arc<ConstIndex>>,
     /// Methods whose value is an ActiveSupport inquirer (see
     /// [`crate::analyze::inquiry`]); empty for the bare constructor,
     /// which the runtime-source typer and tests use.
@@ -286,11 +299,21 @@ impl<'a> BodyTyper<'a> {
     pub(super) fn classes(&self) -> &'a HashMap<ClassId, ClassInfo> {
         self.classes
     }
+
+    pub(super) fn const_index(&self) -> &ConstIndex {
+        self.const_index.get_or_init(|| std::sync::Arc::new(ConstIndex::build(self.classes)))
+    }
 }
 
 impl<'a> BodyTyper<'a> {
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
-        Self { classes, inquirers: None }
+        Self { classes, const_index: std::sync::OnceLock::new(), inquirers: None }
+    }
+
+    /// Share an index the caller keeps in step with `classes`.
+    pub fn with_const_index(self, index: std::sync::Arc<ConstIndex>) -> Self {
+        let _ = self.const_index.set(index);
+        self
     }
 
     /// Name the app's inquirer-returning methods, so their predicates
@@ -375,7 +398,7 @@ impl<'a> BodyTyper<'a> {
                     // (`Mode::Fill` inside the class that declares
                     // `Mode`), the same reason `expand_bare_const`
                     // exists for single-segment reads.
-                    let owner = resolve_owner_path(&written, ctx, self.classes());
+                    let owner = resolve_owner_path(&written, ctx, self.classes(), self.const_index());
                     if let Some(ty) = owner
                         .and_then(|owner| self.classes().get(&owner).cloned())
                         .and_then(|c| c.constants.get(&last).cloned())
@@ -431,7 +454,7 @@ impl<'a> BodyTyper<'a> {
                 // lookup walking up to top-level — but driven by the
                 // registry rather than the AST scope chain.
                 if path.len() == 1 {
-                    if let Some(qualified) = expand_bare_const(&last, self.classes()) {
+                    if let Some(qualified) = expand_bare_const(&last, self.classes(), self.const_index()) {
                         let segments: Vec<Symbol> = qualified
                             .as_str()
                             .split("::")

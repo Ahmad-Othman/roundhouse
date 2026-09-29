@@ -105,6 +105,10 @@ pub struct Analyzer {
     /// `Var`. Persisting it here lets the whole-program fixpoint carry
     /// the answer the way it carries method returns.
     refined_action_bindings: HashMap<(ClassId, Symbol), HashMap<Symbol, Ty>>,
+    /// `body::ConstIndex` over `classes`, with the class count it was
+    /// built at. The registry only grows, so a count change is exactly
+    /// when it goes stale.
+    const_index: std::sync::Mutex<Option<(usize, std::sync::Arc<body::ConstIndex>)>>,
 }
 
 
@@ -754,6 +758,7 @@ impl Analyzer {
             adapter,
             concern_folded: HashMap::new(),
             refined_action_bindings: HashMap::new(),
+            const_index: std::sync::Mutex::new(None),
             inquirers: inquiry::inquirer_methods(app),
         }
     }
@@ -761,7 +766,21 @@ impl Analyzer {
     /// Build a body-typer borrowing this analyzer's dispatch tables.
     /// Cheap — just a struct with a reference.
     fn body_typer(&self) -> BodyTyper<'_> {
-        BodyTyper::new(&self.classes).with_inquirers(&self.inquirers)
+        BodyTyper::new(&self.classes)
+            .with_inquirers(&self.inquirers)
+            .with_const_index(self.const_index())
+    }
+
+    fn const_index(&self) -> std::sync::Arc<body::ConstIndex> {
+        let mut slot = self.const_index.lock().unwrap();
+        if let Some((count, index)) = &*slot {
+            if *count == self.classes.len() {
+                return index.clone();
+            }
+        }
+        let index = std::sync::Arc::new(body::ConstIndex::build(&self.classes));
+        *slot = Some((self.classes.len(), index.clone()));
+        index
     }
 
     /// The per-class member registry — schema columns, catalog-sourced
