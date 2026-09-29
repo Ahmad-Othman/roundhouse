@@ -382,6 +382,14 @@ pub(super) fn constant_path_segments(p: &ruby_prism::ConstantPathNode<'_>) -> Ve
         .collect()
 }
 
+/// The leading `::` belongs to the innermost path node in `::A::B`.
+pub(super) fn constant_path_is_rooted(p: &ruby_prism::ConstantPathNode<'_>) -> bool {
+    match p.parent() {
+        None => true,
+        Some(parent) => parent.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p)),
+    }
+}
+
 // ---- Tree walkers ------------------------------------------------------
 
 pub(super) fn flatten_statements<'pr>(node: Node<'pr>) -> Vec<Node<'pr>> {

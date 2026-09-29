@@ -229,6 +229,10 @@ fn resolve_owner_path(
     classes: &HashMap<ClassId, ClassInfo>,
     index: &ConstIndex,
 ) -> Option<ClassId> {
+    if let Some(absolute) = written.strip_prefix("::") {
+        let id = ClassId(Symbol::from(absolute));
+        return classes.contains_key(&id).then_some(id);
+    }
     if let Some(Ty::Class { id, .. }) = &ctx.self_ty {
         let mut scope: Vec<&str> = id.0.as_str().split("::").collect();
         while !scope.is_empty() {
@@ -507,7 +511,8 @@ impl<'a> BodyTyper<'a> {
                     .collect::<Vec<_>>()
                     .join("::");
                 Ty::Class {
-                    id: ClassId(Symbol::from(joined_path)),
+                    // Rooting changes lookup, not the registry's class identity.
+                    id: ClassId(Symbol::from(joined_path.trim_start_matches("::"))),
                     args: vec![],
                 }
             }

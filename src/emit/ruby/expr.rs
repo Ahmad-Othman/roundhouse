@@ -185,7 +185,10 @@ fn emit_node(n: &ExprNode) -> String {
             // and an op-assign target reads it as a value. Expand to the
             // read-then-write Ruby defines it as.
             if let LValue::Index { recv, index } = target {
-                if matches!(&*recv.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "ENV") {
+                // Only duplicate a literal key. A computed key must retain
+                // Ruby's native single-evaluation compound assignment.
+                if matches!(&*index.node, ExprNode::Lit { value: Literal::Str { .. } })
+                    && matches!(&*recv.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "ENV") {
                     let k = emit_expr(index);
                     let v = emit_expr(value);
                     let infix = op.as_ruby().trim_end_matches('=');
