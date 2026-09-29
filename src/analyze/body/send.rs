@@ -1588,6 +1588,10 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
         // gradual `Untyped` (the chains read `.before?`/`/ 60`/`> 1.minute`
         // off the result, all of which absorb Untyped).
         "+" | "-" => Ty::Untyped,
+        "all_day" | "all_week" | "all_month" | "all_year" => Ty::Class {
+            id: ClassId(Symbol::from("Range")),
+            args: vec![time()],
+        },
         // String renderings.
         "iso8601" | "rfc2822" | "rfc3339" | "to_s" | "to_fs" | "to_formatted_s"
         | "strftime" | "httpdate" | "rfc822" | "rfc2822" | "ctime" | "asctime" | "inspect"

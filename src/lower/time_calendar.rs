@@ -40,6 +40,11 @@ fn rewrite(expr: &mut Expr) {
     if !is_time_value(r) {
         return;
     }
+    if let (Some(unit), true) = (all_range_unit(method.as_str()), args.is_empty()) {
+        let edge = |side: &str| time_expr(active_support_call(&format!("{side}_of_{unit}"), vec![r.clone()]));
+        *expr.node = ExprNode::Range { begin: Some(edge("beginning")), end: Some(edge("end")), exclusive: false };
+        return;
+    }
     let weekday = match method.as_str() {
         "sunday?" => Some(0),
         "monday?" => Some(1),
@@ -111,6 +116,17 @@ fn rewrite(expr: &mut Expr) {
         call_args.push(now());
     }
     *expr.node = active_support_call(target, call_args);
+}
+
+// Not a runtime Range: spinel's Range holds Integer endpoints only, so `where` has to meet the literal and render it as SQL.
+fn all_range_unit(method: &str) -> Option<&'static str> {
+    match method {
+        "all_day" => Some("day"),
+        "all_week" => Some("week"),
+        "all_month" => Some("month"),
+        "all_year" => Some("year"),
+        _ => None,
+    }
 }
 
 fn time_expr(node: ExprNode) -> Expr {

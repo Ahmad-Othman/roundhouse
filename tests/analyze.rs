@@ -2451,7 +2451,8 @@ fn activesupport_calendar_methods_type_on_a_time() {
   def window(raw)
     t = Time.zone.parse(raw)
     [t.at_beginning_of_month.year, t.prev_month.month, t.next_day(2).day, t.weeks_ago(1).wday,
-     t.end_of_minute.min, Time.zone.yesterday.strftime("%F"), t.yesterday?, t.tomorrow? && true]
+     t.end_of_minute.min, Time.zone.yesterday.strftime("%F"), t.yesterday?, t.tomorrow? && true,
+     t.all_month.first.year, t.all_day.cover?(t)]
   end
 end
 "#,
@@ -2459,7 +2460,7 @@ end
     ]);
 
     let failures = send_dispatch_failures(&app);
-    for m in ["at_beginning_of_month", "prev_month", "next_day", "weeks_ago", "end_of_minute", "yesterday", "yesterday?", "tomorrow?"] {
+    for m in ["at_beginning_of_month", "prev_month", "next_day", "weeks_ago", "end_of_minute", "yesterday", "yesterday?", "tomorrow?", "all_month", "all_day", "first", "cover?"] {
         assert!(!failures.iter().any(|f| f == m), "`{m}` should type on a Time; failures = {failures:?}");
     }
 }
