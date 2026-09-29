@@ -2466,6 +2466,37 @@ end
 }
 
 #[test]
+fn use_zone_answers_its_block_value() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/thing.rb",
+            r#"class Thing < ApplicationRecord
+  def stamp(zone)
+    year = Time.use_zone(zone) { Time.zone.now.year }
+    Thread.current[:seen] = year
+    [year + 1, Thread.current[:seen]]
+  end
+
+  def opaque(zone)
+    Time.use_zone(zone) { CSV.generate("") { |csv| csv << [1] } }
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in ["use_zone", "current", "+"] {
+        assert!(!failures.iter().any(|f| f == m), "`{m}` should resolve; failures = {failures:?}");
+    }
+    assert!(failures.iter().any(|f| f == "generate"), "the block's own gap still reports; failures = {failures:?}");
+}
+
+#[test]
 fn gem_catalog_resolves_third_party_surface() {
     // The gem catalog (src/catalog/gems.rs) resolves the third-party
     // surface apps call: class methods (`Arel.sql`, `ROTP::Base32.random`),

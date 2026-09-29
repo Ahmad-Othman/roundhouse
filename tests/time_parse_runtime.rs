@@ -8,6 +8,7 @@ fn run_driver(implementation: &str) {
     let out = Command::new("ruby")
         .arg(root.join("tests/time_parse_runtime.rb"))
         .arg(root.join(implementation))
+        .arg(root.join("runtime/ruby/active_support_ext.rb"))
         .env("TZ", "Asia/Tokyo")
         .output()
         .expect("ruby is on PATH");
@@ -39,10 +40,11 @@ fn a_shape_the_spinel_parser_does_not_know_raises_instead_of_guessing() {
     let out = Command::new("ruby")
         .arg("-e")
         .arg(
-            "load ARGV[0]; begin; ActiveSupport.zone_parse('Mon May 28 2012 00:00:00 GMT-0700 (PDT)'); \
+            "load ARGV[0]; load ARGV[1]; begin; ActiveSupport.zone_parse('Mon May 28 2012 00:00:00 GMT-0700 (PDT)'); \
              puts 'parsed'; rescue ArgumentError => e; puts e.message; end",
         )
         .arg(root.join("runtime/spinel/active_support_time_parsing.rb"))
+        .arg(root.join("runtime/ruby/active_support_ext.rb"))
         .output()
         .expect("ruby is on PATH");
     let stdout = String::from_utf8_lossy(&out.stdout);

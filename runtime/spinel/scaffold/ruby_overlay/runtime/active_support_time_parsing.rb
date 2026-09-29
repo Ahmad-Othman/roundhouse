@@ -55,7 +55,7 @@ module ActiveSupport
     # zone-carrying string (API-supplied, or a pre-`db_now` build's "Z").
     if (m = /\A(\d{4})-(\d\d)-(\d\d)[ T](\d\d):(\d\d):(\d\d)(?:\.(\d+))?\z/.match(str))
       usec = m[7] ? "#{m[7]}000000"[0, 6].to_i : 0
-      return Time.utc(m[1].to_i, m[2].to_i, m[3].to_i, m[4].to_i, m[5].to_i, m[6].to_i, usec).getlocal
+      return ActiveSupport.present(Time.utc(m[1].to_i, m[2].to_i, m[3].to_i, m[4].to_i, m[5].to_i, m[6].to_i, usec))
     end
     t = str =~ /(Z|[+-]\d\d:?\d\d)\z/ ? Time.parse(str) : Time.parse("#{str} UTC")
     # Present in the app's zone, exactly as ActiveRecord returns
@@ -63,7 +63,7 @@ module ActiveSupport
     # app's config.time_zone (default UTC — Rails' default — so
     # rendered offsets never follow the HOST's zone). Instants are
     # unchanged; only strftime/iso8601 presentation moves.
-    t.getlocal
+    ActiveSupport.present(t)
   end
 
   # A temporal column as JSON. Rails serializes an AR temporal value
@@ -115,7 +115,7 @@ module ActiveSupport
   end
 
   def self.now
-    Time.now + TRAVEL_OFFSET[0]
+    ActiveSupport.present(Time.now + TRAVEL_OFFSET[0])
   end
 
   # Write-side sibling of `parse_db_time`: current UTC time in Rails'
@@ -167,20 +167,22 @@ module ActiveSupport
   end
 
   def self.parse_time(str)
-    Time.parse(str, ActiveSupport.now)
+    Time.parse(str, Time.now + TRAVEL_OFFSET[0])
   end
 
   # Not `Time.parse`: ActiveSupport's `TimeZone#parse` answers nil for no date and lands an offset in the app's zone.
   def self.zone_parse(str)
     parts = Date._parse(str, false)
     return nil if parts.empty?
-    return Time.at(parts[:seconds] + parts.fetch(:sec_fraction, 0)).getlocal if parts[:seconds]
+    return ActiveSupport.present(Time.at(parts[:seconds] + parts.fetch(:sec_fraction, 0))) if parts[:seconds]
     now = ActiveSupport.now
     year = parts.fetch(:year, now.year)
     mon = parts.fetch(:mon, now.month)
     mday = parts.fetch(:mday, parts[:year] || parts[:mon] ? 1 : now.day)
     sec = parts.fetch(:sec, 0) + parts.fetch(:sec_fraction, 0)
-    return Time.local(year, mon, mday, parts.fetch(:hour, 0), parts.fetch(:min, 0), sec) unless parts[:offset]
-    Time.new(year, mon, mday, parts.fetch(:hour, 0), parts.fetch(:min, 0), sec, parts[:offset]).getlocal
+    unless parts[:offset]
+      return ActiveSupport.local_time(year, mon, mday, parts.fetch(:hour, 0), parts.fetch(:min, 0), sec.to_i, ((sec - sec.to_i) * 1_000_000_000).to_i)
+    end
+    ActiveSupport.present(Time.new(year, mon, mday, parts.fetch(:hour, 0), parts.fetch(:min, 0), sec, parts[:offset]))
   end
 end

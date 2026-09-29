@@ -1444,7 +1444,17 @@ fn every_runtime_method_body_concretely_typed() {
     // membership, without which two sides that loaded the same rows
     // intersected to nothing. A block per operator cost 11; a seen-list
     // per operator 20.
-    const CEILING: usize = 501;
+    //
+    // 501 -> 504: `ActiveSupport.use_zone`'s thread-local slot, THREE
+    // sites (active_support_ext.rb, MEASURED): `current_zone`'s read of
+    // `Thread.current[:rh_time_zone]`, `use_zone`'s read of the previous
+    // zone, and the block value it hands back. The slot is untyped
+    // because a thread-local holds whatever was put in it. What it bought:
+    // a per-request zone that a concurrent request cannot see, where
+    // swapping `ENV["TZ"]` for the block would have changed every
+    // thread's clock. Taking the zone as `untyped` cost 8; `String?` is
+    // what the corpus passes (`company.timezone_name`).
+    const CEILING: usize = 504;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

@@ -254,7 +254,7 @@ module ActiveSupport
     era * 146097 + doe - 719468
   end
 
-  def self.local_on(days, hour, min, sec, usec)
+  def self.local_on(days, hour, min, sec, nsec)
     z = days + 719468
     era = z / 146097
     doe = z - era * 146097
@@ -263,7 +263,7 @@ module ActiveSupport
     mp = (5 * doy + 2) / 153
     d = doy - (153 * mp + 2) / 5 + 1
     m = mp < 10 ? mp + 3 : mp - 9
-    Time.local(yoe + era * 400 + (m <= 2 ? 1 : 0), m, d, hour, min, sec, usec)
+    local_time(yoe + era * 400 + (m <= 2 ? 1 : 0), m, d, hour, min, sec, nsec)
   end
 
   def self.days_in_month(y, m)
@@ -271,7 +271,7 @@ module ActiveSupport
   end
 
   def self.days_since(t, n = 1)
-    local_on(civil_days(t.year, t.month, t.day) + n, t.hour, t.min, t.sec, t.usec)
+    local_on(civil_days(t.year, t.month, t.day) + n, t.hour, t.min, t.sec, t.nsec)
   end
 
   def self.days_ago(t, n = 1)
@@ -300,7 +300,7 @@ module ActiveSupport
     y = total / 12
     m = total % 12 + 1
     last = days_in_month(y, m)
-    Time.local(y, m, t.day > last ? last : t.day, t.hour, t.min, t.sec, t.usec)
+    local_time(y, m, t.day > last ? last : t.day, t.hour, t.min, t.sec, t.nsec)
   end
 
   def self.months_ago(t, n = 1)
@@ -316,32 +316,31 @@ module ActiveSupport
   end
 
   def self.beginning_of_minute(t)
-    Time.local(t.year, t.month, t.day, t.hour, t.min)
+    local_time(t.year, t.month, t.day, t.hour, t.min, 0, 0)
   end
 
-  # Not usec 999999: ActiveSupport's end is `.999999999`, and a Float usec rounds that down to ...998 on CRuby.
   def self.end_of_minute(t)
-    Time.local(t.year, t.month, t.day, t.hour, t.min, 59.999999999)
+    local_time(t.year, t.month, t.day, t.hour, t.min, 59, 999_999_999)
   end
 
   def self.beginning_of_hour(t)
-    Time.local(t.year, t.month, t.day, t.hour)
+    local_time(t.year, t.month, t.day, t.hour, 0, 0, 0)
   end
 
   def self.end_of_hour(t)
-    Time.local(t.year, t.month, t.day, t.hour, 59, 59.999999999)
+    local_time(t.year, t.month, t.day, t.hour, 59, 59, 999_999_999)
   end
 
   def self.beginning_of_day(t)
-    Time.local(t.year, t.month, t.day)
+    local_time(t.year, t.month, t.day, 0, 0, 0, 0)
   end
 
   def self.end_of_day(t)
-    Time.local(t.year, t.month, t.day, 23, 59, 59.999999999)
+    local_time(t.year, t.month, t.day, 23, 59, 59, 999_999_999)
   end
 
   def self.noon(t)
-    Time.local(t.year, t.month, t.day, 12)
+    local_time(t.year, t.month, t.day, 12, 0, 0, 0)
   end
 
   # Not Sunday: `Date.beginning_of_week` defaults to Monday.
@@ -362,19 +361,19 @@ module ActiveSupport
   end
 
   def self.beginning_of_month(t)
-    Time.local(t.year, t.month, 1)
+    local_time(t.year, t.month, 1, 0, 0, 0, 0)
   end
 
   def self.end_of_month(t)
-    Time.local(t.year, t.month, days_in_month(t.year, t.month), 23, 59, 59.999999999)
+    local_time(t.year, t.month, days_in_month(t.year, t.month), 23, 59, 59, 999_999_999)
   end
 
   def self.beginning_of_year(t)
-    Time.local(t.year, 1, 1)
+    local_time(t.year, 1, 1, 0, 0, 0, 0)
   end
 
   def self.end_of_year(t)
-    Time.local(t.year, 12, 31, 23, 59, 59.999999999)
+    local_time(t.year, 12, 31, 23, 59, 59, 999_999_999)
   end
 
   def self.same_day?(a, b)
@@ -412,5 +411,320 @@ module ActiveSupport
 
   def self.on_wday?(t, wday)
     t.wday == wday
+  end
+
+  # Rails zone names (ActiveSupport::TimeZone::MAPPING) to IANA identifiers; an IANA identifier passes through.
+  ZONE_NAMES = {
+    "International Date Line West" => "Etc/GMT+12",
+    "Midway Island" => "Pacific/Midway",
+    "American Samoa" => "Pacific/Pago_Pago",
+    "Hawaii" => "Pacific/Honolulu",
+    "Alaska" => "America/Juneau",
+    "Pacific Time (US & Canada)" => "America/Los_Angeles",
+    "Tijuana" => "America/Tijuana",
+    "Mountain Time (US & Canada)" => "America/Denver",
+    "Arizona" => "America/Phoenix",
+    "Chihuahua" => "America/Chihuahua",
+    "Mazatlan" => "America/Mazatlan",
+    "Central Time (US & Canada)" => "America/Chicago",
+    "Saskatchewan" => "America/Regina",
+    "Guadalajara" => "America/Mexico_City",
+    "Mexico City" => "America/Mexico_City",
+    "Monterrey" => "America/Monterrey",
+    "Central America" => "America/Guatemala",
+    "Eastern Time (US & Canada)" => "America/New_York",
+    "Indiana (East)" => "America/Indiana/Indianapolis",
+    "Bogota" => "America/Bogota",
+    "Lima" => "America/Lima",
+    "Quito" => "America/Lima",
+    "Atlantic Time (Canada)" => "America/Halifax",
+    "Caracas" => "America/Caracas",
+    "La Paz" => "America/La_Paz",
+    "Santiago" => "America/Santiago",
+    "Asuncion" => "America/Asuncion",
+    "Newfoundland" => "America/St_Johns",
+    "Brasilia" => "America/Sao_Paulo",
+    "Buenos Aires" => "America/Argentina/Buenos_Aires",
+    "Montevideo" => "America/Montevideo",
+    "Georgetown" => "America/Guyana",
+    "Puerto Rico" => "America/Puerto_Rico",
+    "Greenland" => "America/Nuuk",
+    "Mid-Atlantic" => "Atlantic/South_Georgia",
+    "Azores" => "Atlantic/Azores",
+    "Cape Verde Is." => "Atlantic/Cape_Verde",
+    "Dublin" => "Europe/Dublin",
+    "Edinburgh" => "Europe/London",
+    "Lisbon" => "Europe/Lisbon",
+    "London" => "Europe/London",
+    "Casablanca" => "Africa/Casablanca",
+    "Monrovia" => "Africa/Monrovia",
+    "UTC" => "Etc/UTC",
+    "Belgrade" => "Europe/Belgrade",
+    "Bratislava" => "Europe/Bratislava",
+    "Budapest" => "Europe/Budapest",
+    "Ljubljana" => "Europe/Ljubljana",
+    "Prague" => "Europe/Prague",
+    "Sarajevo" => "Europe/Sarajevo",
+    "Skopje" => "Europe/Skopje",
+    "Warsaw" => "Europe/Warsaw",
+    "Zagreb" => "Europe/Zagreb",
+    "Brussels" => "Europe/Brussels",
+    "Copenhagen" => "Europe/Copenhagen",
+    "Madrid" => "Europe/Madrid",
+    "Paris" => "Europe/Paris",
+    "Amsterdam" => "Europe/Amsterdam",
+    "Berlin" => "Europe/Berlin",
+    "Bern" => "Europe/Zurich",
+    "Zurich" => "Europe/Zurich",
+    "Rome" => "Europe/Rome",
+    "Stockholm" => "Europe/Stockholm",
+    "Vienna" => "Europe/Vienna",
+    "West Central Africa" => "Africa/Algiers",
+    "Bucharest" => "Europe/Bucharest",
+    "Cairo" => "Africa/Cairo",
+    "Helsinki" => "Europe/Helsinki",
+    "Kyiv" => "Europe/Kiev",
+    "Riga" => "Europe/Riga",
+    "Sofia" => "Europe/Sofia",
+    "Tallinn" => "Europe/Tallinn",
+    "Vilnius" => "Europe/Vilnius",
+    "Athens" => "Europe/Athens",
+    "Istanbul" => "Europe/Istanbul",
+    "Minsk" => "Europe/Minsk",
+    "Jerusalem" => "Asia/Jerusalem",
+    "Harare" => "Africa/Harare",
+    "Pretoria" => "Africa/Johannesburg",
+    "Kaliningrad" => "Europe/Kaliningrad",
+    "Moscow" => "Europe/Moscow",
+    "St. Petersburg" => "Europe/Moscow",
+    "Volgograd" => "Europe/Volgograd",
+    "Samara" => "Europe/Samara",
+    "Kuwait" => "Asia/Kuwait",
+    "Riyadh" => "Asia/Riyadh",
+    "Nairobi" => "Africa/Nairobi",
+    "Baghdad" => "Asia/Baghdad",
+    "Tehran" => "Asia/Tehran",
+    "Abu Dhabi" => "Asia/Muscat",
+    "Muscat" => "Asia/Muscat",
+    "Baku" => "Asia/Baku",
+    "Tbilisi" => "Asia/Tbilisi",
+    "Yerevan" => "Asia/Yerevan",
+    "Kabul" => "Asia/Kabul",
+    "Ekaterinburg" => "Asia/Yekaterinburg",
+    "Islamabad" => "Asia/Karachi",
+    "Karachi" => "Asia/Karachi",
+    "Tashkent" => "Asia/Tashkent",
+    "Chennai" => "Asia/Kolkata",
+    "Kolkata" => "Asia/Kolkata",
+    "Mumbai" => "Asia/Kolkata",
+    "New Delhi" => "Asia/Kolkata",
+    "Kathmandu" => "Asia/Kathmandu",
+    "Dhaka" => "Asia/Dhaka",
+    "Sri Jayawardenepura" => "Asia/Colombo",
+    "Almaty" => "Asia/Almaty",
+    "Astana" => "Asia/Almaty",
+    "Novosibirsk" => "Asia/Novosibirsk",
+    "Rangoon" => "Asia/Rangoon",
+    "Bangkok" => "Asia/Bangkok",
+    "Hanoi" => "Asia/Bangkok",
+    "Jakarta" => "Asia/Jakarta",
+    "Krasnoyarsk" => "Asia/Krasnoyarsk",
+    "Beijing" => "Asia/Shanghai",
+    "Chongqing" => "Asia/Chongqing",
+    "Hong Kong" => "Asia/Hong_Kong",
+    "Urumqi" => "Asia/Urumqi",
+    "Kuala Lumpur" => "Asia/Kuala_Lumpur",
+    "Singapore" => "Asia/Singapore",
+    "Taipei" => "Asia/Taipei",
+    "Perth" => "Australia/Perth",
+    "Irkutsk" => "Asia/Irkutsk",
+    "Ulaanbaatar" => "Asia/Ulaanbaatar",
+    "Seoul" => "Asia/Seoul",
+    "Osaka" => "Asia/Tokyo",
+    "Sapporo" => "Asia/Tokyo",
+    "Tokyo" => "Asia/Tokyo",
+    "Yakutsk" => "Asia/Yakutsk",
+    "Darwin" => "Australia/Darwin",
+    "Adelaide" => "Australia/Adelaide",
+    "Canberra" => "Australia/Canberra",
+    "Melbourne" => "Australia/Melbourne",
+    "Sydney" => "Australia/Sydney",
+    "Brisbane" => "Australia/Brisbane",
+    "Hobart" => "Australia/Hobart",
+    "Vladivostok" => "Asia/Vladivostok",
+    "Guam" => "Pacific/Guam",
+    "Port Moresby" => "Pacific/Port_Moresby",
+    "Magadan" => "Asia/Magadan",
+    "Srednekolymsk" => "Asia/Srednekolymsk",
+    "Solomon Is." => "Pacific/Guadalcanal",
+    "New Caledonia" => "Pacific/Noumea",
+    "Fiji" => "Pacific/Fiji",
+    "Kamchatka" => "Asia/Kamchatka",
+    "Marshall Is." => "Pacific/Majuro",
+    "Auckland" => "Pacific/Auckland",
+    "Wellington" => "Pacific/Auckland",
+    "Nuku'alofa" => "Pacific/Tongatapu",
+    "Tokelau Is." => "Pacific/Fakaofo",
+    "Chatham Is." => "Pacific/Chatham",
+    "Samoa" => "Pacific/Apia",
+  }.freeze
+
+  # Not ENV["TZ"] swapped for the block: that is process-wide, and a concurrent request would render in this one's zone.
+  class TimeZoneData
+    attr_reader :name
+
+    def initialize(name, transitions, offsets, initial_offset, rule)
+      @name = name
+      @transitions = transitions
+      @offsets = offsets
+      @initial_offset = initial_offset
+      @rule = rule
+    end
+
+    def offset_at(epoch)
+      n = @transitions.length
+      return rule_or(epoch, @initial_offset) if n == 0
+      return @initial_offset if epoch < @transitions[0]
+      return rule_or(epoch, @offsets[n - 1]) if epoch >= @transitions[n - 1]
+      lo = 0
+      hi = n - 1
+      while lo < hi
+        mid = (lo + hi + 1) / 2
+        if @transitions[mid] <= epoch
+          lo = mid
+        else
+          hi = mid - 1
+        end
+      end
+      @offsets[lo]
+    end
+
+    # Past the last transition a slim TZif file leaves DST to its POSIX footer: [std, dst, m, w, d, secs, m, w, d, secs].
+    def rule_or(epoch, fallback)
+      return fallback if @rule.empty?
+      return @rule[0] if @rule.length == 1
+      std = @rule[0]
+      dst = @rule[1]
+      year = Time.at(epoch + std).utc.year
+      start_at = ActiveSupport.rule_instant(year, @rule[2], @rule[3], @rule[4], @rule[5]) - std
+      end_at = ActiveSupport.rule_instant(year, @rule[6], @rule[7], @rule[8], @rule[9]) - dst
+      in_dst = start_at < end_at ? (epoch >= start_at && epoch < end_at) : !(epoch >= end_at && epoch < start_at)
+      in_dst ? dst : std
+    end
+  end
+
+  def self.rule_instant(year, month, week, wday, secs)
+    first = civil_days(year, month, 1)
+    day = 1 + (wday - (first + 4) % 7 + 7) % 7 + (week - 1) * 7
+    last = days_in_month(year, month)
+    day = day - 7 while day > last
+    (first + day - 1) * 86_400 + secs
+  end
+
+  def self.be32(b, i)
+    v = (b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]
+    v >= 2_147_483_648 ? v - 4_294_967_296 : v
+  end
+
+  def self.find_zone!(zone)
+    raw = zone.to_s
+    iana = ZONE_NAMES[raw] || raw
+    dir = ENV["TZDIR"] || "/usr/share/zoneinfo"
+    path = "#{dir}/#{iana}"
+    unless iana.match?(/\A[A-Za-z0-9_+\-]+(\/[A-Za-z0-9_+\-]+)*\z/) && File.file?(path)
+      raise ArgumentError, "Invalid Timezone: #{raw}"
+    end
+    b = File.binread(path).bytes
+    raise ArgumentError, "Invalid Timezone: #{raw}" unless b.length > 44 && b[0] == 84 && b[1] == 90 && b[2] == 105 && b[3] == 102
+    base = 0
+    width = 4
+    if b[4] >= 50
+      base = 44 + be32(b, 32) * 5 + be32(b, 36) * 6 + be32(b, 40) + be32(b, 28) * 8 + be32(b, 24) + be32(b, 20)
+      width = 8
+    end
+    leapcnt = be32(b, base + 28)
+    timecnt = be32(b, base + 32)
+    typecnt = be32(b, base + 36)
+    charcnt = be32(b, base + 40)
+    at = base + 44
+    transitions = []
+    i = 0
+    while i < timecnt
+      transitions << (width == 8 ? be32(b, at + i * 8) * 4_294_967_296 + (be32(b, at + i * 8 + 4) & 0xffffffff) : be32(b, at + i * 4))
+      i = i + 1
+    end
+    idx_at = at + timecnt * width
+    types_at = idx_at + timecnt
+    offsets = []
+    i = 0
+    while i < timecnt
+      offsets << be32(b, types_at + b[idx_at + i] * 6)
+      i = i + 1
+    end
+    rule = []
+    if width == 8
+      footer_at = types_at + typecnt * 6 + charcnt + leapcnt * 12 + be32(b, base + 24) + be32(b, base + 20)
+      rule = parse_tz_rule(File.binread(path)[footer_at..].to_s.strip)
+    end
+    TimeZoneData.new(iana, transitions, offsets, be32(b, types_at), rule)
+  end
+
+  # Only the `Mm.w.d` rule form: a `Jn` / `n` footer yields no rule, and the last transition's offset stands.
+  def self.parse_tz_rule(spec)
+    m = /\A(?:<[^>]+>|[A-Za-z]+)([+-]?\d+(?::\d+){0,2})(?:(?:<[^>]+>|[A-Za-z]+)([+-]?\d+(?::\d+){0,2})?,M(\d+)\.(\d)\.(\d)(?:\/([+-]?\d+(?::\d+){0,2}))?,M(\d+)\.(\d)\.(\d)(?:\/([+-]?\d+(?::\d+){0,2}))?)?\z/.match(spec)
+    return [] if m.nil?
+    std = -posix_seconds(m[1])
+    return [std] if m[3].nil?
+    dst = m[2] ? -posix_seconds(m[2]) : std + 3600
+    start_secs = m[6] ? posix_seconds(m[6]) : 7200
+    end_secs = m[10] ? posix_seconds(m[10]) : 7200
+    [std, dst, m[3].to_i, m[4].to_i, m[5].to_i, start_secs, m[7].to_i, m[8].to_i, m[9].to_i, end_secs]
+  end
+
+  def self.posix_seconds(text)
+    sign = text.start_with?("-") ? -1 : 1
+    parts = text.delete("+-").split(":")
+    h = parts[0].to_i
+    mi = parts.length > 1 ? parts[1].to_i : 0
+    s = parts.length > 2 ? parts[2].to_i : 0
+    sign * (h * 3600 + mi * 60 + s)
+  end
+
+  def self.current_zone
+    Thread.current[:rh_time_zone]
+  end
+
+  def self.use_zone(zone)
+    previous = Thread.current[:rh_time_zone]
+    Thread.current[:rh_time_zone] = zone.nil? ? nil : find_zone!(zone)
+    begin
+      yield
+    ensure
+      Thread.current[:rh_time_zone] = previous
+    end
+  end
+
+  def self.present(t)
+    zone = current_zone
+    zone.nil? ? t.getlocal : t.getlocal(zone.offset_at(t.to_i))
+  end
+
+  def self.present_db(t)
+    return nil if t.nil?
+    present(t)
+  end
+
+  def self.in_time_zone(t, zone)
+    return present(t) if zone.nil?
+    t.getlocal(find_zone!(zone).offset_at(t.to_i))
+  end
+
+  # Not `Time.local`: under `use_zone` the civil value belongs to that zone, resolved twice to settle an offset change.
+  def self.local_time(y, mo, d, h, mi, s, nsec)
+    zone = current_zone
+    return Time.at(Time.local(y, mo, d, h, mi, s).to_i, nsec, :nsec) if zone.nil?
+    guess = Time.utc(y, mo, d, h, mi, s).to_i
+    epoch = guess - zone.offset_at(guess - zone.offset_at(guess))
+    Time.at(epoch, nsec, :nsec).getlocal(zone.offset_at(epoch))
   end
 end

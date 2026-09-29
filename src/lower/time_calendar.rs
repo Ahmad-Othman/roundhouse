@@ -14,6 +14,12 @@ pub fn apply_time_calendar_grounding(app: &mut App) {
 
 fn rewrite(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut rewrite);
+    if let ExprNode::Send { recv: Some(r), method, .. } = &mut *expr.node {
+        if is_time_const(r) && method.as_str() == "use_zone" {
+            *r = Expr::new(r.span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] });
+            return;
+        }
+    }
     let ExprNode::Send {
         recv: Some(r),
         method,
@@ -38,6 +44,14 @@ fn rewrite(expr: &mut Expr) {
         return;
     }
     if !is_time_value(r) {
+        return;
+    }
+    if method.as_str() == "in_time_zone" && args.len() <= 1 {
+        let grounded = match args.first() {
+            Some(zone) => active_support_call("in_time_zone", vec![r.clone(), zone.clone()]),
+            None => active_support_call("present", vec![r.clone()]),
+        };
+        *expr.node = grounded;
         return;
     }
     if let (Some(unit), true) = (all_range_unit(method.as_str()), args.is_empty()) {

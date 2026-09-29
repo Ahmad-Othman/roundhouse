@@ -134,6 +134,8 @@ begin
   # consumer) already self-skips when the spinel/ subtree is absent.
   require "time"
   require "spinel/scaffold/ruby_overlay/runtime/active_support_time_parsing"
+  # Not left to the emitted boot: the readers above present through its `ActiveSupport.present`.
+  require "active_support_ext"
 rescue LoadError
   # sqlite3 gem absent OR spinel/ subtree not on load path. base_test
   # is the only consumer; it self-skips when Db is undefined.

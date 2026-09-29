@@ -1004,6 +1004,10 @@ impl<'a> BodyTyper<'a> {
                 // canonical timestamp chain in `fill_timestamps`. We
                 // only track the methods this corpus actually calls;
                 // grow as new uses surface.
+                if id.0.as_str() == "Time" && method.as_str() == "use_zone" {
+                    // Not the block's unresolved Var: that would report `use_zone` itself as the failure.
+                    return block_ret.filter(|t| !matches!(t, Ty::Var { .. })).cloned().unwrap_or(Ty::Untyped);
+                }
                 if id.0.as_str() == "Time" {
                     if let Some(ty) = time_method(method) {
                         return ty;

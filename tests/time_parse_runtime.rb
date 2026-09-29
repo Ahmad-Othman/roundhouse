@@ -1,6 +1,7 @@
 # Expectations are activesupport 8.0.5's `Time.zone.parse` (zone "Tokyo") and stdlib `Time.parse`, not hand-derived.
 require "time"
 load ARGV.fetch(0)
+load ARGV.fetch(1)
 
 today = Time.now
 y = today.year

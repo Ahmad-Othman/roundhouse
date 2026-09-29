@@ -74,7 +74,7 @@ module ActiveSupport
   end
 
   def self.now
-    Time.now + TRAVEL_OFFSET[0]
+    ActiveSupport.present(Time.now + TRAVEL_OFFSET[0])
   end
 
   # Hydrate the stored UTC instant, then land it in the app's zone —
@@ -124,7 +124,7 @@ module ActiveSupport
       str[0, 4].to_i, str[5, 2].to_i, str[8, 2].to_i,
       str[11, 2].to_i, str[14, 2].to_i, str[17, 2].to_i, micros
     )
-    t.getlocal
+    ActiveSupport.present(t)
   end
 
   def self.db_now
@@ -255,14 +255,15 @@ module ActiveSupport
     usec = frac ? "#{frac}000000"[0, 6].to_i : 0
     raise ArgumentError, "argument out of range" if mo < 1 || mo > 12 || d < 1 || d > 31
     raise ArgumentError, "argument out of range" if hour > 24 || min > 59 || sec > 60
-    return Time.local(y, mo, d, hour, min, sec, usec) if zone.nil?
+    # Not the zone's clock for `Time.parse`: Rails reads a zoneless string in the system zone there.
+    return (in_zone ? ActiveSupport.local_time(y, mo, d, hour, min, sec, usec * 1000) : Time.local(y, mo, d, hour, min, sec, usec)) if zone.nil?
     z = zone.upcase
     t = Time.utc(y, mo, d, hour, min, sec, usec)
-    return (in_zone ? t.getlocal : t) if z == "Z" || z == "UTC" || z == "GMT"
+    return (in_zone ? ActiveSupport.present(t) : t) if z == "Z" || z == "UTC" || z == "GMT"
     digits = z.delete(":")
     offset = digits[1, 2].to_i * 3600 + digits[3, 2].to_i * 60
     offset = -offset if digits[0] == "-"
     shifted = t - offset
-    in_zone ? shifted.getlocal : shifted.getlocal(offset)
+    in_zone ? ActiveSupport.present(shifted) : shifted.getlocal(offset)
   end
 end

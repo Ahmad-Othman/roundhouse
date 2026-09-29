@@ -4568,12 +4568,26 @@ pub(crate) fn apply_datetime_lowering(lcs: &mut [LibraryClass], app: &App) {
                 AccessorKind::Method | AccessorKind::AttributeReader
                     if temporal.contains(&m.name) && is_parse_db_time_body(&m.body) =>
                 {
-                    m.body = Expr::new(
+                    let memo = Expr::new(
                         Span::synthetic(),
                         ExprNode::OpAssign {
                             target: LValue::Ivar { name: parse_memo_ivar(&m.name) },
                             op: crate::expr::OpAssignOp::OrOr,
                             value: m.body.clone(),
+                        },
+                    );
+                    // Not the memo as read: Rails converts an attribute into `Time.zone` on every read, and `use_zone` may have moved it.
+                    m.body = Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Send {
+                            recv: Some(Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+                            )),
+                            method: Symbol::from("present_db"),
+                            args: vec![memo],
+                            block: None,
+                            parenthesized: true,
                         },
                     );
                 }

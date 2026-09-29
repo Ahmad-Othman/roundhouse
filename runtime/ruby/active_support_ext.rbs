@@ -41,7 +41,7 @@ module ActiveSupport
   # nine sites against the untyped ceiling — which is not a reason.
   def self.sole: (untyped list) -> untyped
   def self.civil_days: (Integer y, Integer m, Integer d) -> Integer
-  def self.local_on: (Integer days, Integer hour, Integer min, Integer sec, Integer usec) -> Time
+  def self.local_on: (Integer days, Integer hour, Integer min, Integer sec, Integer nsec) -> Time
   def self.days_in_month: (Integer y, Integer m) -> Integer
   def self.days_since: (Time t, ?Integer n) -> Time
   def self.days_ago: (Time t, ?Integer n) -> Time
@@ -77,4 +77,22 @@ module ActiveSupport
   def self.on_weekend?: (Time t) -> bool
   def self.on_weekday?: (Time t) -> bool
   def self.on_wday?: (Time t, Integer wday) -> bool
+  ZONE_NAMES: Hash[String, String]
+  class TimeZoneData
+    def name: () -> String
+    def initialize: (String name, Array[Integer] transitions, Array[Integer] offsets, Integer initial_offset, Array[Integer] rule) -> void
+    def offset_at: (Integer epoch) -> Integer
+    def rule_or: (Integer epoch, Integer fallback) -> Integer
+  end
+  def self.rule_instant: (Integer year, Integer month, Integer week, Integer wday, Integer secs) -> Integer
+  def self.be32: (Array[Integer] b, Integer i) -> Integer
+  def self.find_zone!: (String? zone) -> TimeZoneData
+  def self.parse_tz_rule: (String spec) -> Array[Integer]
+  def self.posix_seconds: (String text) -> Integer
+  def self.current_zone: () -> TimeZoneData?
+  def self.use_zone: (String? zone) { () -> untyped } -> untyped
+  def self.present: (Time t) -> Time
+  def self.present_db: (Time? t) -> Time?
+  def self.in_time_zone: (Time t, String? zone) -> Time
+  def self.local_time: (Integer y, Integer mo, Integer d, Integer h, Integer mi, Integer s, Integer nsec) -> Time
 end

@@ -147,3 +147,12 @@ fn the_nil_arm_survives_so_presence_is_still_asked() {
         "`Current.user.present?` must still ask; it must not fold to true:\n{src}"
     );
 }
+
+/// Ablation for the thread-local read: `Thread#[]` answers untyped, and
+/// a reader that returned it on a mere `nil?` test signed its type as
+/// `untyped` — spinel then dispatched every forwarder on a boxed value.
+#[test]
+fn the_instance_reader_narrows_the_thread_local_to_the_class() {
+    let sig = emitted("current.rbs");
+    assert!(sig.contains("def self.instance: () -> Current"), "{sig}");
+}

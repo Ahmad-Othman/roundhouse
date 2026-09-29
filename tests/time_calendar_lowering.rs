@@ -155,3 +155,33 @@ fn an_all_month_outside_a_condition_is_ledgered() {
     assert_eq!(time_range_residue("month = starts_at.all_month\n    Event.where(starts_at: month).count"), 1);
     assert_eq!(time_range_residue("Event.where(name: name, starts_at: starts_at.all_month).count"), 0);
 }
+
+#[test]
+fn use_zone_and_in_time_zone_ground_to_the_runtime() {
+    let out = emit("Time.use_zone(name) { starts_at.beginning_of_day }");
+    assert!(out.starts_with("ActiveSupport.use_zone(name)"), "{out}");
+    assert!(out.contains("ActiveSupport.beginning_of_day(starts_at)"), "{out}");
+    assert_eq!(
+        emit("starts_at.in_time_zone(\"Asia/Tokyo\")"),
+        "ActiveSupport.in_time_zone(starts_at, \"Asia/Tokyo\")"
+    );
+    assert_eq!(emit("starts_at.in_time_zone"), "ActiveSupport.present(starts_at)");
+}
+
+#[test]
+fn a_temporal_reader_presents_its_memo_on_every_read() {
+    let tree = [
+        ("db/schema.rb", SCHEMA.to_string()),
+        ("app/models/event.rb", "class Event < ApplicationRecord\nend\n".to_string()),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
+    .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let out = emit_lowered_models(&app).into_iter().map(|f| f.content).collect::<Vec<_>>().join("\n");
+    assert!(
+        out.contains("ActiveSupport.present_db(@__t_starts_at ||= ActiveSupport.parse_db_time(@starts_at_raw))"),
+        "{out}"
+    );
+}

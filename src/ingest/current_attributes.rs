@@ -215,10 +215,11 @@ fn synthesized_source(
     // default, which a fresh instance is -- and a reader that ever
     // answered a nilable made `Current.instance.user` fail to dispatch
     // and EVERY class-level forwarder register `Untyped`. The reader
-    // narrows its slot read behind `nil?` for the same reason.
+    // narrows its slot read behind `is_a?`, not `nil?`, for the same
+    // reason: `Thread#[]` answers untyped, and a `nil?` test leaves it so.
     let key = format!("__current_attrs_{}", class.replace("::", "_"));
     body.push_str(&format!(
-        "  def self.instance\n    c = Thread.current[:{key}]\n    return c if !c.nil?\n    c = {class}.new\n    Thread.current[:{key}] = c\n    c\n  end\n\n\
+        "  def self.instance\n    c = Thread.current[:{key}]\n    return c if c.is_a?({class})\n    c = {class}.new\n    Thread.current[:{key}] = c\n    c\n  end\n\n\
          \x20 def self.reset\n    Thread.current[:{key}] = {class}.new\n    nil\n  end\n\n"
     ));
 
