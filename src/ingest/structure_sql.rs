@@ -84,11 +84,21 @@ fn dispatch_statement(
     gaps: &mut Vec<IngestError>,
     seen_heads: &mut HashSet<String>,
 ) {
-    // A child partition's own DDL — `ALTER TABLE … ATTACH PARTITION …`
-    // and the sibling `ALTER INDEX … ATTACH PARTITION …` for a
-    // partitioned index — carries no new schema fact: the parent (or
-    // the un-partitioned index) already has it. Checked before any
-    // other dispatch since it can appear on either statement head.
+    // A child partition attached via `ALTER TABLE … ATTACH PARTITION
+    // …` rather than declared `PARTITION OF` up front (the shape this
+    // dialect's real dumps actually use — see the module header):
+    // the child got its own independent `CREATE TABLE` earlier in the
+    // dump (same columns as the parent, duplicated), which this now
+    // retracts. Modeling 32 identical shards of `financial_line_items`
+    // as 32 separate tables would be noise, not signal: same columns,
+    // same composite key, 32x the ledger entries for zero new
+    // information. `ALTER INDEX … ATTACH PARTITION …` (a partitioned
+    // index's own child-index attachment) has no table to retract —
+    // skipped, same as before.
+    if starts_with_ci(stmt, "ALTER TABLE") && stmt.to_ascii_uppercase().contains("ATTACH PARTITION") {
+        handle_attach_partition(stmt, schema);
+        return;
+    }
     if stmt.to_ascii_uppercase().contains("ATTACH PARTITION") {
         return;
     }
@@ -194,10 +204,13 @@ fn handle_create_table(
     gaps: &mut Vec<IngestError>,
 ) {
     // `CREATE TABLE child PARTITION OF parent FOR VALUES …` — the
-    // parent's own CREATE TABLE already carries the columns; this
-    // form (unlike the independent-CREATE-TABLE-then-ATTACH-PARTITION
-    // shape Postgres also allows — see the module-level report notes)
-    // has no column list of its own to model.
+    // parent's own CREATE TABLE already carries the columns, and this
+    // form has no column list of its own to model. (The other shape
+    // Postgres allows — an independent `CREATE TABLE` for the child,
+    // later joined to the parent via `ALTER TABLE … ATTACH PARTITION
+    // …` — DOES have its own column list here, so it's ingested like
+    // any other table and then retracted by `handle_attach_partition`
+    // once the ATTACH statement names it.)
     if stmt.to_ascii_uppercase().contains("PARTITION OF") {
         return;
     }
@@ -290,7 +303,10 @@ fn handle_inline_table_constraint(
         }
         _ => gaps.push(IngestError::Unsupported {
             file: file.into(),
-            message: format!("primary key dropped: {table_name}({}) is composite", cols.join(", ")),
+            message: format!(
+                "primary key dropped: composite key ({table_name}({}))",
+                cols.join(", ")
+            ),
         }),
     }
 }
@@ -404,7 +420,7 @@ fn handle_create_view(stmt: &str, file: &str, gaps: &mut Vec<IngestError>) {
     let Some((name, _)) = read_ident(rest.trim_start(), 0) else { return };
     gaps.push(IngestError::Unsupported {
         file: file.into(),
-        message: format!("view not modeled: {name} (a model backed by this view has no columns)"),
+        message: format!("view not modeled: a model backed by this view has no columns ({name})"),
     });
 }
 
@@ -494,6 +510,21 @@ fn handle_create_index(stmt: &str, schema: &mut Schema) {
     }
 }
 
+/// `ALTER TABLE [ONLY] parent ATTACH PARTITION child FOR VALUES …` —
+/// removes `child` from `schema.tables` if it's there. `child` always
+/// got its own `CREATE TABLE` earlier in the dump (pg_dump orders by
+/// dependency), so by the time this statement is reached the entry
+/// exists to remove; a no-op otherwise (defensive — e.g. if a future
+/// dump ever used `PARTITION OF` for the same child, `handle_create_table`
+/// would already have skipped it and there'd be nothing here to find).
+fn handle_attach_partition(stmt: &str, schema: &mut Schema) {
+    let words = top_level_words(stmt);
+    let Some(pos) = word_seq_pos_after(&words, 0, &["ATTACH", "PARTITION"]) else { return };
+    let name_start = pos + "ATTACH PARTITION".len();
+    let Some((child_name, _)) = read_ident(stmt, name_start) else { return };
+    schema.tables.shift_remove(&Symbol::from(child_name));
+}
+
 // ---------------------------------------------------------------------
 // ALTER TABLE
 // ---------------------------------------------------------------------
@@ -553,6 +584,17 @@ fn handle_add_primary_key(
     gaps: &mut Vec<IngestError>,
     file: &str,
 ) {
+    // A retracted partition shard (see `handle_attach_partition`) has
+    // no table entry left to set a pk flag on — and, just as
+    // importantly, no business ledgering a composite-key gap for a
+    // table this Schema no longer models at all. Its own `ADD
+    // CONSTRAINT ... PRIMARY KEY` statement always comes AFTER its
+    // `ATTACH PARTITION` in a real dump (pg_dump orders constraints
+    // after the table's attached-into-parent state), so this is not a
+    // race — the removal has already happened by the time we get here.
+    if !schema.tables.contains_key(&table_sym) {
+        return;
+    }
     let Some(open) = find_first_open_paren(after, pk_pos) else { return };
     let Some(close) = matching_close_paren(after, open) else { return };
     let cols: Vec<String> = top_level_split(&after[open + 1..close], b',')
@@ -570,7 +612,10 @@ fn handle_add_primary_key(
         }
         _ => gaps.push(IngestError::Unsupported {
             file: file.into(),
-            message: format!("primary key dropped: {table_name}({}) is composite", cols.join(", ")),
+            message: format!(
+                "primary key dropped: composite key ({table_name}({}))",
+                cols.join(", ")
+            ),
         }),
     }
 }
@@ -592,6 +637,10 @@ fn handle_add_foreign_key(
     gaps: &mut Vec<IngestError>,
     file: &str,
 ) {
+    // Same retracted-partition-shard guard as `handle_add_primary_key`.
+    if !schema.tables.contains_key(&table_sym) {
+        return;
+    }
     let Some(open1) = find_first_open_paren(after, fk_pos) else { return };
     let Some(close1) = matching_close_paren(after, open1) else { return };
     let from_cols: Vec<String> = top_level_split(&after[open1 + 1..close1], b',')
@@ -625,7 +674,7 @@ fn handle_add_foreign_key(
         gaps.push(IngestError::Unsupported {
             file: file.into(),
             message: format!(
-                "foreign key dropped: {table_name}({}) -> {ref_table_raw}({}) is composite",
+                "foreign key dropped: composite key ({table_name}({}) -> {ref_table_raw}({}))",
                 from_cols.join(", "),
                 to_cols.join(", ")
             ),

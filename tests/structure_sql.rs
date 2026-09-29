@@ -126,10 +126,12 @@ fn ingests_tables_columns_indexes_fk_and_pk() {
     assert!(!schema.tables.contains_key(&Symbol::from("schema_migrations")));
     assert!(!schema.tables.contains_key(&Symbol::from("ar_internal_metadata")));
 
-    // A table created via its own CREATE TABLE and only later
-    // ATTACH PARTITION'd still surfaces as an ordinary table — see the
-    // module header's note on this dialect's partitioning shape.
-    assert!(schema.tables.contains_key(&Symbol::from("widgets_2024")));
+    // `widgets_2024` got its own independent CREATE TABLE (this
+    // dialect's real partitioning shape — see the module header) but
+    // is later joined to `widgets` via ATTACH PARTITION, which
+    // retracts it: modeling every shard of a partitioned table as its
+    // own duplicate-schema table would be pure noise.
+    assert!(!schema.tables.contains_key(&Symbol::from("widgets_2024")));
 
     let companies = &schema.tables[&Symbol::from("companies")];
     assert!(col(companies, "id").primary_key, "pk set via ALTER TABLE ... ADD CONSTRAINT");
@@ -178,7 +180,7 @@ fn ingests_tables_columns_indexes_fk_and_pk() {
         "{messages:?}"
     );
     assert!(
-        messages.iter().any(|m| m.contains("view not modeled: active_widgets")),
+        messages.iter().any(|m| m.contains("view not modeled:") && m.contains("(active_widgets)")),
         "{messages:?}"
     );
 }
@@ -266,4 +268,110 @@ fn ingest_app_types_model_attributes_from_structure_sql_when_schema_rb_is_absent
     // `Str` (not nullable), derived straight from `db/structure.sql`
     // with no `db/schema.rb` in the tree at all.
     assert_eq!(widget_model.attributes.fields.get(&Symbol::from("name")), Some(&Ty::Str));
+}
+
+/// The survey report's `bucket_key` (see `src/ingest/survey.rs`) groups
+/// gaps by the message text before the first `(`. The identifier
+/// therefore has to sit INSIDE parens for gaps to bucket by *reason*
+/// rather than by table name — otherwise every composite-key/view gap
+/// gets its own one-off bucket and the report can't show which gap
+/// kinds actually dominate. This pins that shape for all four
+/// structure.sql-specific ledger templates.
+#[test]
+fn composite_key_and_view_gaps_bucket_by_reason_not_by_table() {
+    let sql = r#"
+CREATE TABLE public.assignments (
+    project_id bigint NOT NULL,
+    user_id bigint NOT NULL
+);
+
+CREATE TABLE public.memberships (
+    org_id bigint NOT NULL,
+    account_id bigint NOT NULL
+);
+
+CREATE TABLE public.orgs (
+    id bigint NOT NULL,
+    other_id bigint NOT NULL
+);
+
+ALTER TABLE ONLY public.assignments
+    ADD CONSTRAINT assignments_pkey PRIMARY KEY (project_id, user_id);
+
+ALTER TABLE ONLY public.memberships
+    ADD CONSTRAINT memberships_pkey PRIMARY KEY (org_id, account_id);
+
+ALTER TABLE ONLY public.assignments
+    ADD CONSTRAINT assignments_fk FOREIGN KEY (project_id, user_id) REFERENCES public.orgs(id, other_id);
+
+ALTER TABLE ONLY public.memberships
+    ADD CONSTRAINT memberships_fk FOREIGN KEY (org_id, account_id) REFERENCES public.orgs(id, other_id);
+
+CREATE VIEW public.view_one AS SELECT assignments.project_id FROM public.assignments;
+CREATE VIEW public.view_two AS SELECT memberships.org_id FROM public.memberships;
+"#;
+    survey::activate();
+    let _ = ingest_structure_sql(sql.as_bytes(), "db/structure.sql");
+    let gaps = survey::drain();
+
+    let keys_for = |needle: &str| -> HashSet<String> {
+        gaps.iter()
+            .filter(|g| format!("{g}").contains(needle))
+            .map(|g| roundhouse::ingest::survey::bucket_key(g))
+            .collect()
+    };
+
+    let pk_keys = keys_for("primary key dropped");
+    assert_eq!(pk_keys.len(), 1, "both composite PKs should bucket together: {pk_keys:?}");
+
+    let fk_keys = keys_for("foreign key dropped");
+    assert_eq!(fk_keys.len(), 1, "both composite FKs should bucket together: {fk_keys:?}");
+
+    let view_keys = keys_for("view not modeled");
+    assert_eq!(view_keys.len(), 1, "both unmodeled views should bucket together: {view_keys:?}");
+}
+
+/// A partition child attached via `ALTER TABLE … ATTACH PARTITION …`
+/// (rather than declared `PARTITION OF` up front) must not surface as
+/// its own table — see `handle_attach_partition`.
+#[test]
+fn attached_partition_children_are_not_modeled_as_separate_tables() {
+    let sql = r#"
+CREATE TABLE public.readings (
+    id bigint NOT NULL,
+    shard_key bigint NOT NULL
+)
+PARTITION BY HASH (shard_key);
+
+CREATE TABLE shard.readings_p0 (
+    id bigint NOT NULL,
+    shard_key bigint NOT NULL
+);
+
+-- pg_dump's real order: ATTACH PARTITION comes before the shard's OWN
+-- constraints (its pkey is dumped alongside the other per-table
+-- constraints, well after every table and every partition attachment).
+ALTER TABLE ONLY public.readings ATTACH PARTITION shard.readings_p0 FOR VALUES WITH (modulus 2, remainder 0);
+
+ALTER TABLE ONLY public.readings
+    ADD CONSTRAINT readings_pkey PRIMARY KEY (id, shard_key);
+
+ALTER TABLE ONLY shard.readings_p0
+    ADD CONSTRAINT readings_p0_pkey PRIMARY KEY (id, shard_key);
+"#;
+    survey::activate();
+    let schema = ingest_structure_sql(sql.as_bytes(), "db/structure.sql").expect("survey mode never errors");
+    let gaps = survey::drain();
+
+    assert!(schema.tables.contains_key(&Symbol::from("readings")), "the parent stays");
+    assert!(
+        !schema.tables.contains_key(&Symbol::from("readings_p0")),
+        "the attached shard is retracted, not modeled as its own table"
+    );
+    // Exactly one composite-pk gap (the parent's), not two — the
+    // shard's own later `ADD CONSTRAINT ... PRIMARY KEY` targets a
+    // table this Schema no longer has, and is silently skipped rather
+    // than ledgering a gap for a table nobody will ever see.
+    let pk_gaps = gaps.iter().filter(|g| format!("{g}").contains("primary key dropped")).count();
+    assert_eq!(pk_gaps, 1, "{gaps:?}");
 }
