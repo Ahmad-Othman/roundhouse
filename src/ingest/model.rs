@@ -133,7 +133,18 @@ pub fn ingest_model(
     let mut primary_key: Option<Symbol> = None;
     if let Some(class_body) = class.body() {
         let mut prev_end: Option<usize> = None;
-        for stmt in flatten_statements(class_body) {
+        // Constants the class body assigns, for `enum :x, CONST`.
+        let stmts = flatten_statements(class_body);
+        let mut class_consts: std::collections::HashMap<String, Vec<(String, Literal)>> =
+            std::collections::HashMap::new();
+        for stmt in &stmts {
+            if let Some(cw) = stmt.as_constant_write_node() {
+                if let Some(labels) = enum_label_values(&cw.value()) {
+                    class_consts.insert(constant_id_str(&cw.name()).to_string(), labels);
+                }
+            }
+        }
+        for stmt in stmts {
             // `self.primary_key = "key"` is recognized into
             // `Model::primary_key` instead of being kept as a body item:
             // the lowering synthesizes a reader from it, and re-emitting
@@ -157,7 +168,7 @@ pub fn ingest_model(
             // scope + predicate + bang writer per label, so it expands
             // in the walk loop for the same reason `class << self` does.
             if let Some(call) = stmt.as_call_node() {
-                match expand_enum_decl(&call, file, &leading) {
+                match expand_enum_decl(&call, file, &leading, &class_consts) {
                     Ok(Some(expanded)) => {
                         enums.insert(expanded.column, expanded.mapping);
                         let mut blank = leading_blank;
@@ -522,6 +533,7 @@ pub(super) fn expand_enum_decl(
     call: &ruby_prism::CallNode<'_>,
     file: &str,
     leading_comments: &[crate::dialect::Comment],
+    class_consts: &std::collections::HashMap<String, Vec<(String, Literal)>>,
 ) -> IngestResult<Option<EnumExpansion>> {
     use crate::dialect::{MethodDef, MethodReceiver, Scope};
     use crate::effect::EffectSet;
@@ -560,14 +572,29 @@ pub(super) fn expand_enum_decl(
         }
     };
     let Some(mapping_node) = mapping_node else { return Ok(None) };
-
-    let labels = enum_label_values(&mapping_node).ok_or_else(|| IngestError::Unsupported {
+    // `enum :status, STATUSES` — the mapping named by a constant the class
+    // body assigned above (`STATUSES = %i[…].freeze`).
+    let labels = match mapping_node.as_constant_read_node() {
+        Some(cr) => class_consts.get(constant_id_str(&cr.name())).cloned(),
+        None => enum_label_values(&mapping_node),
+    }
+    .ok_or_else(|| IngestError::Unsupported {
         file: file.into(),
         message: format!(
             "enum :{} mapping must be an array or hash literal (or `%w[…].index_by(&:itself)`)",
             column
         ),
     })?;
+    // A label that is not a Ruby identifier (`32bits`, `64bits`) has no
+    // predicate, scope or bang writer Ruby could name: Rails reaches them
+    // through `send`, which the emit has no equivalent of. Skipped.
+    let labels: Vec<(String, Literal)> = labels
+        .into_iter()
+        .filter(|(l, _)| {
+            l.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .collect();
 
     let span = Span::synthetic();
     let sym = |s: &str| Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from(s) } });
@@ -664,6 +691,14 @@ pub(super) fn expand_enum_decl(
 /// `None` for anything else (a constant reference, a computed hash),
 /// which the caller reports as a gap rather than guessing at storage.
 fn enum_label_values(node: &Node<'_>) -> Option<Vec<(String, Literal)>> {
+    // `%i[…].freeze` / `{ … }.freeze` — the literal is the receiver.
+    if let Some(call) = node.as_call_node() {
+        if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
+            if let Some(recv) = call.receiver() {
+                return enum_label_values(&recv);
+            }
+        }
+    }
     if let Some(arr) = node.as_array_node() {
         return arr
             .elements()
