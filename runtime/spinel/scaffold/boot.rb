@@ -168,6 +168,10 @@ require_relative "runtime/erb_spinel"
 # ViewHelpers' scalar `to_query_value`, for the two lanes whose router
 # parses it back. The CRuby overlay's boot requires the same file.
 require_relative "runtime/hash_to_query"
+# Rails' request-params builder — nests the query string and the body
+# the way ActionDispatch does, for `Main.request_params`. Spinel only:
+# the CRuby overlay's dispatcher gets its params from Rack.
+require_relative "runtime/param_builder"
 # `redirect_back_or_to` — a reopen of ActionController::Base reading the
 # parked request; ruby-family only (see the file).
 require_relative "runtime/redirect_back"

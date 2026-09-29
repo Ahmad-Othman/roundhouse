@@ -771,6 +771,12 @@ jobs:
       - name: cargo test --test spinel_db_lease -- --ignored
         if: always()
         run: cargo test --test spinel_db_lease -- --ignored --nocapture
+      # Rails' request-params builder, ported for the spinel dispatcher
+      # (runtime/spinel/param_builder.rb), held to Rails' answers for
+      # 2,755 query strings. The CRuby half runs in the core job.
+      - name: cargo test --test spinel_param_builder -- --ignored
+        if: always()
+        run: cargo test --test spinel_param_builder -- --ignored --nocapture
 
   # Campfire conformance — ONCE Campfire's OWN test suite, run against a
   # roundhouse emit of it. The C4 rung of the coverage ladder, and the
