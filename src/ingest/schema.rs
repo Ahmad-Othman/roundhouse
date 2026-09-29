@@ -184,7 +184,7 @@ fn apply_migration_verb(
         .arguments()
         .map(|a| a.arguments().iter().collect())
         .unwrap_or_default();
-    let arg_name = |i: usize| args.get(i).and_then(name_value);
+    let arg_name = |i: usize| args.get(i).and_then(table_name_value);
 
     match verb {
         "create_table" => {
@@ -339,6 +339,16 @@ fn name_value(node: &Node<'_>) -> Option<String> {
     string_value(node).or_else(|| symbol_value(node))
 }
 
+/// A table name as the Postgres schema dumper writes it when the
+/// search path has more than one schema (`"public.companies"`): the
+/// qualifier is not part of the table's name anywhere else in the app.
+fn table_name_value(node: &Node<'_>) -> Option<String> {
+    name_value(node).map(|s| match s.rsplit_once('.') {
+        Some((_, bare)) => bare.to_string(),
+        None => s,
+    })
+}
+
 /// `add_foreign_key "comments", "articles"[, column:, primary_key:,
 /// on_delete:, on_update:]` — recorded into `Table.foreign_keys` so
 /// downstream consumers see the referential shape (the Roda/Sequel
@@ -347,7 +357,7 @@ fn name_value(node: &Node<'_>) -> Option<String> {
 /// itself is unaffected (the FK column is already an ordinary integer
 /// column from `create_table`).
 fn apply_add_foreign_key(args: &[Node<'_>], schema: &mut Schema) {
-    let arg_name = |i: usize| args.get(i).and_then(name_value);
+    let arg_name = |i: usize| args.get(i).and_then(table_name_value);
     let (Some(from_t), Some(to_t)) = (arg_name(0), arg_name(1)) else { return };
     let kw = |key: &str| kwarg_value(args.iter().skip(2), key).and_then(|v| name_value(&v));
     let from_column =
@@ -446,7 +456,7 @@ fn table_from_create_table(
 ) -> Option<(Symbol, Table)> {
     let args = call.arguments()?;
     let first = args.arguments().iter().next();
-    let table_name = first.as_ref().and_then(name_value)?;
+    let table_name = first.as_ref().and_then(table_name_value)?;
 
     // Rails convention: every table has an implicit bigint primary-key `id`
     // unless `id: false` is passed to `create_table`. We honor that here by
