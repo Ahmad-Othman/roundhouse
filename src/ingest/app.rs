@@ -30,6 +30,7 @@ use super::library_class::{
 use super::model::ingest_model;
 use super::routes::ingest_routes_with_draws;
 use super::schema::{ingest_migration, ingest_schema};
+use super::structure_sql::ingest_structure_sql;
 use super::test::ingest_test_files;
 use super::view::{ViewEngine, ingest_template};
 use super::survey::{self, unwrap_or_record};
@@ -227,6 +228,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     }
 
     let schema_path = dir.join("db/schema.rb");
+    let structure_path = dir.join("db/structure.sql");
     if vfs.exists(&schema_path) {
         let source = vfs.read(&schema_path)?;
         if let Some(schema) =
@@ -234,16 +236,57 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         {
             app.schema = schema;
         }
+    } else if vfs.exists(&structure_path) {
+        // `config.active_record.schema_format = :sql` apps (Postgres,
+        // typically) never write schema.rb — `rails db:schema:dump`
+        // writes a raw `pg_dump` DDL dump instead. Same canonical-
+        // snapshot role, just SQL instead of the Rails DSL.
+        let source = vfs.read(&structure_path)?;
+        if let Some(schema) = unwrap_or_record(ingest_structure_sql(
+            &source,
+            &structure_path.display().to_string(),
+        ))? {
+            app.schema = schema;
+        }
     } else {
-        // No schema.rb (never migrated locally, gitignored, or a
-        // migrations-only app) — recover the same column facts by
-        // folding db/migrate/*.rb in filename order (timestamp
-        // prefixes sort chronologically). schema.rb stays canonical
-        // when both exist: it's the already-folded form.
-        let migrate_dir = dir.join("db/migrate");
-        if vfs.is_dir(&migrate_dir) {
+        // No schema.rb or structure.sql (never migrated locally,
+        // gitignored, or a migrations-only app) — recover the same
+        // column facts by folding every `db/migrate*/*.rb` in
+        // filename order across every migrate directory. A long-lived
+        // app sometimes splits old migrations into `db/migrate-YYYY`
+        // siblings of `db/migrate` (Procore's `db/migrate-2010` …
+        // `db/migrate-2023`); folding only `db/migrate` would silently
+        // miss every table those older migrations created. Sorted by
+        // filename alone (not full path) since Rails' timestamp prefix
+        // is what makes the order chronological — the directory a file
+        // happens to live in isn't. schema.rb / structure.sql stay
+        // canonical when either exists: they're the already-folded form.
+        let mut migrate_dirs: Vec<PathBuf> = Vec::new();
+        let default_migrate_dir = dir.join("db/migrate");
+        if vfs.is_dir(&default_migrate_dir) {
+            migrate_dirs.push(default_migrate_dir);
+        }
+        let db_dir = dir.join("db");
+        if vfs.is_dir(&db_dir) {
+            for entry in vfs.read_dir(&db_dir)? {
+                let is_sibling_migrate_dir = vfs.is_dir(&entry)
+                    && entry
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("migrate-"));
+                if is_sibling_migrate_dir {
+                    migrate_dirs.push(entry);
+                }
+            }
+        }
+        if !migrate_dirs.is_empty() {
+            let mut files: Vec<PathBuf> = Vec::new();
+            for migrate_dir in &migrate_dirs {
+                files.extend(read_rb_files(vfs, migrate_dir)?);
+            }
+            files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
             let mut schema = crate::schema::Schema::default();
-            for entry in read_rb_files(vfs, &migrate_dir)? {
+            for entry in files {
                 let source = vfs.read(&entry)?;
                 unwrap_or_record(ingest_migration(
                     &source,

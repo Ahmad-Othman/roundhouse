@@ -37,6 +37,7 @@ pub mod sequel_model;
 pub mod sorbet_sig;
 pub mod sources;
 pub mod sql_functions;
+pub mod structure_sql;
 pub mod survey;
 pub mod test;
 pub mod util;
@@ -56,6 +57,7 @@ pub use routes::ingest_routes;
 pub use schema::{ingest_migration, ingest_schema};
 pub use sequel_migration::ingest_sequel_migration;
 pub use sequel_model::ingest_sequel_model;
+pub use structure_sql::ingest_structure_sql;
 pub use test::{ingest_test_file, ingest_test_files};
 pub use view::ingest_view;
 
