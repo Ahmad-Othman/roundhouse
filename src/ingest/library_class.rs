@@ -1721,15 +1721,28 @@ pub(super) fn ingest_library_method(
                         // campfire's `avatar_tag(user, **options)` is
                         // called with one argument from the message row,
                         // the user list and the sidebar.
-                        let mut p = Param::with_default(
-                            Symbol::from(s),
-                            Expr::new(
-                                Span::synthetic(),
-                                ExprNode::Hash { entries: vec![], kwargs: false },
-                            ),
-                        );
-                        p.from_kwrest = true;
-                        params.push(p);
+                        // Not beside a positional `*rest`: there the caller's
+                        // keywords already land in the rest, and the slot is
+                        // dropped on purpose (tests/initializer_defined_constants).
+                        if keeps_keywords && !params.iter().any(|p| p.rest && !p.keyword) {
+                            // The keyword group is kept in this def, so
+                            // `**rest` stays a keyword-rest: flattened to
+                            // `rest = {}` after a `name:` it does not parse
+                            // (`def call(server_context:, arguments = {})`).
+                            let mut p = Param::keyword(Symbol::from(s), None);
+                            p.rest = true;
+                            params.push(p);
+                        } else {
+                            let mut p = Param::with_default(
+                                Symbol::from(s),
+                                Expr::new(
+                                    Span::synthetic(),
+                                    ExprNode::Hash { entries: vec![], kwargs: false },
+                                ),
+                            );
+                            p.from_kwrest = true;
+                            params.push(p);
+                        }
                     }
                 }
             }
