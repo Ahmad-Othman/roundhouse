@@ -2831,8 +2831,13 @@ fn rewrite_helper_calls(
     // not the modified string) are deliberately excluded.
     let bang_rewrite: Option<Symbol> =
         if let ExprNode::Send { recv: Some(r), method, block: None, .. } = &*expr.node {
-            let is_lv =
-                matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. });
+            // A reserved-word local (`class:`) is not assignable, so it
+            // keeps the bang call.
+            let is_lv = match &*r.node {
+                ExprNode::Var { name, .. } => !crate::naming::is_reserved_local(name.as_str()),
+                ExprNode::Ivar { .. } => true,
+                _ => false,
+            };
             method
                 .as_str()
                 .strip_suffix('!')
