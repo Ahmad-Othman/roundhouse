@@ -672,10 +672,12 @@ pub fn view_method_name_for(stem: &str, format: &str) -> crate::ident::Symbol {
 }
 
 pub fn view_method_name(stem: &str) -> crate::ident::Symbol {
+    // A template file name need not be an identifier (`shop-404.html.erb`).
+    let stem = &stem.replace(|c: char| !(c.is_alphanumeric() || c == '_'), "_");
     if stem.chars().next().is_some_and(|c| c.is_ascii_digit()) || stem == "new" {
         crate::ident::Symbol::from(format!("_{stem}"))
     } else {
-        crate::ident::Symbol::from(stem)
+        crate::ident::Symbol::from(stem.as_str())
     }
 }
 
