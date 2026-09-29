@@ -5320,8 +5320,16 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
             entry.1 = rewritten;
         }
         if in_lane {
-            let (class, n) = test_class_and_count(&entry.1, &new_path)?;
-            lane.push((new_path, class, n));
+            match test_class_and_count(&entry.1, &new_path) {
+                Ok((class, n)) => lane.push((new_path, class, n)),
+                // A test program the snapshot runner cannot shape is
+                // dropped with a note rather than failing the project:
+                // a large app's suite has files outside the lane shape.
+                Err(e) => {
+                    eprintln!("roundhouse: {e}; dropped");
+                    orphaned.push(new_path);
+                }
+            }
         }
     }
 
