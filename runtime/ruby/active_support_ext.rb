@@ -223,25 +223,27 @@ module ActiveSupport
     out
   end
 
-  # AS `Array#to_sentence`, default :en connectors: "", "a", "a and b",
-  # "a, b, and c". Another core_ext reopen (`Array`) the transpiled
+  # AS `Array#to_sentence`: "", "a", "a and b", "a, b, and c" with the
+  # :en connectors, which `lower::enumerable_ext` passes when the call
+  # site names none. Another core_ext reopen (`Array`) the transpiled
   # runtimes cannot host — same home and same rule as `index_by`, the
   # receiver evaluated exactly once. campfire names a direct room by
-  # its other members: `room.users.without(me).pluck(:name).to_sentence`.
+  # its other members: `room.users.without(me).pluck(:name).to_sentence`,
+  # and a group room's initials with `two_words_connector: '+'`.
   # Elements go through `to_s`, as Rails' `join` does.
-  def self.to_sentence(list)
+  def self.to_sentence(list, words_connector, two_words_connector, last_word_connector)
     n = list.length
     return "" if n == 0
     return list[0].to_s if n == 1
-    return "#{list[0]} and #{list[1]}" if n == 2
+    return "#{list[0]}#{two_words_connector}#{list[1]}" if n == 2
     head = +""
     i = 0
     while i < n - 1
-      head = head + ", " if i > 0
+      head = head + words_connector if i > 0
       head = head + list[i].to_s
       i = i + 1
     end
-    "#{head}, and #{list[n - 1]}"
+    "#{head}#{last_word_connector}#{list[n - 1]}"
   end
 
   # Not reopened on `Time` (no built-in reopening), and not `Time#+`: day shifts go through the civil calendar so DST cannot move the clock.

@@ -258,6 +258,23 @@ check("starting a DM does not land in the open room",
       direct["location"].to_s.end_with?("/rooms/1"), false)
 sidebar = req("GET", "/users/me/sidebar")
 check("GET /users/me/sidebar with a direct room", sidebar.code, "200")
+# A GROUP direct room (three others on a seeded tree) takes the partial's
+# other branch, `members.first(4)` — the Relation half's `first` took no
+# count, and that sidebar 500'd on both lanes. Found by the fixture seed
+# scripts/campfire-http-shape runs, which has a four-person direct room.
+group = req("POST", "/rooms/directs", { "user_ids[]" => %w[2 3 4] })
+check("POST /rooms/directs (a group)", group.code, "302")
+sidebar = req("GET", "/users/me/sidebar")
+check("GET /users/me/sidebar with a group direct room", sidebar.code, "200")
+# A 302 and a 200 are not the room: the spinel binary answered both
+# while dropping `user_ids[]` (only the last value of an array param
+# survived its parser), creating every direct room with its creator
+# alone — and these probes stayed green. On a tree where the others
+# exist, the group room must render the partial's many-members branch.
+if req("GET", "/users/4").code == "200"
+  check("the group direct room has its members", sidebar.body.to_s.include?("avatar__group"), true,
+        ledger: "runtime.md: Array form params (`ids[]`) keep only the last value (spinel)")
+end
 
 # ── two connections ───────────────────────────────────────────────────
 puts "\n\e[1;34m==>\e[0m two /cable connections"

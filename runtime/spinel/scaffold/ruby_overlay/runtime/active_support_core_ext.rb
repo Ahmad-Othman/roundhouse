@@ -166,14 +166,14 @@ class String
 end
 
 class Array
-  # AS `to_sentence`, default :en connectors: "a", "a and b",
-  # "a, b, and c".
-  def to_sentence
+  # AS `to_sentence` with its three connector options, :en defaults:
+  # "a", "a and b", "a, b, and c".
+  def to_sentence(words_connector: ", ", two_words_connector: " and ", last_word_connector: ", and ")
     case length
     when 0 then ""
     when 1 then self[0].to_s
-    when 2 then "#{self[0]} and #{self[1]}"
-    else "#{self[0..-2].join(', ')}, and #{self[-1]}"
+    when 2 then "#{self[0]}#{two_words_connector}#{self[1]}"
+    else "#{self[0..-2].join(words_connector)}#{last_word_connector}#{self[-1]}"
     end
   end
 

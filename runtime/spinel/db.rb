@@ -959,9 +959,15 @@ module Db
   # storage, runs the block, then releases the index. With pool_size >=
   # the workers' concurrency the wait never trips.
   #
-  # NOTE: no begin/ensure (not used elsewhere in spinel-compiled code), so
-  # a raise inside the block leaks the lease — acceptable on the happy
-  # path; revisit if the dispatch path starts raising under load.
+  # The release is in an `ensure`. It used not to be ("no begin/ensure
+  # (not used elsewhere in spinel-compiled code) … acceptable on the
+  # happy path"), and every 500 then leaked one lease for good: after
+  # pool-size of them on one shard, every request that shard's threads
+  # served parked in `lease` forever. scripts/campfire-http-shape found
+  # it — a sweep that alternates routes put the one route that raised on
+  # the same shard each time, and the binary stopped answering it after
+  # four. Any signed-in user who can reach a 500 could wedge a shard.
+  # `capture_sql` below has used `ensure` on this lane all along.
   # Whether this thread is inside a `with_connection` lease. What
   # `Rails::Executor#wrap` asks before taking one: Rails' executor is
   # re-entrant, and a second lease on a thread that holds one would
@@ -977,15 +983,22 @@ module Db
     Thread.current[:db_conn] = conn
     # Rails wraps every request in the query cache; so does this lease.
     conn.qc_begin
-    result = yield
-    conn.qc_end
-    # Every cursor this request opened is closed by now, so trimming the
-    # stmt cache here can't close a live one. This is the only place the
-    # cache is bounded — `prepare_cached` deliberately caps nothing, since
-    # a stmt it refused to cache is a stmt nothing can ever finalize.
-    conn.trim!
-    Thread.current[:db_conn] = nil
-    pool.release(idx)
+    finished = false
+    begin
+      result = yield
+      finished = true
+    ensure
+      conn.qc_end
+      # Every cursor this request opened is closed by now, so trimming the
+      # stmt cache here can't close a live one. This is the only place the
+      # cache is bounded — `prepare_cached` deliberately caps nothing, since
+      # a stmt it refused to cache is a stmt nothing can ever finalize.
+      # After a raise a cursor may still be open, so the trim waits for
+      # the next lease that finishes.
+      conn.trim! if finished
+      Thread.current[:db_conn] = nil
+      pool.release(idx)
+    end
     result
   end
 

@@ -65,6 +65,32 @@ fn rewrite(expr: &mut Expr) {
     let ExprNode::Send { recv, method, args, block, parenthesized } = &mut *expr.node else {
         return;
     };
+    // `first(n)` / `last(n)` on the same Relation-or-Array union `many?`
+    // meets below: campfire's direct-room sidebar goes on to
+    // `members.first(4)` for a room of three or more. A proven Relation
+    // is renamed to `first_n` by the scope-chain pass, a plain Array
+    // already means it; the union is neither, and the Relation half's
+    // `first` takes no count (ArgumentError, every sidebar render for a
+    // member of a group direct room). Both halves answer `to_a`, and
+    // on the Array that follows `first(n)` means what Ruby means.
+    if matches!(method.as_str(), "first" | "last") && args.len() == 1 && block.is_none() {
+        if let Some(array_ty) = recv.as_ref().and_then(|r| relation_or_array_half(r.ty.as_ref())) {
+            let receiver = recv.take().expect("checked above");
+            let mut to_a = Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(receiver),
+                    method: Symbol::from("to_a"),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            to_a.ty = Some(array_ty);
+            *recv = Some(to_a);
+        }
+        return;
+    }
     // `index_by` takes the block and `many?` refuses one — the bare
     // call is the form Rails' counter-and-`any?` body reduces to a
     // length test, and the block form counts MATCHES instead, which is
@@ -74,7 +100,20 @@ fn rewrite(expr: &mut Expr) {
         "many?" | "to_sentence" | "sole" | "squish" => false,
         _ => return,
     };
-    if !args.is_empty() || block.is_some() != wants_block {
+    // `to_sentence` takes Rails' three connector options; the module
+    // function takes them positionally, so a keyword Hash of those keys
+    // (and no others) becomes the three arguments, defaults filled in.
+    // The module function takes all three, so a bare call passes the
+    // defaults: one signature, every target.
+    let connectors = match (method.as_str(), args.len()) {
+        ("to_sentence", 0) => Some(SENTENCE_DEFAULTS.map(String::from)),
+        ("to_sentence", 1) => {
+            let Some(c) = sentence_connectors(&args[0]) else { return };
+            Some(c)
+        }
+        _ => None,
+    };
+    if (connectors.is_none() && !args.is_empty()) || block.is_some() != wants_block {
         return;
     }
     let Some(receiver) = recv.as_ref() else { return };
@@ -125,6 +164,7 @@ fn rewrite(expr: &mut Expr) {
     // rather than becoming a call whose argument does not fit.
     if matches!(method.as_str(), "many?" | "to_sentence")
         && !matches!(receiver.ty.as_ref(), Some(Ty::Array { .. }))
+        && !(method.as_str() == "to_sentence" && is_block_map(receiver))
     {
         return;
     }
@@ -140,8 +180,41 @@ fn rewrite(expr: &mut Expr) {
         span,
         ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
     ));
+    args.clear();
     args.push(receiver);
+    if let Some(connectors) = connectors {
+        args.extend(connectors.into_iter().map(|value| {
+            let mut lit = Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Str { value } });
+            lit.ty = Some(Ty::Str);
+            lit
+        }));
+    }
     *parenthesized = true;
+}
+
+/// words_connector, two_words_connector, last_word_connector — Rails'
+/// `:en` defaults.
+const SENTENCE_DEFAULTS: [&str; 3] = [", ", " and ", ", and "];
+
+/// Rails' `to_sentence` connectors (`:en` defaults), in the module
+/// function's positional order, from a keyword Hash of string literals.
+/// Anything else — a locale, a computed value, an unknown key — answers
+/// None and the call is left as written, visible, not guessed at.
+fn sentence_connectors(arg: &Expr) -> Option<[String; 3]> {
+    let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
+    let mut out = SENTENCE_DEFAULTS.map(String::from);
+    for (k, v) in entries {
+        let ExprNode::Lit { value: crate::expr::Literal::Sym { value: key } } = &*k.node else { return None };
+        let ExprNode::Lit { value: crate::expr::Literal::Str { value } } = &*v.node else { return None };
+        let slot = match key.as_str() {
+            "words_connector" => 0,
+            "two_words_connector" => 1,
+            "last_word_connector" => 2,
+            _ => return None,
+        };
+        out[slot] = value.clone();
+    }
+    Some(out)
 }
 
 /// A union of an Array with a Relation or an untyped half — campfire's
@@ -152,6 +225,30 @@ fn is_relation_or_array_union(ty: Option<&Ty>) -> bool {
     let Some(Ty::Union { variants }) = ty else { return false };
     variants.iter().any(|v| matches!(v, Ty::Array { .. }))
         && variants.iter().all(|v| matches!(v, Ty::Array { .. } | Ty::Relation { .. } | Ty::Untyped))
+}
+
+/// A block `map`/`collect`/`filter_map`/`flat_map` — an Array whatever
+/// the receiver was, since that is Enumerable's contract and a Relation
+/// maps through its loaded rows. campfire's group-room initials are
+/// `members.map { … }.to_sentence(…)` over the Relation-or-Array union,
+/// which the analyzer leaves untyped; ungrounded, spinel had no
+/// `to_sentence` on the Array it got (NoMethodError, every sidebar render
+/// for a member of a group direct room).
+fn is_block_map(receiver: &Expr) -> bool {
+    matches!(
+        &*receiver.node,
+        ExprNode::Send { method, block: Some(_), .. }
+            if matches!(method.as_str(), "map" | "collect" | "filter_map" | "flat_map")
+    )
+}
+
+/// The Array variant of such a union — the type its `to_a` answers.
+fn relation_or_array_half(ty: Option<&Ty>) -> Option<Ty> {
+    if !is_relation_or_array_union(ty) {
+        return None;
+    }
+    let Some(Ty::Union { variants }) = ty else { return None };
+    variants.iter().find(|v| matches!(v, Ty::Array { .. })).cloned()
 }
 
 /// `Ty::Relation` under any element type, and through a nullable union
@@ -228,5 +325,119 @@ mod tests {
         assert_eq!(method_of(&e), "many?");
         let ExprNode::Send { recv: Some(r), .. } = &*e.node else { panic!() };
         assert!(matches!(&*r.node, ExprNode::Var { .. }));
+    }
+
+    fn first_n_on(ty: Ty) -> Expr {
+        let mut e = many_on(ty);
+        let ExprNode::Send { method, args, .. } = &mut *e.node else { panic!() };
+        *method = Symbol::from("first");
+        args.push(Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Int { value: 4 } }));
+        e
+    }
+
+    /// campfire's group direct room: `members.first(4)` on the same
+    /// `Array | untyped` union reads through `to_a`, typed as the Array half.
+    #[test]
+    fn first_n_on_an_array_or_untyped_union_reads_through_to_a() {
+        let mut e = first_n_on(Ty::Union { variants: vec![array_of_users(), Ty::Untyped] });
+        rewrite(&mut e);
+        assert_eq!(method_of(&e), "first");
+        let ExprNode::Send { recv: Some(to_a), args, .. } = &*e.node else { panic!() };
+        assert_eq!(args.len(), 1);
+        assert_eq!(method_of(to_a), "to_a");
+        assert_eq!(to_a.ty, Some(array_of_users()));
+    }
+
+    /// A plain Array's `first(n)` already means what Ruby means.
+    #[test]
+    fn first_n_on_an_array_is_untouched() {
+        let mut e = first_n_on(array_of_users());
+        rewrite(&mut e);
+        let ExprNode::Send { recv: Some(r), .. } = &*e.node else { panic!() };
+        assert!(matches!(&*r.node, ExprNode::Var { .. }));
+    }
+
+    fn sentence_on(options: Vec<(&str, &str)>) -> Expr {
+        let mut e = many_on(Ty::Array { elem: Box::new(Ty::Str) });
+        let ExprNode::Send { method, args, .. } = &mut *e.node else { panic!() };
+        *method = Symbol::from("to_sentence");
+        if !options.is_empty() {
+            let lit = |v| Expr::new(Span::synthetic(), ExprNode::Lit { value: v });
+            let entries = options
+                .into_iter()
+                .map(|(k, v)| {
+                    (
+                        lit(crate::expr::Literal::Sym { value: Symbol::from(k) }),
+                        lit(crate::expr::Literal::Str { value: v.to_string() }),
+                    )
+                })
+                .collect();
+            args.push(Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: true }));
+        }
+        e
+    }
+
+    fn string_args(e: &Expr) -> Vec<String> {
+        let ExprNode::Send { args, .. } = &*e.node else { panic!() };
+        args.iter()
+            .filter_map(|a| match &*a.node {
+                ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Some(value.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A bare `to_sentence` passes the :en connectors to the module function.
+    #[test]
+    fn to_sentence_passes_the_default_connectors() {
+        let mut e = sentence_on(vec![]);
+        rewrite(&mut e);
+        assert_eq!(string_args(&e), [", ", " and ", ", and "]);
+    }
+
+    /// campfire's group-room initials: `to_sentence(two_words_connector: '+')`.
+    #[test]
+    fn to_sentence_maps_a_named_connector_into_its_slot() {
+        let mut e = sentence_on(vec![("two_words_connector", "+")]);
+        rewrite(&mut e);
+        assert_eq!(string_args(&e), [", ", "+", ", and "]);
+    }
+
+    /// An option the module function has no slot for (a locale) is left as written.
+    #[test]
+    fn to_sentence_with_an_unknown_option_is_untouched() {
+        let mut e = sentence_on(vec![("locale", "fr")]);
+        rewrite(&mut e);
+        let ExprNode::Send { recv: Some(r), .. } = &*e.node else { panic!() };
+        assert!(matches!(&*r.node, ExprNode::Var { .. }));
+    }
+
+    /// `members.map { … }.to_sentence(…)` over an untyped receiver still
+    /// grounds: a block `map` answers an Array whatever it was called on.
+    #[test]
+    fn to_sentence_on_an_untyped_block_map_grounds() {
+        let mut e = sentence_on(vec![("two_words_connector", "+")]);
+        let ExprNode::Send { recv: Some(r), .. } = &mut *e.node else { panic!() };
+        let mut members = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("members") },
+        );
+        members.ty = Some(Ty::Untyped);
+        let block = Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Nil });
+        *r = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(members),
+                method: Symbol::from("map"),
+                args: Vec::new(),
+                block: Some(block),
+                parenthesized: false,
+            },
+        );
+        r.ty = Some(Ty::Untyped);
+        rewrite(&mut e);
+        let ExprNode::Send { recv: Some(r), .. } = &*e.node else { panic!() };
+        assert!(matches!(&*r.node, ExprNode::Const { path } if path[0].as_str() == "ActiveSupport"));
+        assert_eq!(string_args(&e), [", ", "+", ", and "]);
     }
 }

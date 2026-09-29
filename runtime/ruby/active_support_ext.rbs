@@ -26,7 +26,7 @@ module ActiveSupport
   # (5592abe8); `index_by` above already says `untyped` for the same
   # reason.
   def self.many?: (untyped list) -> bool
-  def self.to_sentence: (Array[untyped] list) -> String
+  def self.to_sentence: (Array[untyped] list, String words_connector, String two_words_connector, String last_word_connector) -> String
   def self.symbolize_keys: (Hash[String, untyped] hash) -> Hash[Symbol, untyped]
   def self.squish: (String text) -> String
   # `untyped`, and this one was learned the hard way: it said

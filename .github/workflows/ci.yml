@@ -765,6 +765,12 @@ jobs:
       - name: cargo test --test spinel_web_push_crypto -- --ignored
         if: always()
         run: cargo test --test spinel_web_push_crypto -- --ignored --nocapture
+      # A request that raises gives its connection back
+      # (runtime/spinel/db.rb `with_connection`); a leaked lease used to
+      # wedge a pool shard for good after four 500s.
+      - name: cargo test --test spinel_db_lease -- --ignored
+        if: always()
+        run: cargo test --test spinel_db_lease -- --ignored --nocapture
 
   # Campfire conformance — ONCE Campfire's OWN test suite, run against a
   # roundhouse emit of it. The C4 rung of the coverage ladder, and the
