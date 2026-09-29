@@ -1319,6 +1319,13 @@ impl<'a> BodyTyper<'a> {
                 {
                     return Ty::Array { elem: Box::new(unknown()) };
                 }
+                // What every object and every module answers, when the
+                // receiver's own table did not. App analyzer only.
+                if matches!(dispatched, Ty::Var { .. }) && self.inquirers.is_some() && recv.is_some() {
+                    if let Some(t) = send::object_protocol_method(recv_ty.as_ref(), method, block_ret.as_ref()) {
+                        return t;
+                    }
+                }
                 dispatched
             }
 
