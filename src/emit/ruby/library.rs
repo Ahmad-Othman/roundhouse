@@ -827,10 +827,19 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     // the app declares a single scope: without this the whole pass was
     // skipped for a scope-free app, and every such chain stayed on the
     // has_many reader's Array.
+    // An association CONSTRUCTOR (`@room.messages.create!(…)`) and a
+    // parked association read chained later count too: they are the same
+    // reader-to-relation hop, and a scope-free app that only CREATES
+    // through its associations skipped the pass and called `create!` on
+    // the reader's Array (found building tests/model_scenario_lowerings.rs,
+    // whose app declares no scope; campfire declares several, which is
+    // why it never showed there).
     let mut wants_assoc_lookup = false;
     crate::lower::for_each_hook_body_ref(app, &mut |body| {
         wants_assoc_lookup = wants_assoc_lookup
-            || crate::lower::scope_chain::mentions_assoc_lookup(body, &assocs);
+            || crate::lower::scope_chain::mentions_assoc_lookup(body, &assocs)
+            || crate::lower::scope_chain::mentions_assoc_constructor(body, &assocs)
+            || crate::lower::scope_chain::mentions_assoc_alias(body, &assocs);
     });
     if !crate::lower::scope_chain::any_scopes(&scopes)
         && assoc_class_methods.is_empty()
