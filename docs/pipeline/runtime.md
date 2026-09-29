@@ -2940,6 +2940,45 @@ is every deterministic section above; it matters where randomness is
 involved (encryption IVs, CSRF masks), which is exactly what is not
 implemented.
 
+### Campfire's models write what Rails writes — MEASURED (2026-09-29)
+
+`scripts/campfire-db-differential` runs once-campfire-rust's model
+scenario (30-odd operations: messages and boosts created and
+destroyed, an STI `becomes!`, closed and direct rooms, a membership's
+connection counter, ban/unban, deactivation, search history, a bot and
+its webhook, account settings) from campfire's fixtures, on Rails
+(`rails runner`) and through the transpiled models (the same statements
+in an overlay controller, one GET), then diffs every table with random
+and clock values reduced to their shape. Then Rails boots on the
+database the emit wrote and reads, authenticates, searches, edits and
+deletes through Active Record.
+
+**Both lanes: 13 of 13 tables match, rollback 17/17.** `memberships`
+passes under one printed forgiveness — the `insert_all` entry above
+(ids assigned in another order, microsecond timestamps where SQLite
+stamps milliseconds). Everything else is Rails' rows.
+
+It got there by finding seven defects, each fixed and each pinned in
+`tests/model_scenario_lowerings.rs` or `tests/spinel_db_lease.rs`:
+
+- `Room.find(id).messages.create!(…)` stayed on the plain reader's
+  Array (`create!` for an instance of Array): the association
+  constructor rewrite now takes any owner expression, which it names
+  once.
+- A scope-free app skipped the scope pass entirely, so its association
+  constructors never rewrote at all.
+- A local assigned inside `begin … rescue` read as unresolved after it,
+  and the rewrites keyed on its type silently declined.
+- `pluck(:id)` on a parameter holding an Array (`Rooms::Direct.find_for`)
+  had no Array `pluck`.
+- The mocha slot guard prepended to a stubbed app method named
+  `MochaStub`, which only the test helper loaded: destroying a
+  membership 500'd on both lanes in production.
+- `has_rich_text`'s `dependent: :destroy` was not expanded: a destroyed
+  message left its body in `action_text_rich_texts`.
+- An attribute-hash `update!(status: …)` wrote `created_at` back EMPTY:
+  its temporal normalize sat behind a `.to_s.nil?` that is never true.
+
 ### A raise inside a request leaked its connection lease (spinel) — FIXED
 
 `Db.with_connection` (`runtime/spinel/db.rb`) released its lease only on
