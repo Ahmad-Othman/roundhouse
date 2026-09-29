@@ -64,6 +64,7 @@ pub mod rbs;
 pub mod runtime_loader;
 pub mod runtime_src;
 pub mod session;
+pub mod timings;
 pub mod treeshake;
 pub mod version;
 pub mod schema;

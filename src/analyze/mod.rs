@@ -40,7 +40,7 @@ pub use inferred_types::inferred_types;
 pub use inquiry::inquirer_methods;
 pub use diagnostics::{diagnose, diagnose_with_coverage};
 
-pub use body::{BodyTyper, ClassInfo, Ctx};
+pub use body::{BodyTyper, ClassInfo, ConstScope, Ctx};
 use render::{
     collect_action_render_views, collect_content_partial_literals,
     collect_dynamic_render_ivars, content_partial_view_name,
@@ -105,6 +105,10 @@ pub struct Analyzer {
     /// `Var`. Persisting it here lets the whole-program fixpoint carry
     /// the answer the way it carries method returns.
     refined_action_bindings: HashMap<(ClassId, Symbol), HashMap<Symbol, Ty>>,
+    /// `body::ConstIndex` over `classes`, with the class count it was
+    /// built at. The registry only grows, so a count change is exactly
+    /// when it goes stale.
+    const_index: std::sync::Mutex<Option<(usize, std::sync::Arc<body::ConstIndex>)>>,
 }
 
 
@@ -754,6 +758,7 @@ impl Analyzer {
             adapter,
             concern_folded: HashMap::new(),
             refined_action_bindings: HashMap::new(),
+            const_index: std::sync::Mutex::new(None),
             inquirers: inquiry::inquirer_methods(app),
         }
     }
@@ -761,7 +766,21 @@ impl Analyzer {
     /// Build a body-typer borrowing this analyzer's dispatch tables.
     /// Cheap — just a struct with a reference.
     fn body_typer(&self) -> BodyTyper<'_> {
-        BodyTyper::new(&self.classes).with_inquirers(&self.inquirers)
+        BodyTyper::new(&self.classes)
+            .with_inquirers(&self.inquirers)
+            .with_const_index(self.const_index())
+    }
+
+    fn const_index(&self) -> std::sync::Arc<body::ConstIndex> {
+        let mut slot = self.const_index.lock().unwrap();
+        if let Some((count, index)) = &*slot {
+            if *count == self.classes.len() {
+                return index.clone();
+            }
+        }
+        let index = std::sync::Arc::new(body::ConstIndex::build(&self.classes));
+        *slot = Some((self.classes.len(), index.clone()));
+        index
     }
 
     /// The per-class member registry — schema columns, catalog-sourced
@@ -795,7 +814,7 @@ impl Analyzer {
     /// `FIXPOINT_CAP`) using a signature fingerprint to detect convergence.
     pub fn analyze(&mut self, app: &mut App) {
         const FIXPOINT_CAP: usize = 12;
-        self.run_typing_passes(app);
+        crate::timings::phase("typing passes (initial)", || self.run_typing_passes(app));
 
         // Whole-program fixpoint: harvest returns + unify params, re-type,
         // repeat until the registry signature stabilizes. Each round
@@ -810,9 +829,9 @@ impl Analyzer {
         // `get_from_cache` block → its return → the destructuring, which
         // settles on round 9.
         let mut prev_sig = self.inference_signature();
-        for _ in 0..FIXPOINT_CAP {
-            self.harvest_returns_to_registry(app);
-            self.unify_params_from_call_sites(app);
+        for round in 0..FIXPOINT_CAP {
+            crate::timings::phase(&format!("round {round}: harvest returns"), || self.harvest_returns_to_registry(app));
+            crate::timings::phase(&format!("round {round}: unify params"), || self.unify_params_from_call_sites(app));
             let cur_sig = self.inference_signature();
             if cur_sig == prev_sig {
                 break;
@@ -821,7 +840,7 @@ impl Analyzer {
             // Re-type the whole app with the refined registry. Idempotent
             // BodyTyper means a second pass simply resolves dispatches
             // and Var bindings the first pass couldn't.
-            self.run_typing_passes(app);
+            crate::timings::phase(&format!("round {round}: typing passes"), || self.run_typing_passes(app));
         }
 
         // The loop's last act is a typing pass whose results nothing
@@ -1224,7 +1243,7 @@ impl Analyzer {
         // dependency needs two passes, the cap leaves slack.
         for _ in 0..4 {
             let mut next: HashMap<Symbol, Ty> = HashMap::new();
-            let shared = std::sync::Arc::new(map.clone());
+            let shared = body::ConstScope::global(map.clone());
             for (self_ty, name, value) in entries.iter_mut() {
                 if ambiguous.contains(name) {
                     continue;
@@ -1262,7 +1281,7 @@ impl Analyzer {
         // read can then be answered exactly, including for a name two
         // classes both define — which the map above has to drop.
         let mut per_class: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
-        let shared = std::sync::Arc::new(map.clone());
+        let shared = body::ConstScope::global(map.clone());
         for (self_ty, name, value) in entries.iter_mut() {
             let owner = match &self_ty {
                 Ty::Class { id, .. } => id.clone(),
@@ -1300,7 +1319,7 @@ impl Analyzer {
         // global on a name clash).
         let (global_constants, class_constants) = self.build_constant_registry(app);
         // Shared by every context below — see `Ctx::constants`.
-        let global_constants = std::sync::Arc::new(global_constants);
+        let global_constants = body::ConstScope::global(global_constants);
         for (id, constants) in class_constants {
             self.classes.entry(id).or_default().constants.extend(constants);
         }
@@ -1367,7 +1386,7 @@ impl Analyzer {
             /// typed against this controller's self), for the persisted
             /// chain's per-hop effects.
             action_effects: HashMap<Symbol, EffectSet>,
-            class_constants: std::sync::Arc<HashMap<Symbol, Ty>>,
+            class_constants: body::ConstScope,
             layout: LayoutDecl,
         }
         let mut meta_by_name: HashMap<ClassId, ControllerMeta> = HashMap::new();
@@ -1431,9 +1450,8 @@ impl Analyzer {
             }
             // Own constants layered over the global registry — a same-named
             // constant declared on this controller shadows another class's.
-            let mut class_constants = (*global_constants).clone();
-            class_constants.extend(extract_controller_const_assignments(&controller.body));
-            let class_constants = std::sync::Arc::new(class_constants);
+            let class_constants =
+                global_constants.with_own(extract_controller_const_assignments(&controller.body));
 
             let ctx = Ctx {
                 self_ty: Some(self_ty.clone()),
@@ -2264,10 +2282,8 @@ impl Analyzer {
                 // bodies with. Passing an empty map here would make the
                 // re-type LOSE a constant binding Phase B had already
                 // established — this pass must only ever add.
-                let mut class_constants = (*global_constants).clone();
-                class_constants
-                    .extend(extract_controller_const_assignments(&controller.body));
-                let class_constants = std::sync::Arc::new(class_constants);
+                let class_constants =
+                    global_constants.with_own(extract_controller_const_assignments(&controller.body));
                 for action in controller.actions_mut() {
                     let Some(module) = by_method.get(&action.name) else { continue };
                     let Some(from_concern) = concern_env.get(module) else { continue };
@@ -2373,9 +2389,7 @@ impl Analyzer {
                 }
             }
             // Own constants layered over the global registry (own shadows).
-            let mut class_constants = (*global_constants).clone();
-            class_constants.extend(extract_const_assignments(&model.body));
-            let class_constants = std::sync::Arc::new(class_constants);
+            let class_constants = global_constants.with_own(extract_const_assignments(&model.body));
 
             let class_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
