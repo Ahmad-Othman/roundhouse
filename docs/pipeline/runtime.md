@@ -2834,11 +2834,16 @@ header. Grouped by cause, largest first:
   infinite scroll sends past 500 users) reaches a view whose
   `turbo_stream` helper is not lowered (`NameError` on ruby, `replace`
   on an untyped receiver on spinel).
-- **Blob URLs are signed differently.** Rails' `blob_id` purpose signs
-  with SHA1 over padded Base64 (`…fQ==--<40 hex>`); ours with SHA256
-  over unpadded (`…fQ--<64 hex>`). A blob URL minted by Rails (in a
-  page, an email, a cache) does not verify on the emit after a
-  migration, and vice versa.
+- **Blob URLs were signed differently — FIXED.** Rails' `blob_id`
+  purpose signs with SHA1 over URL-safe padded Base64
+  (`…fQ==--<40 hex>`); ours signed with SHA256 over unpadded, so a blob
+  URL minted by Rails (in a page, an email, a cache) did not verify on
+  the emit, and vice versa. Byte-identical now; see the next entry.
+- **A variant URL's variation key is ours.** Rails' representation URL
+  carries the variation SIGNED under the same verifier (purpose
+  `variation`); ours carries a readable `limit-1200x800-keep`. The blob
+  half of the URL is Rails' now; a representation URL minted by Rails
+  still does not resolve on the emit, and vice versa.
 - Smaller: `Last-Modified` absent on the paginated messages (5),
   `X-Total-Count` absent on the autocompleter JSON (2),
   `Content-Disposition` absent on avatar and logo images (2).
@@ -2846,6 +2851,69 @@ header. Grouped by cause, largest first:
 Each group is a fix in `runtime/ruby/` or an entry here; the sweep
 becomes a gate the way campfire-compare's room page did, once the list
 is ledgered.
+
+### Rails' signed-value contracts, held to Rails' vectors — MEASURED (2026-09-29)
+
+`tests/rails_compat_vectors.rb` runs the runtime's own signing and
+verifying code — the cookie jar's verifier, `ActiveRecord::SignedId`,
+`ActionText::SignedGlobalId`, Active Storage's blob verifier,
+`GlobalID.param`, tep's cookie codec — against
+`tests/rails_compat/rails_compat.json`: 500-odd cases minted by Rails
+inside campfire in production mode, with a fixed secret and a frozen
+clock (once-campfire-rust's generator, vendored beside it; our oracle's
+bundle regenerates every deterministic section byte for byte). The
+table it prints, and the gaps in it:
+
+| section | match | |
+|---|---|---|
+| key_generator | 6/6 | |
+| cookie_escaping.parse | 7/7 | |
+| cookie_escaping.write | 3/5 | tep writes `%20` for a space and escapes `*`; Rails writes `+` and leaves `*`. Both decode the same. |
+| signed_cookies.verify | 24/35 | see below |
+| signed_cookies.generate | 1/10 | the jar writes `"exp":null`: `cookies.signed.permanent` is not modeled, so a session_token has no expiry inside the signature (nor on the Set-Cookie — the header entry above). |
+| signed_cookies.generate_envelope | 10/10 | given Rails' expiry, the envelope is Rails' |
+| signed_ids.generate / verify | 14/14, 29/31 | |
+| global_ids, sgids.generate | 4/4, 5/5 | |
+| sgids.verify | 19/24 | |
+| app_verifiers.blob_id / envelope | 8/8, 3/3 | fixed with this entry: the blob verifier signed with signed-id's envelope |
+| encrypted_cookies | 0/28 | not implemented |
+| csrf | 0/208 | not implemented |
+| passwords | 0/45 | not held |
+
+**What Rails still accepts that the runtime rejects, or reads
+differently.** Signed cookies: values with characters JSON escapes
+(`<`, `&`, quotes, control characters) read back ESCAPED, because the
+runtime's JSON is hand-spelled (`json_string` / `json_value` neither
+escape nor unescape) — campfire's session_token is alphanumeric, so the
+app never meets it; a signed empty value reads as absent (the `""`
+sentinel); pre-5.2 cookies with no metadata, and metadata with no
+purpose, are rejected where Rails accepts them; an Integer or object
+value reads back as its JSON text (the jar is String-typed); a
+Marshal-serialized or unparseable value reads as its raw text where
+Rails answers nil. Signed ids: the legacy SHA1 fallback verifier
+(`use_legacy_signed_id_verifier`) is not consulted, and a String id
+reads back as an Integer. Signed GlobalIDs: the Marshal-era (Rails 7.0),
+JSON-legacy and globalid < 1.0 envelopes are rejected — campfire's own
+`lib/rails_ext` reads the first unverified for mentions, which is the
+path the runtime follows (`SignedGlobalId` unverified read), so a
+mention renders; any other attachable signed by an older install does
+not.
+
+**Not implemented.** The session cookie is SIGNED where Rails'
+`CookieStore` ENCRYPTS it (AES-256-GCM under
+`"authenticated encrypted cookie"`), so a Rails `_campfire_session` is
+not read after a migration — the flash and the CSRF secret start over,
+while the user stays signed in (the `session_token` cookie is signed and
+verifies). CSRF tokens are the session's own, unmasked (see
+`runtime/spinel/request_forgery_protection.rb`'s header), so a form
+rendered by Rails does not post to the emit. Passwords: the ruby family
+runs the bcrypt gem; spinel's package is not yet held to these vectors.
+
+**The other direction** — Rails verifying what the runtime signs — needs
+no separate harness where generation is byte-identical to Rails', which
+is every deterministic section above; it matters where randomness is
+involved (encryption IVs, CSRF masks), which is exactly what is not
+implemented.
 
 ### A raise inside a request leaked its connection lease (spinel) — FIXED
 
