@@ -219,6 +219,14 @@ fn emit_node(n: &ExprNode) -> String {
             // `return nil` round-trips as bare `return` for source fidelity.
             if matches!(&*value.node, ExprNode::Lit { value: crate::expr::Literal::Nil }) {
                 "return".to_string()
+            } else if matches!(
+                &*value.node,
+                ExprNode::If { .. } | ExprNode::Case { .. } | ExprNode::RescueModifier { .. }
+            ) {
+                // `return if c … else … end` re-parses as a modifier `if`
+                // guarding a bare `return`, and the `else` is then a
+                // syntax error. Parenthesize the value.
+                format!("return ({})", emit_expr(value))
             } else {
                 format!("return {}", emit_expr(value))
             }
