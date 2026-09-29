@@ -1361,7 +1361,8 @@ fn parse_association(
         }
     }
 
-    let owner_snake = snake_case(owner.0.as_str());
+    // Rails `foreign_key` demodulizes: `Billing::Invoice` → `invoice_id`.
+    let owner_snake = snake_case(crate::naming::demodulize(owner.0.as_str()));
 
     // Association-extension block: `has_many :memberships do def
     // grant_to(users) … end end`. Only `def`s are collected — a block
