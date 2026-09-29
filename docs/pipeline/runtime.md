@@ -2869,23 +2869,20 @@ table it prints, and the gaps in it:
 | key_generator | 6/6 | |
 | cookie_escaping.parse | 7/7 | |
 | cookie_escaping.write | 3/5 | tep writes `%20` for a space and escapes `*`; Rails writes `+` and leaves `*`. Both decode the same. |
-| signed_cookies.verify | 24/35 | see below |
+| signed_cookies.verify | 26/35 | see below |
 | signed_cookies.generate | 1/10 | the jar writes `"exp":null`: `cookies.signed.permanent` is not modeled, so a session_token has no expiry inside the signature (nor on the Set-Cookie — the header entry above). |
 | signed_cookies.generate_envelope | 10/10 | given Rails' expiry, the envelope is Rails' |
+| json_string | 20/20 | the runtime's JSON string codec against the JSON inside Rails' signed cookies, both ways |
 | signed_ids.generate / verify | 14/14, 29/31 | |
 | global_ids, sgids.generate | 4/4, 5/5 | |
 | sgids.verify | 19/24 | |
-| app_verifiers.blob_id / envelope | 8/8, 3/3 | fixed with this entry: the blob verifier signed with signed-id's envelope |
+| app_verifiers.blob_id / envelope / data | 8/8, 3/3, 7/7 | fixed with this entry: the blob verifier signed with signed-id's envelope |
 | encrypted_cookies | 0/28 | not implemented |
 | csrf | 0/208 | not implemented |
 | passwords | 0/45 | not held |
 
 **What Rails still accepts that the runtime rejects, or reads
-differently.** Signed cookies: values with characters JSON escapes
-(`<`, `&`, quotes, control characters) read back ESCAPED, because the
-runtime's JSON is hand-spelled (`json_string` / `json_value` neither
-escape nor unescape) — campfire's session_token is alphanumeric, so the
-app never meets it; a signed empty value reads as absent (the `""`
+differently.** Signed cookies: a signed empty value reads as absent (the `""`
 sentinel); pre-5.2 cookies with no metadata, and metadata with no
 purpose, are rejected where Rails accepts them; an Integer or object
 value reads back as its JSON text (the jar is String-typed); a
@@ -2908,6 +2905,34 @@ verifies). CSRF tokens are the session's own, unmasked (see
 `runtime/spinel/request_forgery_protection.rb`'s header), so a form
 rendered by Rails does not post to the emit. Passwords: the ruby family
 runs the bcrypt gem; spinel's package is not yet held to these vectors.
+
+**The JSON string codec — FIXED.** `MessageVerifier.json_string` was
+quote-wrapping and `json_value` quote-stripping, so a value Rails signed
+with a `<`, a quote or a newline in it read back as `\u003c` / `\"` /
+`\n`, and one the runtime signed carried a bare quote into the
+envelope; `extract_raw` ended a `data` value at its first `,` or `}`,
+cutting Active Storage's object payloads short. Both directions are
+ActiveSupport's JSON now (`<`, `>`, `&` escaped; control characters as
+`\n` or `\u00XX`; `\uXXXX` and surrogate pairs decoded), byte-wise so
+CRuby and spinel agree, and `extract_raw` reads a whole JSON value. The
+`json_string` and `app_verifiers.data` sections hold it to Rails' bytes
+(16/20 and 4/7 before).
+
+**On the spinel binary** (`tests/rails_compat_vectors_spinel.rs`): the
+same driver, compiled by spinel over sp_crypto and run under CRuby over
+OpenSSL, must print identical tables; the 155 clock-stable cases do.
+Running them there found a defect none of Rails' vectors could show —
+**FIXED**: the binary derived its signing keys through
+`sp_crypto_b64url_decode`, which returns a C string with no length, so a
+derived key holding a zero byte was cut at the zero. About one
+SECRET_KEY_BASE in five derives such a key (429 of 2,000 sampled); on
+those deployments every signed cookie, signed id, sgid and blob URL the
+binary made was signed with a key a few bytes long — forgeable, and
+matching nothing Rails signs. The key is decoded in Ruby now
+(`runtime/spinel/message_digest.rb`), and `nul_key` cases — secrets
+whose keys hold a zero, answered by OpenSSL — pin it. sp_crypto's HMAC
+itself is binary-safe (it reads the key's length off the String), so
+web push's HKDF was never affected.
 
 **The other direction** — Rails verifying what the runtime signs — needs
 no separate harness where generation is byte-identical to Rails', which

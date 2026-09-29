@@ -99,12 +99,120 @@ ensure
 end
 
 def exp_json(iso) = iso ? "\"#{iso}\"" : ""
+BLOB_ID_CASE = ->(c) { c["name"] == "ActiveStorage" && c["purpose"] == "blob_id" }
+
+# `signed_id` purposes are `<model_name.underscore>/<purpose>`, or the
+# bare model name when there is none (what the lowering passes).
+def signed_id_purpose(model, purpose)
+  base = model.gsub("::", "/").gsub(/([a-z])([A-Z])/, '\1_\2').downcase
+  purpose.to_s.empty? ? base : "#{base}/#{purpose}"
+end
 
 # ActiveSupport's JSON: Ruby's, with `<`, `>` and `&` escaped
 # (`escape_html_entities_in_json`). U+2028/U+2029 go through as they
 # are under 8.x defaults — the vectors say so.
 def as_json(value)
   value.to_json.gsub("<", "\\u003c").gsub(">", "\\u003e").gsub("&", "\\u0026")
+end
+
+# ── --cases OUT: the same vectors, flattened for the spinel driver ────
+# (tests/rails_compat/spinel_driver.rb). One case per line, tab-separated
+# hex fields: op, arguments…, expected (a lone "-" = nil, "=" = the
+# empty string). Only CLOCK-STABLE cases are written: the binary's verifier
+# reads the real clock, so a case goes in when its verdict at the real
+# now is the one it had at the vector's `now` — no expiry, or an expiry
+# both instants fall on the same side of. The count left out is printed.
+if (i = ARGV.index("--cases"))
+  real_now = Time.real_now
+  # "-" is nil and "=" the empty string: an empty hex field at the end of
+  # a line is one `split("\t")` drops.
+  hex = ->(x) { x.nil? ? "-" : (x.to_s.empty? ? "=" : x.to_s.b.unpack1("H*")) }
+  exp_of = lambda do |signed|
+    payload = signed.to_s.split("--").first.to_s
+    env = [payload.tr("-_", "+/")].pack("a*").unpack1("m") rescue ""
+    env = env.to_s
+    inner = env[/"message":"([^"]*)"/, 1]
+    env += inner.unpack1("m").to_s if inner
+    t = env[/"exp":"([^"]+)"/, 1]
+    t && (Time.iso8601(t) rescue nil)
+  end
+  stable = lambda do |signed, now_iso|
+    exp = exp_of.(signed)
+    exp.nil? || ((exp <= Time.iso8601(now_iso || V["now"])) == (exp <= real_now))
+  end
+  lines = []
+  skipped = 0
+  add = ->(*fields) { lines << fields.map(&hex).join("\t") }
+  # An expected value the runtime cannot answer with — a JSON Integer or
+  # object where it returns Strings — is marked so it cannot match by
+  # accident, keeping the spinel count the CRuby count.
+  typed = ->(v) { v.nil? || v.is_a?(String) ? v : "\x00typed:#{v.to_json}" }
+  add.("secret", SECRET)   # line 0: what the binary signs with
+  V["key_generator"].each { |c| add.("kg", c["salt"], c["length"], c["key_hex"]) }
+  V["cookie_escaping"].each { |c| add.("unescape", c["wire"], c["parsed"]) }
+  V["signed_cookies"]["verify"].each do |c|
+    next skipped += 1 unless stable.(c["raw"], c["now"])
+    add.("sc_verify", c["name"], c["raw"], typed.(c["expected"]))
+  end
+  V["signed_cookies"]["generate"].each do |c|
+    add.("sc_envelope", c["name"], as_json(c["value"]), c["expires_at"] ? "\"#{c["expires_at"]}\"" : "null", c["raw"])
+  end
+  V["signed_cookies"]["generate"].each do |c|
+    env = c["raw"].split("--").first.unpack1("m")
+    rails_json = env[/"message":"([^"]*)"/, 1].unpack1("m").force_encoding("UTF-8")
+    add.("json_encode", c["value"], rails_json)
+    add.("json_decode", rails_json, c["value"])
+  end
+  V["app_verifiers"]["verify"].each do |c|
+    next unless c["name"] == "ActiveStorage" && !c["purpose"].to_s.empty? && c["purpose"] != "blob_id"
+    next skipped += 1 unless stable.(c["message"], c["now"])
+    add.("as_data", c["message"], c["purpose"], c["expected_json"])
+  end
+  V["signed_ids"]["generate"].each do |c|
+    next skipped += 1 if c["expires_at"]   # minted relative to the clock
+    add.("sid_generate", c["id"], signed_id_purpose(c["model"], c["purpose"]), c["signed_id"])
+  end
+  V["signed_ids"]["verify"].each do |c|
+    next skipped += 1 unless stable.(c["signed_id"], c["now"])
+    want = c["expected"].is_a?(Integer) ? c["expected"].to_s : typed.(c["expected"])
+    add.("sid_verify", c["signed_id"], signed_id_purpose(c["model"], c["purpose"]), want)
+  end
+  # (global_ids: plain base64, no crypto — the CRuby lane holds them.)
+  V["sgids"]["generate"].each do |c|
+    add.("sgid_generate", c["data"].to_json, c["purpose"], exp_json(c["expires_at"]), c["sgid"])
+  end
+  V["sgids"]["verify"].each do |c|
+    next skipped += 1 unless stable.(c["sgid"], c["now"])
+    add.("sgid_verify", c["sgid"], c["purpose"], c["expected"])
+  end
+  V["app_verifiers"]["generate"].each do |c|
+    next unless c["name"] == "ActiveStorage" && !c["purpose"].to_s.empty?
+    add.("as_generate", c["data_json"], c["purpose"], exp_json(c["expires_at"]), c["message"])
+  end
+  V["app_verifiers"]["verify"].select(&BLOB_ID_CASE).each do |c|
+    next skipped += 1 unless stable.(c["message"], c["now"])
+    add.("blob_verify", c["message"], c["expected_json"])
+  end
+  # Secrets whose derived keys hold a zero byte — none of the vectors'
+  # keys does, and about one real SECRET_KEY_BASE in five does. The MAC
+  # is OpenSSL's own, not the runtime's: an oracle independent of both.
+  require "openssl"
+  found = 0
+  n = 0
+  while found < 6
+    secret = "nul-key-probe-#{n}"
+    salt = [MV::SIGNED_COOKIE_SALT, "active_record/signed_id", "ActiveStorage"][found % 3]
+    key = OpenSSL::PKCS5.pbkdf2_hmac(secret, salt, MV::ITERATIONS, 64, "SHA256")
+    if key.include?("\0")
+      digest = found.even? ? "SHA1" : "SHA256"
+      add.("nul_key", secret, salt, digest, OpenSSL::HMAC.hexdigest(digest, key, "payload"))
+      found += 1
+    end
+    n += 1
+  end
+  File.write(ARGV[i + 1], lines.join("\n") + "\n")
+  puts "wrote #{lines.size - 1} cases, #{skipped} clock-dependent left out"
+  exit
 end
 
 # ── key derivation ────────────────────────────────────────────────────
@@ -162,13 +270,18 @@ section("signed_cookies.generate_envelope") do
   end
 end
 
-# ── signed ids (`record.signed_id`, `find_signed`) ───────────────────
-# `signed_id` purposes are `<model_name.underscore>/<purpose>`, or the
-# bare model name when there is none (what the lowering passes).
-def signed_id_purpose(model, purpose)
-  base = model.gsub("::", "/").gsub(/([a-z])([A-Z])/, '\1_\2').downcase
-  purpose.to_s.empty? ? base : "#{base}/#{purpose}"
+# ── the runtime's JSON string codec, against the JSON inside Rails' own
+# signed cookies: the bytes Rails' serializer wrote for each value.
+section("json_string") do
+  V["signed_cookies"]["generate"].each do |c|
+    env = c["raw"].split("--").first.unpack1("m")
+    rails_json = env[/"message":"([^"]*)"/, 1].unpack1("m").force_encoding("UTF-8")
+    check("encode #{c["value"].inspect}", MV.json_string(c["value"]), rails_json)
+    check("decode #{c["value"].inspect}", MV.json_value(rails_json), c["value"])
+  end
 end
+
+# ── signed ids (`record.signed_id`, `find_signed`) ───────────────────
 
 section("signed_ids.generate") do
   V["signed_ids"]["generate"].each do |c|
@@ -216,7 +329,7 @@ end
 # `blob_id` is the one that lives: it is in every attachment URL a page,
 # an email or a browser cache holds. It goes through what
 # ActiveStorage::Blob#signed_id / .find_signed call.
-BLOB_ID = ->(c) { c["name"] == "ActiveStorage" && c["purpose"] == "blob_id" }
+BLOB_ID = BLOB_ID_CASE
 section("app_verifiers.blob_id") do
   V["app_verifiers"]["generate"].select(&BLOB_ID).each do |c|
     got = MV.gid_envelope(SECRET, "ActiveStorage", c["data_json"], "blob_id", exp_json(c["expires_at"]))
@@ -240,6 +353,19 @@ section("app_verifiers.envelope") do
     next unless c["name"] == "ActiveStorage" && !c["purpose"].to_s.empty? && c["purpose"] != "blob_id"
     got = MV.gid_envelope(SECRET, "ActiveStorage", c["data_json"], c["purpose"], exp_json(c["expires_at"]))
     check("generate #{c["purpose"]}", got, c["message"])
+  end
+end
+
+# The data the other Active Storage tokens carry, read back: objects
+# with commas and escaped quotes in them (`blob_key`'s disposition).
+section("app_verifiers.data") do
+  V["app_verifiers"]["verify"].each do |c|
+    next unless c["name"] == "ActiveStorage" && !c["purpose"].to_s.empty? && c["purpose"] != "blob_id"
+    got = at(c["now"]) do
+      json = MV.verified_data_json(SECRET, "ActiveStorage", c["message"], c["purpose"], true)
+      json == "" ? nil : json
+    end
+    check(c["case"], got, c["expected_json"])
   end
 end
 
