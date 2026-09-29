@@ -1658,7 +1658,16 @@ pub(super) fn ingest_library_method(
             || pn
                 .keywords()
                 .iter()
-                .any(|kw| kw.as_required_keyword_parameter_node().is_some());
+                .any(|kw| kw.as_required_keyword_parameter_node().is_some())
+            // A keyword named after a Ruby reserved word (`next: nil`)
+            // cannot be flattened: `def f(next = nil)` does not parse,
+            // while `def f(next: nil)` does.
+            || pn.keywords().iter().any(|kw| {
+                let Some(okp) = kw.as_optional_keyword_parameter_node() else { return false };
+                let name = okp.name();
+                std::str::from_utf8(name.as_slice())
+                    .is_ok_and(|s| is_ruby_reserved_word(s.trim_end_matches(':')))
+            });
         for kw in pn.keywords().iter() {
             if let Some(rkp) = kw.as_required_keyword_parameter_node() {
                 if let Ok(s) = std::str::from_utf8(rkp.name().as_slice()) {
@@ -2524,4 +2533,17 @@ fn expr_reads_local(expr: &Expr, name: &Symbol) -> bool {
         }
     });
     found
+}
+
+/// Ruby reserved words: a parameter with one of these names is only
+/// legal as a keyword (`next: nil`), never as a positional.
+fn is_ruby_reserved_word(m: &str) -> bool {
+    matches!(
+        m,
+        "__ENCODING__" | "__LINE__" | "__FILE__" | "BEGIN" | "END" | "alias" | "and" | "begin"
+            | "break" | "case" | "class" | "def" | "defined?" | "do" | "else" | "elsif" | "end"
+            | "ensure" | "false" | "for" | "if" | "in" | "module" | "next" | "nil" | "not" | "or"
+            | "redo" | "rescue" | "retry" | "return" | "self" | "super" | "then" | "true" | "undef"
+            | "unless" | "until" | "when" | "while" | "yield"
+    )
 }
