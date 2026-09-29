@@ -5542,7 +5542,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         );
     }
     if needs_vips {
-        if !manifest.contains("[dependencies]") {
+        if !manifest.lines().any(|l| l.trim() == "[dependencies]") {
             manifest.push_str("\n[dependencies]\n");
         }
         manifest.push_str(
@@ -5556,7 +5556,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         );
     }
     if needs_rqrcode {
-        if !manifest.contains("[dependencies]") {
+        if !manifest.lines().any(|l| l.trim() == "[dependencies]") {
             manifest.push_str("\n[dependencies]\n");
         }
         manifest.push_str(
@@ -5568,7 +5568,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         );
     }
     if needs_nokogiri {
-        if !manifest.contains("[dependencies]") {
+        if !manifest.lines().any(|l| l.trim() == "[dependencies]") {
             manifest.push_str("\n[dependencies]\n");
         }
         manifest.push_str(
@@ -5579,7 +5579,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         );
     }
     if needs_commonmarker {
-        if !manifest.contains("[dependencies]") {
+        if !manifest.lines().any(|l| l.trim() == "[dependencies]") {
             manifest.push_str("\n[dependencies]\n");
         }
         manifest.push_str(
