@@ -139,7 +139,7 @@ pub fn ingest_model(
             std::collections::HashMap::new();
         for stmt in &stmts {
             if let Some(cw) = stmt.as_constant_write_node() {
-                if let Some(labels) = enum_label_values(&cw.value()) {
+                if let Some(labels) = enum_label_values(&cw.value(), &class_consts) {
                     class_consts.insert(constant_id_str(&cw.name()).to_string(), labels);
                 }
             }
@@ -573,17 +573,18 @@ pub(super) fn expand_enum_decl(
     };
     let Some(mapping_node) = mapping_node else { return Ok(None) };
     // `enum :status, STATUSES` — the mapping named by a constant the class
-    // body assigned above (`STATUSES = %i[…].freeze`).
-    let labels = match mapping_node.as_constant_read_node() {
-        Some(cr) => class_consts.get(constant_id_str(&cr.name())).cloned(),
-        None => enum_label_values(&mapping_node),
-    }
-    .ok_or_else(|| IngestError::Unsupported {
-        file: file.into(),
-        message: format!(
-            "enum :{} mapping must be an array or hash literal (or `%w[…].index_by(&:itself)`)",
-            column
-        ),
+    // body assigned above (`STATUSES = %i[…].freeze`) — and everything
+    // else `enum_label_values` resolves, now including a computed
+    // mapping over that same constant (`enum :x, STATUSES.map { |s|
+    // [s, s.to_s] }.to_h`).
+    let labels = enum_label_values(&mapping_node, class_consts).ok_or_else(|| {
+        IngestError::Unsupported {
+            file: file.into(),
+            message: format!(
+                "enum :{} mapping must be an array or hash literal (or `%w[…].index_by(&:itself)`)",
+                column
+            ),
+        }
     })?;
     // A label that is not a Ruby identifier (`32bits`, `64bits`) has no
     // predicate, scope or bang writer Ruby could name: Rails reaches them
@@ -687,15 +688,33 @@ pub(super) fn expand_enum_decl(
 /// Label → stored value for an `enum` mapping. An array literal maps by
 /// index the way Rails does (`%i[active deactivated]` → 0, 1); a hash
 /// literal carries its own values; `%w[…].index_by(&:itself)` — the
-/// idiom for a string-backed column — maps each label to itself.
-/// `None` for anything else (a constant reference, a computed hash),
-/// which the caller reports as a gap rather than guessing at storage.
-fn enum_label_values(node: &Node<'_>) -> Option<Vec<(String, Literal)>> {
+/// idiom for a string-backed column — maps each label to itself; a bare
+/// `CONST` resolves through `class_consts` (the class body's own
+/// `CONST = %i[…]` assignments, collected before this ever runs); and
+/// `<array-expr>.map { |v| [v, v.to_s] }.to_h` / `.index_by(&:to_s)` /
+/// `.index_with(&:to_s)` recurse into whichever of the above
+/// `<array-expr>` already is — Procore's `bid_package.rb` and
+/// `potential_change_order.rb` compute their (string-backed) mapping
+/// this way from a `CONST` instead of writing the hash out by hand, to
+/// keep the column and the constant's allowed values in one place.
+/// `None` for anything else (a computed hash, an unresolvable
+/// constant), which the caller reports as a gap rather than guessing at
+/// storage.
+fn enum_label_values(
+    node: &Node<'_>,
+    class_consts: &std::collections::HashMap<String, Vec<(String, Literal)>>,
+) -> Option<Vec<(String, Literal)>> {
+    // `CONST` — folded in here (rather than only at the `enum_label_values`
+    // call sites) so a computed mapping's `<array-expr>` can ALSO be a
+    // constant, not just the top-level `enum :x, CONST` spelling.
+    if let Some(cr) = node.as_constant_read_node() {
+        return class_consts.get(constant_id_str(&cr.name())).cloned();
+    }
     // `%i[…].freeze` / `{ … }.freeze` — the literal is the receiver.
     if let Some(call) = node.as_call_node() {
         if constant_id_str(&call.name()) == "freeze" && call.arguments().is_none() {
             if let Some(recv) = call.receiver() {
-                return enum_label_values(&recv);
+                return enum_label_values(&recv, class_consts);
             }
         }
     }
@@ -729,21 +748,81 @@ fn enum_label_values(node: &Node<'_>) -> Option<Vec<(String, Literal)>> {
             })
             .collect();
     }
-    // `%w[ invisible nothing mentions ].index_by(&:itself)` — the labels
-    // ARE the stored strings.
     let call = node.as_call_node()?;
-    if constant_id_str(&call.name()) != "index_by" {
-        return None;
+    let call_name = constant_id_str(&call.name());
+
+    // `<array-expr>.index_by(&:itself)` / `.index_by(&:to_s)` /
+    // `.index_with(&:to_s)` — the labels ARE the stored strings. The
+    // block's exact proc isn't checked: `&:itself` and `&:to_s` agree
+    // on the string labels every `<array-expr>` case above already
+    // produces, so there is nothing to distinguish. `<array-expr>` is
+    // whatever the recursive call resolves — a literal array, `%w[…]`,
+    // or (new) a `CONST`.
+    if call_name == "index_by" || call_name == "index_with" {
+        let recv = call.receiver()?;
+        let labels = enum_label_values(&recv, class_consts)?;
+        return Some(
+            labels
+                .into_iter()
+                .map(|(label, _)| (label.clone(), Literal::Str { value: label }))
+                .collect(),
+        );
     }
-    let arr = call.receiver()?;
-    let arr = arr.as_array_node()?;
-    arr.elements()
-        .iter()
-        .map(|el| {
-            let label = symbol_value(&el).or_else(|| string_value(&el))?;
-            Some((label.clone(), Literal::Str { value: label }))
-        })
-        .collect()
+
+    // `<array-expr>.map { |v| [v, v.to_s] }.to_h` — the other spelling
+    // of the same identity string mapping. Recognized narrowly: the
+    // `map` block takes exactly one parameter, and its body is a
+    // single statement — a 2-element array literal `[v, v.to_s]` built
+    // from that same parameter. Anything looser (a different second
+    // element, extra elements, multiple statements, a differently
+    // shaped block) falls through to `None` — the caller's refusal —
+    // rather than guessing at storage.
+    if call_name == "to_h" && call.arguments().is_none() {
+        let map_call = call.receiver()?;
+        let map_call = map_call.as_call_node()?;
+        if constant_id_str(&map_call.name()) != "map" {
+            return None;
+        }
+        let recv = map_call.receiver()?;
+        let labels = enum_label_values(&recv, class_consts)?;
+
+        let block = map_call.block()?.as_block_node()?;
+        let block_params = block.parameters()?.as_block_parameters_node()?.parameters()?;
+        let requireds: Vec<_> = block_params.requireds().iter().collect();
+        let [only_param] = &requireds[..] else { return None };
+        let only_param = only_param.as_required_parameter_node()?;
+        let param_name = constant_id_str(&only_param.name());
+
+        let body_stmts = flatten_statements(block.body()?);
+        let [body_stmt] = &body_stmts[..] else { return None };
+        let pair = body_stmt.as_array_node()?;
+        let elements: Vec<_> = pair.elements().iter().collect();
+        let [first, second] = &elements[..] else { return None };
+
+        // First element: a bare read of the block param.
+        let lv = first.as_local_variable_read_node()?;
+        if constant_id_str(&lv.name()) != param_name {
+            return None;
+        }
+        // Second element: `<same param>.to_s`.
+        let to_s_call = second.as_call_node()?;
+        if constant_id_str(&to_s_call.name()) != "to_s" || to_s_call.arguments().is_some() {
+            return None;
+        }
+        let to_s_recv = to_s_call.receiver()?.as_local_variable_read_node()?;
+        if constant_id_str(&to_s_recv.name()) != param_name {
+            return None;
+        }
+
+        return Some(
+            labels
+                .into_iter()
+                .map(|(label, _)| (label.clone(), Literal::Str { value: label }))
+                .collect(),
+        );
+    }
+
+    None
 }
 
 /// `prefix:`/`suffix:` from an `enum`'s option hash. `true` means "use

@@ -1285,3 +1285,78 @@ fn multi_write_with_attr_targets_ingests_and_round_trips() {
         ref other => panic!("expected a MultiAssign, got {other:?}"),
     }
 }
+
+/// `enum :x, CONST.map { |v| [v, v.to_s] }.to_h` — Procore's
+/// `bid_package.rb` (`ACCOUNTING_METHODS.map { |method| [method,
+/// method.to_s] }.to_h`) and `potential_change_order.rb` compute an
+/// identity STRING mapping over a constant instead of writing the hash
+/// out by hand. Unlike a bare `enum :x, CONST` (which stores each
+/// label at its array INDEX, Rails' default), this form explicitly
+/// stores each label as its own name — the resulting values must be
+/// `Str`, not the `Int` a plain array mapping would give.
+#[test]
+fn computed_enum_map_to_h_over_constant_ingests() {
+    use roundhouse::ingest::ingest_app_from_tree;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let computed_src = concat!(
+        "class Widget < ApplicationRecord\n",
+        "  ACCOUNTING_METHODS = %i[amount unit]\n",
+        "  enum :accounting_method, ACCOUNTING_METHODS.map { |method| [method, method.to_s] }.to_h\n",
+        "end\n",
+    );
+
+    let tree_for = |src: &str| -> HashMap<PathBuf, Vec<u8>> {
+        [(PathBuf::from("app/models/widget.rb"), src.as_bytes().to_vec())].into_iter().collect()
+    };
+
+    let computed = ingest_app_from_tree(tree_for(computed_src))
+        .expect("computed .map{}.to_h enum mapping ingests strict");
+
+    let computed_widget = &computed.models[0];
+    let column = roundhouse::Symbol::from("accounting_method");
+    assert_eq!(
+        computed_widget.enums.get(&column).unwrap(),
+        &vec![
+            ("amount".to_string(), Literal::Str { value: "amount".to_string() }),
+            ("unit".to_string(), Literal::Str { value: "unit".to_string() }),
+        ]
+    );
+}
+
+/// `.index_by(&:to_s)` and `.index_with(&:to_s)` over a `CONST` — the
+/// other two identity-string-mapping spellings alongside `.map{}.to_h`,
+/// widened to accept a constant receiver (previously only a literal
+/// `%w[…]` array).
+#[test]
+fn computed_enum_index_by_and_index_with_over_constant_ingest() {
+    use roundhouse::ingest::ingest_app_from_tree;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let files: &[(&str, &str)] = &[(
+        "app/models/widget.rb",
+        concat!(
+            "class Widget < ApplicationRecord\n",
+            "  KINDS = %w[invisible nothing]\n",
+            "  enum :kind, KINDS.index_by(&:to_s)\n",
+            "  enum :variant, KINDS.index_with(&:to_s)\n",
+            "end\n",
+        ),
+    )];
+    let tree: HashMap<PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (PathBuf::from(*p), c.as_bytes().to_vec()))
+        .collect();
+
+    let app = ingest_app_from_tree(tree)
+        .expect("index_by/index_with over a constant ingest strict");
+    let widget = &app.models[0];
+    let expected = vec![
+        ("invisible".to_string(), Literal::Str { value: "invisible".to_string() }),
+        ("nothing".to_string(), Literal::Str { value: "nothing".to_string() }),
+    ];
+    assert_eq!(widget.enums.get(&roundhouse::Symbol::from("kind")).unwrap(), &expected);
+    assert_eq!(widget.enums.get(&roundhouse::Symbol::from("variant")).unwrap(), &expected);
+}
