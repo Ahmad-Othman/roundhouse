@@ -26,6 +26,34 @@ mod send;
 pub(crate) use send::string_answers;
 
 /// Recursion context — what `self` is, what locals/ivars are in scope.
+/// The constants a context sees: its class's own layered over the
+/// app-wide registry, both shared. An own constant shadows a global one
+/// of the same name. Layered rather than merged: merging copied the whole
+/// registry once per class, which on Shopify core (tens of thousands of
+/// constants and classes) was most of a typing pass.
+#[derive(Clone, Default)]
+pub struct ConstScope {
+    own: std::sync::Arc<HashMap<Symbol, Ty>>,
+    global: std::sync::Arc<HashMap<Symbol, Ty>>,
+}
+
+impl ConstScope {
+    /// Just the app-wide registry.
+    pub fn global(map: HashMap<Symbol, Ty>) -> Self {
+        Self { own: Default::default(), global: std::sync::Arc::new(map) }
+    }
+
+    /// This scope's registry with `own` layered over it (a later entry
+    /// wins, as `extend` would).
+    pub fn with_own(&self, own: impl IntoIterator<Item = (Symbol, Ty)>) -> Self {
+        Self { own: std::sync::Arc::new(own.into_iter().collect()), global: self.global.clone() }
+    }
+
+    pub fn get(&self, name: &Symbol) -> Option<&Ty> {
+        self.own.get(name).or_else(|| self.global.get(name))
+    }
+}
+
 /// Immutable during descent; clone to enter a new scope (Let body,
 /// block body, Seq walk with new ivar/local bindings).
 #[derive(Clone, Default)]
@@ -51,7 +79,7 @@ pub struct Ctx {
     /// copied the whole registry — every constant in the app, merged
     /// into each class's view of it — and on Mastodon that copying was
     /// most of the analysis time.
-    pub constants: std::sync::Arc<HashMap<Symbol, Ty>>,
+    pub constants: ConstScope,
     /// When set, the body-typer writes back `Some(SelfRef)` on the
     /// recv slot of bare Sends that resolve via `self_ty`'s dispatch
     /// table. Off by default — opt-in per call site so targets that

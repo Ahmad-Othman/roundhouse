@@ -40,7 +40,7 @@ pub use inferred_types::inferred_types;
 pub use inquiry::inquirer_methods;
 pub use diagnostics::{diagnose, diagnose_with_coverage};
 
-pub use body::{BodyTyper, ClassInfo, Ctx};
+pub use body::{BodyTyper, ClassInfo, ConstScope, Ctx};
 use render::{
     collect_action_render_views, collect_content_partial_literals,
     collect_dynamic_render_ivars, content_partial_view_name,
@@ -1243,7 +1243,7 @@ impl Analyzer {
         // dependency needs two passes, the cap leaves slack.
         for _ in 0..4 {
             let mut next: HashMap<Symbol, Ty> = HashMap::new();
-            let shared = std::sync::Arc::new(map.clone());
+            let shared = body::ConstScope::global(map.clone());
             for (self_ty, name, value) in entries.iter_mut() {
                 if ambiguous.contains(name) {
                     continue;
@@ -1281,7 +1281,7 @@ impl Analyzer {
         // read can then be answered exactly, including for a name two
         // classes both define — which the map above has to drop.
         let mut per_class: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
-        let shared = std::sync::Arc::new(map.clone());
+        let shared = body::ConstScope::global(map.clone());
         for (self_ty, name, value) in entries.iter_mut() {
             let owner = match &self_ty {
                 Ty::Class { id, .. } => id.clone(),
@@ -1319,7 +1319,7 @@ impl Analyzer {
         // global on a name clash).
         let (global_constants, class_constants) = self.build_constant_registry(app);
         // Shared by every context below — see `Ctx::constants`.
-        let global_constants = std::sync::Arc::new(global_constants);
+        let global_constants = body::ConstScope::global(global_constants);
         for (id, constants) in class_constants {
             self.classes.entry(id).or_default().constants.extend(constants);
         }
@@ -1386,7 +1386,7 @@ impl Analyzer {
             /// typed against this controller's self), for the persisted
             /// chain's per-hop effects.
             action_effects: HashMap<Symbol, EffectSet>,
-            class_constants: std::sync::Arc<HashMap<Symbol, Ty>>,
+            class_constants: body::ConstScope,
             layout: LayoutDecl,
         }
         let mut meta_by_name: HashMap<ClassId, ControllerMeta> = HashMap::new();
@@ -1450,9 +1450,8 @@ impl Analyzer {
             }
             // Own constants layered over the global registry — a same-named
             // constant declared on this controller shadows another class's.
-            let mut class_constants = (*global_constants).clone();
-            class_constants.extend(extract_controller_const_assignments(&controller.body));
-            let class_constants = std::sync::Arc::new(class_constants);
+            let class_constants =
+                global_constants.with_own(extract_controller_const_assignments(&controller.body));
 
             let ctx = Ctx {
                 self_ty: Some(self_ty.clone()),
@@ -2283,10 +2282,8 @@ impl Analyzer {
                 // bodies with. Passing an empty map here would make the
                 // re-type LOSE a constant binding Phase B had already
                 // established — this pass must only ever add.
-                let mut class_constants = (*global_constants).clone();
-                class_constants
-                    .extend(extract_controller_const_assignments(&controller.body));
-                let class_constants = std::sync::Arc::new(class_constants);
+                let class_constants =
+                    global_constants.with_own(extract_controller_const_assignments(&controller.body));
                 for action in controller.actions_mut() {
                     let Some(module) = by_method.get(&action.name) else { continue };
                     let Some(from_concern) = concern_env.get(module) else { continue };
@@ -2392,9 +2389,7 @@ impl Analyzer {
                 }
             }
             // Own constants layered over the global registry (own shadows).
-            let mut class_constants = (*global_constants).clone();
-            class_constants.extend(extract_const_assignments(&model.body));
-            let class_constants = std::sync::Arc::new(class_constants);
+            let class_constants = global_constants.with_own(extract_const_assignments(&model.body));
 
             let class_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
