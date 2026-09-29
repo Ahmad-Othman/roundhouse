@@ -795,7 +795,7 @@ impl Analyzer {
     /// `FIXPOINT_CAP`) using a signature fingerprint to detect convergence.
     pub fn analyze(&mut self, app: &mut App) {
         const FIXPOINT_CAP: usize = 12;
-        self.run_typing_passes(app);
+        crate::timings::phase("typing passes (initial)", || self.run_typing_passes(app));
 
         // Whole-program fixpoint: harvest returns + unify params, re-type,
         // repeat until the registry signature stabilizes. Each round
@@ -810,9 +810,9 @@ impl Analyzer {
         // `get_from_cache` block → its return → the destructuring, which
         // settles on round 9.
         let mut prev_sig = self.inference_signature();
-        for _ in 0..FIXPOINT_CAP {
-            self.harvest_returns_to_registry(app);
-            self.unify_params_from_call_sites(app);
+        for round in 0..FIXPOINT_CAP {
+            crate::timings::phase(&format!("round {round}: harvest returns"), || self.harvest_returns_to_registry(app));
+            crate::timings::phase(&format!("round {round}: unify params"), || self.unify_params_from_call_sites(app));
             let cur_sig = self.inference_signature();
             if cur_sig == prev_sig {
                 break;
@@ -821,7 +821,7 @@ impl Analyzer {
             // Re-type the whole app with the refined registry. Idempotent
             // BodyTyper means a second pass simply resolves dispatches
             // and Var bindings the first pass couldn't.
-            self.run_typing_passes(app);
+            crate::timings::phase(&format!("round {round}: typing passes"), || self.run_typing_passes(app));
         }
 
         // The loop's last act is a typing pass whose results nothing
