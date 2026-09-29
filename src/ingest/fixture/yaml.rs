@@ -59,7 +59,7 @@ impl Reader<'_> {
                     serde_yaml_ng::from_str(&format!("!<{}{}> {quoted}", tag.handle, tag.suffix))
                         .map_err(|e| e.to_string())?
                 } else if style == TScalarStyle::Plain {
-                    serde_yaml_ng::from_str(&text).map_err(|e| e.to_string())?
+                    plain_scalar(text)
                 } else {
                     Value::String(text)
                 };
@@ -100,6 +100,20 @@ impl Reader<'_> {
             self.anchors.insert(anchor, value.clone());
         }
         Ok(value)
+    }
+}
+
+fn plain_scalar(text: String) -> Value {
+    // Resolve scalar types without parsing another YAML document: `---` and
+    // `...` can be ordinary mapping values, and must remain strings here.
+    match text.as_str() {
+        "" | "~" | "null" | "Null" | "NULL" => Value::Null,
+        "true" | "True" | "TRUE" => Value::Bool(true),
+        "false" | "False" | "FALSE" => Value::Bool(false),
+        _ => text
+            .parse::<serde_yaml_ng::Number>()
+            .map(Value::Number)
+            .unwrap_or(Value::String(text)),
     }
 }
 

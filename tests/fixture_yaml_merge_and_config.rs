@@ -260,3 +260,12 @@ fn anchor_names_cannot_collide_with_generated_names() {
 fn recursive_values_are_reported_instead_of_becoming_empty_objects() {
     assert!(fixture("one: &x {metadata: *x}\n").is_err());
 }
+
+#[test]
+fn plain_scalar_values_are_not_reparsed_as_documents() {
+    let f = fixture("one: {name: ---, copy: ..., metadata: {number: 12, float: 1.5, flag: true, empty: null, string: 012}}\n")
+        .expect("ingest");
+    assert_eq!(field(&f, "one", "name").as_deref(), Some("---"));
+    assert_eq!(field(&f, "one", "copy").as_deref(), Some("..."));
+    assert_eq!(field(&f, "one", "metadata").as_deref(), Some(r#"{"number":12,"float":1.5,"flag":true,"empty":null,"string":"012"}"#));
+}
