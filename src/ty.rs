@@ -268,7 +268,11 @@ impl Ty {
     /// targets render a symbol identically to a string, so coercion and
     /// str-coloring paths treat the pair uniformly.
     pub fn is_stringish(&self) -> bool {
-        matches!(self, Ty::Str | Ty::Sym)
+        match self {
+            Ty::Str | Ty::Sym => true,
+            Ty::Union { variants } => !variants.is_empty() && variants.iter().all(Ty::is_stringish),
+            _ => false,
+        }
     }
 
     /// True when this type is `Time` or a union containing it — the
