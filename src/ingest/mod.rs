@@ -36,6 +36,7 @@ pub mod model;
 mod model_macros;
 pub mod on_load_reopen;
 pub mod prism;
+pub mod rbi;
 pub mod rate_limit;
 pub mod roda_app;
 pub mod routes;
