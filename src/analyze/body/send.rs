@@ -1017,6 +1017,12 @@ impl<'a> BodyTyper<'a> {
                 }
                 let mut steps = 0usize;
                 let mut unknown_named_ancestor = false;
+                // The first `method_missing` on the ancestor walk (the
+                // class's own, then its mixins', then its parents').
+                // Ruby consults it only once the WHOLE chain has failed
+                // to find the method, so it is held here and applied
+                // after the walk, never in place of a real method.
+                let mut method_missing_ty: Option<Ty> = None;
                 while let Some(cid) = current_id {
                     depth += 1;
                     if depth > 32 {
@@ -1081,6 +1087,18 @@ impl<'a> BodyTyper<'a> {
                         if let Some(ty) = self.lookup_in_module(module_id, method) {
                             return subst(&ty);
                         }
+                    }
+                    if method_missing_ty.is_none() {
+                        method_missing_ty = cls
+                            .class_methods
+                            .get(&Symbol::from("method_missing"))
+                            .or_else(|| cls.instance_methods.get(&Symbol::from("method_missing")))
+                            .cloned()
+                            .or_else(|| {
+                                cls.includes.iter().find_map(|m| {
+                                    self.lookup_in_module(m, &Symbol::from("method_missing"))
+                                })
+                            });
                     }
                     current_id = cls.parent.as_ref();
                 }
@@ -1250,6 +1268,19 @@ impl<'a> BodyTyper<'a> {
                 // after the precise builtins above have had their say.
                 if unknown_named_ancestor {
                     return Ty::Untyped;
+                }
+                // The chain never defined the method but a class on it
+                // defines `method_missing`: the message is answered at
+                // runtime, by code the analyzer cannot follow name by
+                // name (core's `CustomerAccountUrlHelpers` turns
+                // `customer_account_*_url` into a `UrlHelpers` send). The
+                // answer is what `method_missing` is declared to return,
+                // gradual when it says nothing more.
+                if let Some(mm) = method_missing_ty {
+                    return match unwrap_fn_ret(&mm) {
+                        Ty::Var { .. } => Ty::Untyped,
+                        t => t,
+                    };
                 }
                 unknown()
             }
