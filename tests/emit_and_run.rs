@@ -67,3 +67,44 @@ fn a_custom_form_builder_runs() {
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
 }
+
+/// `def self.included(klass); class << klass; … end; end` — Procore's
+/// shared search concerns (`app/concerns/search_engine/indexed.rb` and
+/// more) skip `ActiveSupport::Concern` and open the includer's
+/// singleton directly from the vanilla `Module#included` hook. Pins
+/// that the resulting class method is actually callable on the
+/// including model, not just that `check` no longer reports the
+/// `SingletonClassNode` it used to.
+#[test]
+fn included_hook_class_methods_run() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/sluggable.rb",
+            "module Sluggable\n  \
+               def self.included(klass)\n    \
+                 class << klass\n      \
+                   def slug_prefix\n        \
+                     \"article\"\n      \
+                   end\n    \
+                 end\n  \
+               end\n\
+             end\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  include Sluggable\n\n  \
+             has_many :comments, dependent: :destroy",
+        )
+        .write(
+            "test/models/article_sluggable_test.rb",
+            "require \"test_helper\"\n\n\
+             class ArticleSluggableTest < ActiveSupport::TestCase\n  \
+               test \"an included-hook class method is callable on the includer\" do\n    \
+                 assert_equal \"article\", Article.slug_prefix\n  \
+               end\n\
+             end\n",
+        )
+        .run_test("test/models/article_sluggable_test.rb")
+        .assert_passes();
+}
