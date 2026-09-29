@@ -1721,16 +1721,25 @@ pub(super) fn ingest_library_method(
                         // campfire's `avatar_tag(user, **options)` is
                         // called with one argument from the message row,
                         // the user list and the sidebar.
-                        // Not beside a positional `*rest`: there the caller's
-                        // keywords already land in the rest, and the slot is
-                        // dropped on purpose (tests/initializer_defined_constants).
-                        if keeps_keywords && !params.iter().any(|p| p.rest && !p.keyword) {
+                        let beside_positional_rest = params.iter().any(|p| p.rest && !p.keyword);
+                        if keeps_keywords && !beside_positional_rest {
                             // The keyword group is kept in this def, so
                             // `**rest` stays a keyword-rest: flattened to
                             // `rest = {}` after a `name:` it does not parse
                             // (`def call(server_context:, arguments = {})`).
                             let mut p = Param::keyword(Symbol::from(s), None);
                             p.rest = true;
+                            params.push(p);
+                        } else if beside_positional_rest {
+                            // Beside a positional `*rest` the caller's
+                            // keywords already land in the rest, so the
+                            // slot is marked and dropped below unless the
+                            // body reads it (tests/initializer_defined_constants).
+                            // When it is read, `(*args, opts = {})` does
+                            // not parse, so it stays a real `**kwrest`.
+                            let mut p = Param::keyword(Symbol::from(s), None);
+                            p.rest = true;
+                            p.from_kwrest = true;
                             params.push(p);
                         } else {
                             let mut p = Param::with_default(
@@ -1773,8 +1782,8 @@ pub(super) fn ingest_library_method(
     // land in it as a trailing Hash, so when the body never reads the
     // kwrest the slot carries nothing and is dropped. Lobsters'
     // `Telebugs` no-ops (`def self.user *args, **kwargs; end`) are the
-    // shape. A body that does read it keeps the slot (and the parse
-    // error) until Param can say "kwrest".
+    // shape. A body that does read it keeps the slot, as a real
+    // `**kwrest` (see above).
     if params.iter().any(|p| p.rest) {
         params.retain(|p| !p.from_kwrest || expr_reads_local(&body, &p.name));
     }
