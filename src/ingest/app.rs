@@ -1010,16 +1010,25 @@ end
         // `draw(:name)` split files — Rails loads
         // `config/routes/<name>.rb` into the same DSL context, and
         // Mastodon-class apps keep most of their route table there.
+        // Keyed by the path RELATIVE TO `config/routes/`, without the
+        // `.rb` extension — `draw('financials/financials_erp_routes')`
+        // passes that whole relative path as the name, and keying by
+        // bare file stem alone (dropping the `financials/` prefix) left
+        // every subdirectory-nested draw unresolved (Procore has 34).
+        // `ingest_draw_route`'s `resolve_draw_name` still falls back to
+        // the bare stem when it is unambiguous, for `draw(:name)` calls
+        // written against a flat `config/routes/` layout.
         let mut draw_files: HashMap<String, (Vec<u8>, String)> = HashMap::new();
         let routes_dir = dir.join("config/routes");
         if vfs.is_dir(&routes_dir) {
             for entry in read_rb_files(vfs, &routes_dir)? {
-                let Some(stem) = entry.file_stem().and_then(|s| s.to_str()) else {
+                let Some(rel) = entry.strip_prefix(&routes_dir).ok().and_then(|p| p.to_str())
+                else {
                     continue;
                 };
+                let key = rel.trim_end_matches(".rb").replace('\\', "/");
                 let split_source = vfs.read(&entry)?;
-                draw_files
-                    .insert(stem.to_string(), (split_source, entry.display().to_string()));
+                draw_files.insert(key, (split_source, entry.display().to_string()));
             }
         }
         if let Some(routes) = unwrap_or_record(ingest_routes_with_draws(
