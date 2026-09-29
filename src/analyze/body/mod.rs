@@ -304,6 +304,12 @@ fn expand_bare_const(
     if classes.contains_key(&ClassId(name.clone())) {
         return None;
     }
+    // Ruby's own top-level constants are never app classes, so an app's
+    // `ActiveModel::Serializers::JSON` must not capture a bare `JSON.parse`
+    // (shopify core; it then typed a stdlib call as the app module's).
+    if RUBY_TOP_LEVEL.contains(&target) {
+        return None;
+    }
     index.unique_suffix(target)
 }
 
@@ -3103,3 +3109,17 @@ fn time_parse_ty(recv: &Expr, method: &Symbol, args: &[Expr]) -> Option<Ty> {
 fn is_time_const(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Time")
 }
+
+/// Top-level constants Ruby and its default/bundled gems define. A bare
+/// reference to one of these means the stdlib constant; see
+/// `expand_bare_const`.
+const RUBY_TOP_LEVEL: &[&str] = &[
+    "Base64", "Benchmark", "BigDecimal", "CGI", "CSV", "Comparable", "Complex", "Coverage",
+    "Date", "DateTime", "Digest", "Dir", "ERB", "Encoding", "Enumerable", "Errno", "Etc",
+    "Fiber", "File", "FileUtils", "Find", "Forwardable", "GC", "IO", "IPAddr", "JSON",
+    "Kernel", "Logger", "Marshal", "Math", "Monitor", "Mutex", "Net", "ObjectSpace", "Open3",
+    "OpenSSL", "OpenStruct", "PP", "Pathname", "Prism", "Process", "Psych", "Random",
+    "Rational", "Ripper", "SecureRandom", "Set", "Shellwords", "Signal", "Singleton",
+    "Socket", "StringIO", "Struct", "Tempfile", "Thread", "Time", "Timeout", "URI", "YAML",
+    "Zlib",
+];
