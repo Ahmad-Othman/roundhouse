@@ -773,6 +773,12 @@ fn qualify_controller(module_prefix: &str, controller: &ClassId) -> ClassId {
     if controller.0.as_str() == crate::ingest::routes::REDIRECT_CONTROLLER {
         return controller.clone();
     }
+    // A leading `::` is a target written with a leading slash
+    // (`to: "/errors#routing"`): Rails resolves it from the top level,
+    // outside the enclosing `namespace`.
+    if let Some(absolute) = controller.0.as_str().strip_prefix("::") {
+        return ClassId(Symbol::from(absolute));
+    }
     if module_prefix.is_empty() {
         controller.clone()
     } else {

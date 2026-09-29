@@ -59,6 +59,7 @@ pub fn camelize(snake: &str) -> String {
 /// `underscore`; slash-free input degrades to plain `camelize`.
 pub fn camelize_path(path: &str) -> String {
     path.split('/')
+        .filter(|seg| !seg.is_empty())
         .map(camelize)
         .collect::<Vec<_>>()
         .join("::")
