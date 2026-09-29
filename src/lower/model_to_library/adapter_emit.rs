@@ -528,7 +528,7 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
     let cols_csv: String = table
         .columns
         .iter()
-        .map(|c| c.name.as_str().to_string())
+        .map(|c| crate::naming::sql_ident(c.name.as_str()))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -683,7 +683,7 @@ fn synth_columns_sql(owner: &ClassId, table: &Table) -> MethodDef {
     let cols_csv: String = table
         .columns
         .iter()
-        .map(|c| format!("{t}.{c} AS {c}", t = table.name.as_str(), c = c.name.as_str()))
+        .map(|c| format!("{t}.{c} AS {c}", t = table.name.as_str(), c = crate::naming::sql_ident(c.name.as_str())))
         .collect::<Vec<_>>()
         .join(", ");
     MethodDef {

@@ -59,7 +59,7 @@ pub fn render_schema_statements(schema: &Schema) -> Vec<String> {
             if col.primary_key && is_integer(&col.col_type) {
                 line.push_str(&format!(
                     "  {} INTEGER PRIMARY KEY AUTOINCREMENT",
-                    col.name.as_str()
+                    crate::naming::sql_ident(col.name.as_str())
                 ));
             } else if col.primary_key {
                 // `create_table …, id: :uuid` / `id: :string`: a
@@ -69,13 +69,13 @@ pub fn render_schema_statements(schema: &Schema) -> Vec<String> {
                 // ingester ledgers that).
                 line.push_str(&format!(
                     "  {} {} PRIMARY KEY NOT NULL",
-                    col.name.as_str(),
+                    crate::naming::sql_ident(col.name.as_str()),
                     sqlite_type(&col.col_type)
                 ));
             } else {
                 line.push_str(&format!(
                     "  {} {}",
-                    col.name.as_str(),
+                    crate::naming::sql_ident(col.name.as_str()),
                     sqlite_type(&col.col_type)
                 ));
                 if !col.nullable {
@@ -90,7 +90,7 @@ pub fn render_schema_statements(schema: &Schema) -> Vec<String> {
     }
     for (_name, table) in &schema.tables {
         for idx in &table.indexes {
-            let cols: Vec<&str> = idx.columns.iter().map(|c| c.as_str()).collect();
+            let cols: Vec<String> = idx.columns.iter().map(|c| crate::naming::sql_ident(c.as_str())).collect();
             let unique = if idx.unique { "UNIQUE " } else { "" };
             out.push(format!(
                 "CREATE {unique}INDEX IF NOT EXISTS {} ON {} ({})",

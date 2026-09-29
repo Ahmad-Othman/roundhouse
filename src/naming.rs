@@ -457,3 +457,36 @@ pub fn habtm_join_table(owner_class: &str, target_plural_sym: &str) -> String {
     let b = target_plural_sym.to_string();
     if a < b { format!("{a}_{b}") } else { format!("{b}_{a}") }
 }
+
+/// A column name as it must appear in emitted DDL and DML: double-quoted
+/// when it is a SQLite keyword. A Rails schema may legally name a column
+/// `index` or `values` (Postgres accepts them quoted, and schema.rb quotes
+/// nothing), and SQLite refuses the bare word in `CREATE TABLE`, in a
+/// SELECT list and in `INSERT … (cols)` alike.
+pub fn sql_ident(name: &str) -> String {
+    if is_sqlite_keyword(name) { format!("\"{name}\"") } else { name.to_string() }
+}
+
+fn is_sqlite_keyword(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "abort" | "action" | "add" | "after" | "all" | "alter" | "always" | "analyze" | "and" | "as"
+            | "asc" | "attach" | "autoincrement" | "before" | "begin" | "between" | "by" | "cascade"
+            | "case" | "cast" | "check" | "collate" | "column" | "commit" | "conflict" | "constraint"
+            | "create" | "cross" | "current" | "current_date" | "current_time" | "current_timestamp"
+            | "database" | "default" | "deferrable" | "deferred" | "delete" | "desc" | "detach"
+            | "distinct" | "do" | "drop" | "each" | "else" | "end" | "escape" | "except" | "exclude"
+            | "exclusive" | "exists" | "explain" | "fail" | "filter" | "first" | "following" | "for"
+            | "foreign" | "from" | "full" | "generated" | "glob" | "group" | "groups" | "having" | "if"
+            | "ignore" | "immediate" | "in" | "index" | "indexed" | "initially" | "inner" | "insert"
+            | "instead" | "intersect" | "into" | "is" | "isnull" | "join" | "key" | "last" | "left"
+            | "like" | "limit" | "match" | "materialized" | "natural" | "no" | "not" | "nothing"
+            | "notnull" | "null" | "nulls" | "of" | "offset" | "on" | "or" | "order" | "others"
+            | "outer" | "over" | "partition" | "plan" | "pragma" | "preceding" | "primary" | "query"
+            | "raise" | "range" | "recursive" | "references" | "regexp" | "reindex" | "release"
+            | "rename" | "replace" | "restrict" | "returning" | "right" | "rollback" | "row" | "rows"
+            | "savepoint" | "select" | "set" | "table" | "temp" | "temporary" | "then" | "ties" | "to"
+            | "transaction" | "trigger" | "unbounded" | "union" | "unique" | "update" | "using"
+            | "vacuum" | "values" | "view" | "virtual" | "when" | "where" | "window" | "with" | "without"
+    )
+}

@@ -85,7 +85,7 @@ pub fn lower_persistence(model: &Model, app: &App) -> LoweredPersistence {
 
     let insert_cols_list = non_id_columns
         .iter()
-        .map(|c| c.as_str().to_string())
+        .map(|c| crate::naming::sql_ident(c.as_str()))
         .collect::<Vec<_>>()
         .join(", ");
     let insert_placeholders = (1..=non_id_columns.len())
@@ -99,7 +99,7 @@ pub fn lower_persistence(model: &Model, app: &App) -> LoweredPersistence {
     let update_assigns = non_id_columns
         .iter()
         .enumerate()
-        .map(|(i, c)| format!("{} = ?{}", c.as_str(), i + 1))
+        .map(|(i, c)| format!("{} = ?{}", crate::naming::sql_ident(c.as_str()), i + 1))
         .collect::<Vec<_>>()
         .join(", ");
     let update_id_placeholder = non_id_columns.len() + 1;
@@ -112,7 +112,7 @@ pub fn lower_persistence(model: &Model, app: &App) -> LoweredPersistence {
 
     let all_cols_projection = columns
         .iter()
-        .map(|c| c.as_str().to_string())
+        .map(|c| crate::naming::sql_ident(c.as_str()))
         .collect::<Vec<_>>()
         .join(", ");
     let select_by_id_sql = format!(
@@ -163,7 +163,7 @@ pub fn lower_persistence(model: &Model, app: &App) -> LoweredPersistence {
                 .unwrap_or_default();
             let child_proj = child_columns
                 .iter()
-                .map(|c| c.as_str().to_string())
+                .map(|c| crate::naming::sql_ident(c.as_str()))
                 .collect::<Vec<_>>()
                 .join(", ");
             let mut select_by_parent_sql = String::new();

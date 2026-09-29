@@ -655,7 +655,7 @@ fn visit_insert(ins: &Insert, schema: &Schema) -> Expr {
     let cols_csv = ins
         .assignments
         .iter()
-        .map(|a| a.column.as_str().to_string())
+        .map(|a| crate::naming::sql_ident(a.column.as_str()))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -748,12 +748,12 @@ fn compose_sql_select(sel: &Select, table: &Table, param: bool, binds: &mut Vec<
         ColumnSpec::All => select_cols_csv(table),
         ColumnSpec::Named(refs) => refs
             .iter()
-            .map(|r| r.column.as_str().to_string())
+            .map(|r| crate::naming::sql_ident(r.column.as_str()))
             .collect::<Vec<_>>()
             .join(", "),
         ColumnSpec::Count => "COUNT(*)".to_string(),
         ColumnSpec::Exists => "1".to_string(),
-        ColumnSpec::Pluck(col) => col.column.as_str().to_string(),
+        ColumnSpec::Pluck(col) => crate::naming::sql_ident(col.column.as_str()),
         // The grouped column is projected BESIDE the aggregate, in that
         // order — the hydrate reads key at index 0, count at index 1.
         ColumnSpec::GroupCount(col) => format!("{}, COUNT(*)", col.column.as_str()),
@@ -927,7 +927,7 @@ fn select_cols_csv(table: &Table) -> String {
     table
         .columns
         .iter()
-        .map(|c| c.name.as_str().to_string())
+        .map(|c| crate::naming::sql_ident(c.name.as_str()))
         .collect::<Vec<_>>()
         .join(", ")
 }
