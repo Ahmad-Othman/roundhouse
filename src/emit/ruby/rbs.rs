@@ -169,7 +169,13 @@ fn render_typed_params(params: &[Param], enclosing: &[&str]) -> String {
     let mut parts = Vec::new();
     for p in params {
         let name = p.name.as_str();
-        let ty = ty_to_rbs_in(&p.ty, enclosing);
+        // A param only ever seen passed nil has no storage type in spinel
+        // (`method 'uri?' param 'name' has unsupported type nil`); the
+        // sighting says nothing about what else it takes, so leave it open.
+        let ty = match &p.ty {
+            Ty::Nil => "untyped".to_string(),
+            t => ty_to_rbs_in(t, enclosing),
+        };
         let part = match p.kind {
             ParamKind::Required => format!("{ty} {name}"),
             ParamKind::Optional => format!("?{ty} {name}"),
@@ -327,6 +333,10 @@ fn render_union(variants: &[Ty], enclosing: &[&str]) -> String {
         }
     }
     if has_nil && rendered.len() == 1 {
+        // A nested union (`(T | nil) | nil`) already rendered `T?`.
+        if rendered[0].ends_with('?') {
+            return rendered.into_iter().next().unwrap();
+        }
         return format!("{}?", rendered[0]);
     }
     if rendered.is_empty() {
