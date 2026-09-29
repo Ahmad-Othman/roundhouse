@@ -111,6 +111,29 @@ fn a_helper_reads_a_reserved_word_keyword_with_the_shorthand_runs() {
     run.assert_passes();
 }
 
+/// A String keyword that no caller passes as nil keeps Rails' nil
+/// rule: `class: "nil"` renders `class="nil"`. The inquiry lowering
+/// read `value.nil?` as `StringInquirer#nil?` and emitted
+/// `value == "nil"`, which dropped the attribute.
+#[test]
+fn a_string_keyword_named_nil_keeps_its_attribute() {
+    let run = on_the_index(
+        emit_and_run::real_blog().write(
+            "app/helpers/application_helper.rb",
+            "module ApplicationHelper\n  \
+               def badge(text, class: \"badge\")\n    \
+                 tag.span(text, class: binding.local_variable_get(:class))\n  \
+               end\n\
+             end\n",
+        ),
+        "<i id=\"n-literal\"><%= badge(\"hi\", class: \"nil\") %></i>\n\
+         <i id=\"n-default\"><%= badge(\"hi\") %></i>\n",
+        "    assert_match(/<i id=\"n-literal\"><span class=\"nil\">hi<\\/span><\\/i>/, response.body)\n    \
+             assert_match(/<i id=\"n-default\"><span class=\"badge\">hi<\\/span><\\/i>/, response.body)\n",
+    );
+    run.assert_passes();
+}
+
 /// B2 in NEXUS_BUGS.md: strict locals named after reserved words
 /// emitted a positional `for` parameter. Nexus reads them with
 /// `local_assigns`; the repro reads them with `binding`.

@@ -2181,9 +2181,11 @@ fn jbuilder_value(arg: Option<&crate::expr::Expr>) -> Ty {
 /// `lower::inquiry` asks before folding an unknown `foo?` into an
 /// equality against the label; consulting the class registry instead
 /// answered "String has no methods at all", and the pass rewrote
-/// `notice.present?` to `notice == "present"`.
+/// `notice.present?` to `notice == "present"`. A String also answers
+/// every `universal_method`: without that, a String-typed `value.nil?`
+/// became `value == "nil"`.
 pub(crate) fn string_answers(method: &Symbol) -> bool {
-    !matches!(str_method(method), Ty::Var { .. })
+    universal_method(method).is_some() || !matches!(str_method(method), Ty::Var { .. })
 }
 
 pub(super) fn str_method(method: &Symbol) -> Ty {
