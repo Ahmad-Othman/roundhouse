@@ -2791,6 +2791,99 @@ are both outside that subset. A literal keyword list is unaffected —
 `local_datetime_tag ts, style: :date` is `lower::helper_kwargs`' case and
 still splices by name, which is why the two passes run in that order.
 
+### Response headers differ from Rails in SHAPE — MEASURED (2026-09-28)
+
+`scripts/campfire-http-shape` sends 71 requests (86 responses with
+revisits) to Rails campfire and to the emit, on the same seed, and
+compares status, Content-Type, Cache-Control, ETag, Vary,
+Content-Encoding, Location, Set-Cookie names and attributes, and every
+other header. Rails against itself: zero differences. Rails against the
+emit: 86 of 86 responses differ on the ruby lane, 90 on spinel. The
+sweep is basecamp/once-campfire-rust's, vendored; see the script's
+header. Grouped by cause, largest first:
+
+- **Rails' default security headers are absent** (54 responses):
+  `X-Frame-Options: SAMEORIGIN`, `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy`, `X-Permitted-Cross-Domain-Policies`,
+  `X-XSS-Protection: 0` — `config.action_dispatch.default_headers`,
+  which every Rails response carries. Without `X-Frame-Options` any
+  site can frame a signed-in campfire page. The one to close first.
+- **The app's own `config.ru` middleware is not applied.** campfire's
+  `config.ru` says `use Rack::Deflater`; no response of ours is gzipped
+  (65) and none varies on `Accept-Encoding` (71).
+- **Rails' `Rack::ETag` / `Rack::ConditionalGet` are absent**: no weak
+  ETag on a 200 (52), no `Cache-Control: max-age=0, private,
+  must-revalidate`, so a revisit is 200 where Rails answers 304 (10-14).
+  The explicit halves are the two entries above: "Conditional GET is
+  ALWAYS FRESH", "`expires_in` records Cache-Control but emits no
+  header" (the five asset/avatar/QR/blob/logo Cache-Control values).
+- **Cookie attributes.** `session_token` is set without `expires`
+  (campfire writes it `cookies.signed.permanent`, so a browser restart
+  signs the user out) and without `SameSite=Lax`; the Rails session
+  cookie likewise lacks both.
+- **Formats.** A format the action does not render (`.xml`, `.yaml`,
+  `Accept: text/html` on the web manifest) answers 200 or 500 where
+  Rails answers 406; the Turbo-stream and SVG content types lack
+  `charset=utf-8`; a missing template is a 500, not a 406.
+- **Redirects are relative.** Rails' `redirect_to` writes an absolute
+  `Location` (`http://host/rooms/1`); ours writes the path.
+- **Routes the emit does not serve:** `/up` (`rails/health#show`) is a
+  404 (500 on spinel); `HEAD` of a page is a 404 on both lanes.
+- **The account user list's next page is a 500** on both lanes:
+  `/account/users?page=2` asked for as a Turbo Stream (what the list's
+  infinite scroll sends past 500 users) reaches a view whose
+  `turbo_stream` helper is not lowered (`NameError` on ruby, `replace`
+  on an untyped receiver on spinel).
+- **Blob URLs are signed differently.** Rails' `blob_id` purpose signs
+  with SHA1 over padded Base64 (`…fQ==--<40 hex>`); ours with SHA256
+  over unpadded (`…fQ--<64 hex>`). A blob URL minted by Rails (in a
+  page, an email, a cache) does not verify on the emit after a
+  migration, and vice versa.
+- Smaller: `Last-Modified` absent on the paginated messages (5),
+  `X-Total-Count` absent on the autocompleter JSON (2),
+  `Content-Disposition` absent on avatar and logo images (2).
+
+Each group is a fix in `runtime/ruby/` or an entry here; the sweep
+becomes a gate the way campfire-compare's room page did, once the list
+is ledgered.
+
+### A raise inside a request leaked its connection lease (spinel) — FIXED
+
+`Db.with_connection` (`runtime/spinel/db.rb`) released its lease only on
+the happy path — its comment called that "acceptable on the happy path;
+revisit if the dispatch path starts raising". Every 500 leaked one
+connection for good; after a pool shard's worth (4) the next lease on
+that shard parked forever, and every request served by a thread
+assigned to that shard hung. Any signed-in user who could reach a 500
+four times could take a shard down. Found by `campfire-http-shape`,
+whose sweep alternates routes and so kept landing the one that raised
+on the same shard: the binary stopped answering it after four. The
+release is in an `ensure` now (`capture_sql` in the same file has used
+one on this lane all along); `tests/spinel_db_lease.rs` raises more
+times than the pool holds and checks the pool is whole again.
+
+### Array form params (`ids[]`) keep only the last value (spinel) — OPEN
+
+`Tep::Url.parse_query` stores a form body into a String→String hash, so
+repeated `user_ids[]=2&user_ids[]=3` keys keep the last value, and
+`Main.nest_params` then reads `user_ids[]` as a sub-hash with the key
+`""`: the controller sees `{"" => "3"}` where Rails sees `["2", "3"]`.
+campfire's `Rooms::DirectsController#create` does
+`User.where(id: params.fetch(:user_ids, []).including(Current.user.id))`,
+so on the binary every new direct room — one-on-one or group — is
+created with its creator alone, and the request answers 302 as if it
+had worked. Silent, which is why the cable walk's direct-room probes
+were green on spinel without ever reaching a two-member room (they
+check status codes; the room's membership was never read). The ruby
+family parses through Rack and is correct.
+
+The fix belongs in the parser and the nesting together: an array value
+has to survive a flat String→String store, and the nested hash the
+controller reads has to carry an Array. once-campfire-rust's
+`crates/kit/tests/params_vectors.json` — 2,755 query strings parsed by
+`ActionDispatch::ParamBuilder`, with the cases Rails rejects — is the
+oracle to hold it to.
+
 ### The spinel binary WEDGES after a queued job raises — OPEN
 
 **Found 2026-08-31**, and it blocks the cable walk and the browser

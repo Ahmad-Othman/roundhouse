@@ -76,6 +76,17 @@ Stream frames that arrive over `/cable` are captured on both sides and
 diffed after the same normalization. Both scripts are readable and
 short; adapting one to your app is mostly replacing the path list.
 
+`scripts/campfire-http-shape` compares what surrounds the page: the
+status and headers of 71 requests (pages, Turbo Streams, JSON, assets,
+avatars, blobs, HEAD, errors, signed-out), on a seed with every screen
+state in reach. It is borrowed from
+[once-campfire-rust](https://github.com/basecamp/once-campfire-rust),
+which ported the same app by hand and proved it with this sweep, and it
+first runs Rails against itself to prove the oracle deterministic. It
+is a report today; its current differences are ledgered in
+[`runtime.md`](../pipeline/runtime.md) under "Response headers differ
+from Rails in SHAPE".
+
 ## Reading a failure
 
 A compare failure is one of three things, and the report usually says

@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# scripts/campfire-http-shape — Rails campfire vs the emit, compared by the
+# SHAPE of 71 HTTP responses: status, Content-Type, Cache-Control, ETag,
+# Vary, Content-Encoding, Location, Set-Cookie names and attributes, and
+# every other header's value.
+#
+# campfire-compare holds one page's BODY to Rails; nothing held the
+# headers around any page, and a header is where a deployment's behavior
+# lives: whether a session survives a browser restart (Set-Cookie
+# expires), whether a page can be framed (X-Frame-Options), whether a
+# revisit is a 304, whether an unknown format is a 406 or a render.
+#
+# BORROWED, NOT INVENTED. basecamp/once-campfire-rust ports this same app
+# (pinned to the same campfire SHA as ours) and proved its port with
+# this sweep; `scripts/campfire-http-shape.py` is their
+# reference-tools/http_shape/sweep.py, vendored with two small changes
+# named in its header. The seed is theirs too: parity/seeds/default.rb
+# loads campfire's own test fixtures and scripts a scenario with every
+# screen state in reach (attachments, bots, direct rooms, a 120-message
+# room, a deactivated user, a ban) — run here by OUR oracle tree, so the
+# rows are Rails' and the checkout they come from is recorded.
+#
+# THE ORACLE IS CHECKED FIRST. Before any emit diff means anything, the
+# sweep runs Rails against itself and must find zero differences
+# (their plan's Phase 0 rule: "if we can't make the oracle
+# deterministic, nothing downstream means anything").
+#
+# REPORT, NOT GATE (yet). Exit status is the sweep's: 1 on any
+# difference. The closing summary groups differences by header; each
+# group is a cause to fix in runtime/ruby or to ledger in
+# docs/pipeline/runtime.md. Promote to a CI gate once the list is
+# ledgered, the way campfire-compare's room page was.
+#
+# Usage:  scripts/campfire-http-shape [options]
+#
+#   --spinel        Drive the spinel BINARY as the emit lane (default: ruby).
+#   --reuse DIR     Skip transpiling; use an emit prepared earlier.
+#   --keep          Keep the emit + logs and print their paths.
+#   --reseed        Rebuild the seed even if one exists.
+#   --only SUBSTR   Pass through: only requests whose name contains SUBSTR.
+#   -v              Pass through: print every shape, not only differences.
+#
+# Requires: the Rails oracle at build/campfire-oracle (scripts/campfire-oracle
+# prepare), redis-server running, python3, and a once-campfire-rust checkout
+# at $CAMPFIRE_RUST (default ~/git/once-campfire-rust) for the seed.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO_ROOT/scripts/lib/spinel-link-path.sh"
+APP="$HOME/git/once-campfire"
+RUST="${CAMPFIRE_RUST:-$HOME/git/once-campfire-rust}"
+ORACLE="$REPO_ROOT/build/campfire-oracle"
+PARITY="$REPO_ROOT/build/campfire-parity"
+LANE=ruby
+REUSE=""
+KEEP=0
+RESEED=0
+PASS=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --spinel) LANE=spinel; shift ;;
+        --reuse)  REUSE="$2"; shift 2 ;;
+        --keep)   KEEP=1; shift ;;
+        --reseed) RESEED=1; shift ;;
+        --only)   PASS+=(--only "$2"); shift 2 ;;
+        -v)       PASS+=(-v); shift ;;
+        -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
+        *) APP="$1"; shift ;;
+    esac
+done
+
+step() { printf '\n\033[1;34m==>\033[0m %s\n' "$1"; }
+ok()   { printf '\033[1;32mok\033[0m  %s\n' "$1"; }
+fail() { printf '\033[1;31m%s\033[0m\n' "$1"; }
+die()  { fail "$1"; exit 1; }
+
+[[ -f "$ORACLE/oracle.json" ]] \
+    || die "no oracle at $ORACLE — run scripts/campfire-oracle prepare first"
+[[ -f "$RUST/parity/seeds/build.rb" ]] \
+    || die "no once-campfire-rust checkout at $RUST (set CAMPFIRE_RUST)"
+redis-cli ping >/dev/null 2>&1 || die "redis is not running — the Rails lane needs it"
+
+ORACLE_SHA=$(ruby -rjson -e 'puts JSON.parse(File.read(ARGV[0]))["campfire_sha"]' "$ORACLE/oracle.json")
+RUST_PIN=$(git -C "$RUST" ls-tree HEAD reference 2>/dev/null | awk '{print $3}')
+RUST_SHA=$(git -C "$RUST" rev-parse HEAD)
+# Their fixtures-and-scenario seed is written against THEIR pinned campfire;
+# run against another, it can name a fixture that is not there.
+if [[ -n "$RUST_PIN" && "$RUST_PIN" != "$ORACLE_SHA" ]]; then
+    fail "once-campfire-rust pins campfire $RUST_PIN; the oracle is $ORACLE_SHA"
+    fail "the seed may not load — proceeding, but read a failure in that light"
+fi
+
+# The same SECRET_KEY_BASE on both lanes and in the seed: signed ids and
+# blob URLs then derive from one key, and a digest that differs is a
+# difference in HOW it was signed, not in what with.
+KEY=$(sed -n 's/^SECRET_KEY_BASE=//p' "$RUST/parity/.env.reference")
+[[ -n "$KEY" ]] || die "no SECRET_KEY_BASE in $RUST/parity/.env.reference"
+
+# ── 1. the seed: their scenario, our Rails ────────────────────────────
+# A hardlinked copy of the oracle tree with storage of its own, so the
+# benchmark oracle's rows are never touched.
+SEED_DB="$PARITY/storage/db/seed-pristine.sqlite3"
+LABELS="$PARITY/storage/db/labels.json"
+if [[ $RESEED -eq 1 || ! -f "$SEED_DB" || ! -f "$LABELS" ]]; then
+    step "building the parity seed (once-campfire-rust $RUST_SHA, parity/seeds/default.rb)"
+    rm -rf "$PARITY"
+    rsync -a --link-dest="$ORACLE/" --exclude='/storage/*' --exclude='/tmp/*' --exclude='/log/*' \
+        "$ORACLE/" "$PARITY/"
+    mkdir -p "$PARITY/storage/db" "$PARITY/storage/files" "$PARITY/tmp/pids" "$PARITY/log"
+    (cd "$PARITY" && SECRET_KEY_BASE="$KEY" RAILS_ENV=production DISABLE_SSL=1 \
+        bin/rails db:prepare >/dev/null) || die "db:prepare failed"
+    (cd "$PARITY" && SECRET_KEY_BASE="$KEY" RAILS_ENV=production DISABLE_SSL=1 \
+        bin/rails runner "$RUST/parity/seeds/build.rb" default >"$PARITY/log/seed.log" 2>&1) \
+        || { tail -20 "$PARITY/log/seed.log"; die "the seed failed"; }
+    cp "$PARITY/storage/db/production.sqlite3" "$SEED_DB"
+    rm -rf "$PARITY/storage/files-pristine"
+    cp -R "$PARITY/storage/files" "$PARITY/storage/files-pristine"
+    printf '{ "once_campfire_rust": "%s", "seed": "default" }\n' "$RUST_SHA" > "$PARITY/storage/db/seed.json"
+    ok "seed at $SEED_DB"
+fi
+
+stage_rails() {
+    cp "$SEED_DB" "$PARITY/storage/db/production.sqlite3"
+    rm -f "$PARITY/storage/db/production.sqlite3-wal" "$PARITY/storage/db/production.sqlite3-shm"
+    rm -rf "$PARITY/storage/files"; cp -R "$PARITY/storage/files-pristine" "$PARITY/storage/files"
+}
+
+# ── 2. the emit ───────────────────────────────────────────────────────
+ORACLE_PID=""
+EMIT_PID=""
+cleanup() {
+    [[ -n "$ORACLE_PID" ]] && kill "$ORACLE_PID" 2>/dev/null || true
+    [[ -n "$EMIT_PID" ]] && kill "$EMIT_PID" 2>/dev/null || true
+    wait 2>/dev/null || true
+    if [[ -n "${OUT:-}" && $KEEP -eq 0 && -z "$REUSE" ]]; then rm -rf "$OUT"; fi
+}
+trap cleanup EXIT INT TERM
+
+if [[ -n "$REUSE" ]]; then
+    OUT="$REUSE"
+    [[ -d "$OUT" ]] || die "no such emit: $OUT"
+    step "reusing emit at $OUT"
+else
+    OUT="$(mktemp -d -t roundhouse-campfire-http-shape.XXXXXX)"
+    step "transpiling $APP → $OUT (target: $LANE)"
+    rm -rf "$OUT"
+    (cd "$REPO_ROOT" && cargo run --quiet --release --bin roundhouse -- \
+        --target "$LANE" "$APP" -o "$OUT" --allow-unsupported) 2>"$OUT.log" | tail -1
+fi
+
+if [[ "$LANE" == ruby ]]; then
+    if ! grep -q enqueue_without_running "$OUT/config.ru"; then
+        # As in campfire-compare: the ruby lane runs perform_later inline.
+        python3 - "$OUT/config.ru" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+marker = "Main.configure_default_adapter!"
+assert marker in s, f"{p} has no adapter marker to splice after"
+open(p, "w").write(s.replace(marker, marker + "\nActiveJob.enqueue_without_running", 1))
+PY
+    fi
+else
+    spinel_link_path
+    if [[ ! -x "$OUT/build/blog" ]]; then
+        step "building the binary"
+        (cd "$OUT" && make build) >"$OUT/build.log" 2>&1 \
+            || { tail -20 "$OUT/build.log"; die "spinel build failed"; }
+    fi
+fi
+
+# Both lanes serve /assets from static/, which only `make assets` fills.
+if [[ ! -d "$OUT/static/assets" ]]; then
+    step "building assets"
+    (cd "$OUT" && make assets) >"$OUT/assets.log" 2>&1 \
+        || { tail -20 "$OUT/assets.log"; die "make assets failed"; }
+fi
+
+step "staging the seeded rows and blobs into the emit"
+mkdir -p "$OUT/storage"
+cp "$SEED_DB" "$OUT/storage/development.sqlite3"
+rm -f "$OUT/storage/development.sqlite3-wal" "$OUT/storage/development.sqlite3-shm"
+rm -rf "$OUT/storage/files"; cp -R "$PARITY/storage/files-pristine" "$OUT/storage/files"
+stage_rails
+
+# ── 3. boot both lanes ────────────────────────────────────────────────
+ORACLE_PORT=4190
+EMIT_PORT=4191
+# SessionsController rate-limits sign-in to 10 per 3 minutes, counted in
+# the Redis cache, and every run signs in three times (twice for the
+# self-check) — so back-to-back runs would read as a 429 from Rails.
+redis-cli --scan --pattern 'rate-limit:*' | while read -r k; do redis-cli del "$k" >/dev/null; done
+LOGS="$OUT-logs"
+rm -rf "$LOGS"; mkdir -p "$LOGS"
+
+step "booting the Rails oracle on :$ORACLE_PORT"
+SECRET_KEY_BASE="$KEY" "$REPO_ROOT/scripts/campfire-oracle" serve --out "$PARITY" --port "$ORACLE_PORT" \
+    > "$LOGS/oracle-server.log" 2>&1 &
+ORACLE_PID=$!
+
+step "booting the emit ($LANE) on :$EMIT_PORT"
+if [[ "$LANE" == spinel ]]; then
+    ( cd "$OUT" && BLOG_DB="$OUT/storage/development.sqlite3" PORT="$EMIT_PORT" \
+        SECRET_KEY_BASE="$KEY" exec ./build/blog ) > "$LOGS/emit-server.log" 2>&1 &
+else
+    ( cd "$OUT" && RAILS_ENV=development SECRET_KEY_BASE="$KEY" \
+        exec ruby -S puma -p "$EMIT_PORT" config.ru ) > "$LOGS/emit-server.log" 2>&1 &
+fi
+EMIT_PID=$!
+
+wait_up() {
+    local port="$1" pid="$2" log="$3"
+    for _ in $(seq 1 60); do
+        curl -so /dev/null "http://127.0.0.1:$port/" 2>/dev/null && return 0
+        kill -0 "$pid" 2>/dev/null || { tail -20 "$log"; return 1; }
+        sleep 1
+    done
+    tail -20 "$log"; return 1
+}
+wait_up "$ORACLE_PORT" "$ORACLE_PID" "$LOGS/oracle-server.log" || die "the oracle never came up"
+wait_up "$EMIT_PORT" "$EMIT_PID" "$LOGS/emit-server.log" || die "the emit never came up"
+
+# ── 4. the oracle against itself, then the emit ──────────────────────
+SWEEP=(python3 "$REPO_ROOT/scripts/campfire-http-shape.py" --labels "$LABELS")
+step "Rails vs Rails (must be zero)"
+"${SWEEP[@]}" "http://127.0.0.1:$ORACLE_PORT" "http://127.0.0.1:$ORACLE_PORT" > "$LOGS/self.txt" 2>&1 \
+    || { tail -30 "$LOGS/self.txt"; die "the oracle disagrees with itself — nothing below would mean anything"; }
+ok "oracle deterministic"
+
+step "Rails vs emit ($LANE)"
+set +e
+"${SWEEP[@]}" "${PASS[@]+"${PASS[@]}"}" "http://127.0.0.1:$ORACLE_PORT" "http://127.0.0.1:$EMIT_PORT" | tee "$LOGS/sweep.txt"
+STATUS=${PIPESTATUS[0]}
+set -e
+
+if [[ $KEEP -eq 1 || $STATUS -ne 0 ]]; then
+    echo "  emit at $OUT, logs at $LOGS"
+    KEEP=1
+else
+    rm -rf "$LOGS"
+fi
+exit $STATUS
