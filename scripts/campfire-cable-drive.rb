@@ -251,6 +251,11 @@ check("the manifest parses and names the app", manifest_name.is_a?(String) && !m
 puts "\n\e[1;34m==>\e[0m a direct room in the sidebar"
 direct = req("POST", "/rooms/directs", { "user_ids[]" => "2" })
 check("POST /rooms/directs", direct.code, "302")
+# `Rooms::Direct.find_for` searches `all` — the DIRECT rooms. Unscoped,
+# the open room 1 (whose members can be exactly these users) matched,
+# and starting a DM landed there instead of in a direct room.
+check("starting a DM does not land in the open room",
+      direct["location"].to_s.end_with?("/rooms/1"), false)
 sidebar = req("GET", "/users/me/sidebar")
 check("GET /users/me/sidebar with a direct room", sidebar.code, "200")
 
