@@ -1324,7 +1324,7 @@ impl Analyzer {
                 local_bindings,
                 constants: Default::default(),
                 annotate_self_dispatch: false,
-                in_view: false,
+                in_view: false, class_side: false,
             };
             self.body_typer().analyze_expr(&mut helper.body, &ctx);
         }
@@ -1532,7 +1532,7 @@ impl Analyzer {
                     local_bindings: HashMap::new(),
                     constants: shared.clone(),
                     annotate_self_dispatch: false,
-                    in_view: false,
+                    in_view: false, class_side: false,
                 };
                 let ty = typer.analyze_expr(value, &ctx);
                 if matches!(ty, Ty::Var { .. }) {
@@ -1722,7 +1722,7 @@ impl Analyzer {
                 ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
                 constants: global_constants.clone(),
-                annotate_self_dispatch: false, in_view: false,
+                annotate_self_dispatch: false, in_view: false, class_side: false,
             };
             for item in model.body.iter_mut() {
                 if let ModelBodyItem::Unknown { expr, .. } = item {
@@ -1737,7 +1737,7 @@ impl Analyzer {
                 ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
                 constants: class_constants.clone(),
-                annotate_self_dispatch: false, in_view: false,
+                annotate_self_dispatch: false, in_view: false, class_side: false,
             };
 
             // Pass A: type every method body with only `@attributes`
@@ -1789,7 +1789,7 @@ impl Analyzer {
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
                     constants: class_constants.clone(),
-                    annotate_self_dispatch: false, in_view: false,
+                    annotate_self_dispatch: false, in_view: false, class_side: false,
                 };
 
                 for scope in model.scopes_mut() {
@@ -1828,7 +1828,7 @@ impl Analyzer {
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 constants: global_constants.clone(),
-                annotate_self_dispatch: false, in_view: false,
+                annotate_self_dispatch: false, in_view: false, class_side: false,
             };
             for item in controller.body.iter_mut() {
                 if let ControllerBodyItem::Unknown { expr, .. } = item {
@@ -1845,7 +1845,7 @@ impl Analyzer {
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 constants: class_constants.clone(),
-                annotate_self_dispatch: false, in_view: false,
+                annotate_self_dispatch: false, in_view: false, class_side: false,
             };
 
             // Snapshot this controller's own segment of the filter chain
@@ -2299,7 +2299,7 @@ impl Analyzer {
                             ivar_bindings: seed,
                             local_bindings: HashMap::new(),
                             constants: meta.class_constants.clone(),
-                            annotate_self_dispatch: false, in_view: false,
+                            annotate_self_dispatch: false, in_view: false, class_side: false,
                         };
                         // Seed helper-method params from the inferred-params
                         // table too, so `period(query)`'s body resolves on
@@ -2786,7 +2786,7 @@ impl Analyzer {
                         local_bindings: HashMap::new(),
                         constants: class_constants.clone(),
                         annotate_self_dispatch: false,
-                        in_view: false,
+                        in_view: false, class_side: false,
                     };
                     let origin = app
                         .concern_spliced_actions
@@ -2925,7 +2925,7 @@ impl Analyzer {
                 self_ty: Some(Ty::Class { id: self_id, args: vec![] }),
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
-                constants: Default::default(), annotate_self_dispatch: false, in_view: false,
+                constants: Default::default(), annotate_self_dispatch: false, in_view: false, class_side: false,
             };
 
             for initializer in &mut lc.class_ivar_initializers {
@@ -3057,7 +3057,7 @@ impl Analyzer {
                     self_ty: class_ctx.self_ty.clone(),
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
-                    constants: Default::default(), annotate_self_dispatch: false, in_view: false,
+                    constants: Default::default(), annotate_self_dispatch: false, in_view: false, class_side: false,
                 };
                 for method in &mut lc.methods {
                     let mctx = self.seed_method_params(&reseeded_ctx, &lc_name, method);
@@ -3405,6 +3405,7 @@ impl Analyzer {
         let key = (class_id.clone(), method.name.clone());
         let observed = self.inferred_params.get(&key);
         let mut ctx = base.clone();
+        ctx.class_side = matches!(method.receiver, crate::dialect::MethodReceiver::Class);
         for (i, param) in method.params.iter().enumerate() {
             let from_sites = observed.and_then(|v| v.get(i)).cloned();
             let seeded = param_ty_with_default(from_sites, param);
