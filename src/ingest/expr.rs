@@ -288,7 +288,15 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         }
         n if n.as_constant_path_node().is_some() => {
             let p = n.as_constant_path_node().unwrap();
-            ExprNode::Const { path: constant_path_segments(&p) }
+            // `::StatsD` names the top-level constant from anywhere; an empty
+            // first segment keeps that through passes that qualify a bare
+            // name into its enclosing namespace (`qualify_lexical_consts`
+            // made it `BackgroundQueue::StatsD`) and emits as `::StatsD`.
+            let mut path = constant_path_segments(&p);
+            if p.parent().is_none() {
+                path.insert(0, Symbol::from(""));
+            }
+            ExprNode::Const { path }
         }
         n if n.as_call_node().is_some() => {
             let c = n.as_call_node().unwrap();
