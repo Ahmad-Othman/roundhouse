@@ -181,7 +181,7 @@ fn receiver(target: &str) -> std::borrow::Cow<'_, str> {
         "case", "class", "def", "defined?", "do", "else", "elsif", "END", "end", "ensure",
         "false", "for", "if", "in", "module", "next", "nil", "not", "or", "redo", "rescue",
         "retry", "return", "self", "super", "then", "true", "undef", "unless", "until", "when",
-        "while", "yield", "_", "arg", "args", "block",
+        "while", "yield", "_", "arg", "args", "block", "value", "key", "other", "__delegate_target",
     ];
     if RESERVED.contains(&target) {
         format!("self.{target}").into()
@@ -194,20 +194,17 @@ fn receiver(target: &str) -> std::borrow::Cow<'_, str> {
 /// :@hash` — a collection wrapper's usual shape), or `None` for an
 /// ordinary name. Unary operators (`!`, `-@`) forward as zero-arg sends
 /// like any reader and are not listed.
-fn operator_forwarder(name: &str, t: &str, m: &str) -> Option<String> {
+fn operator_forwarder(t: &str, m: &str) -> Option<(&'static str, String)> {
     const BINARY: &[&str] = &[
-        "==", "!=", "<", ">", "<=", ">=", "<=>", "===", "=~", "+", "-", "*", "/", "%", "**",
+        "==", "!=", "<", ">", "<=", ">=", "<=>", "===", "=~", "!~", "+", "-", "*", "/", "%", "**",
         "<<", ">>", "&", "|", "^",
     ];
-    let body = match m {
-        "[]" => return Some(format!("  def {name}(key)\n    {t}[key]\n  end\n\n")),
-        "[]=" => {
-            return Some(format!("  def {name}(key, value)\n    {t}[key] = value\n  end\n\n"));
-        }
-        op if BINARY.contains(&op) => format!("{t} {op} other"),
-        _ => return None,
-    };
-    Some(format!("  def {name}(other)\n    {body}\n  end\n\n"))
+    match m {
+        "[]" => Some(("key", format!("{t}[key]"))),
+        "[]=" => Some(("key, value", format!("{t}[key] = value"))),
+        op if BINARY.contains(&op) => Some(("other", format!("{t} {op} other"))),
+        _ => None,
+    }
 }
 
 fn synthesized_source(lc: &LibraryClass, delegates: &[Delegation]) -> String {
@@ -221,28 +218,35 @@ fn synthesized_source(lc: &LibraryClass, delegates: &[Delegation]) -> String {
         if defines(&d.name) {
             continue;
         }
-        let (t, m) = (receiver(d.target.as_str()), d.method.as_str());
-        // Operators have a fixed arity, so they forward exactly — no
-        // `*args` needed. Checked first: `==`, `<=` and `[]=` end in
-        // `=` without being writers.
-        if let Some(def) = operator_forwarder(&d.name, &t, m) {
-            body.push_str(&def);
+        let (target, m) = (receiver(d.target.as_str()), d.method.as_str());
+        let t = if d.allow_nil { "__delegate_target" } else { &target };
+        let (params, call) = if let Some(forwarder) = operator_forwarder(t, m) {
+            forwarder
         } else if let Some(attr) = m.strip_suffix('=') {
-            // A writer (`delegate :id, :id=, to: :class`) takes the value
-            // it forwards; Rails' `allow_nil` guards it the same way.
-            let guard = if d.allow_nil { format!("return if {t}.nil?\n    ") } else { String::new() };
-            body.push_str(&format!(
-                "  def {}(value)\n    {guard}{t}.{attr} = value\n  end\n\n",
-                d.name
-            ));
-        } else if d.allow_nil {
-            // A ternary, not `return nil if …`: it leaves the method
-            // ending in a read, which is what the strict targets want
-            // of a non-void body.
-            body.push_str(&format!("  def {}\n    {t}.nil? ? nil : {t}.{m}\n  end\n\n", d.name));
+            ("value", format!("{t}.{attr} = value"))
         } else {
-            body.push_str(&format!("  def {}\n    {t}.{m}\n  end\n\n", d.name));
-        }
+            ("", format!("{t}.{m}"))
+        };
+        let signature = if params.is_empty() {
+            d.name.clone()
+        } else {
+            format!("{}({params})", d.name)
+        };
+        // Rails evaluates the receiver once. Nil's own operators still run
+        // under allow_nil (for example `nil == other` returns a Boolean).
+        let nil_operator = matches!(m, "==" | "!=" | "===" | "=~" | "!~" | "&" | "|" | "^" | "!");
+        let call = if d.allow_nil {
+            let result = if nil_operator {
+                call
+            } else {
+                format!("if {t}.nil?\n      nil\n    else\n      {call}\n    end")
+            };
+            format!("{t} = {target}\n    {result}")
+        } else {
+            call
+        };
+        body.push_str(&format!("  def {signature}\n    {call}\n  end\n\n"));
+
     }
     // The class name is irrelevant — only the METHODS are lifted out of
     // the parse — but a wrapper is needed for the bodies to be methods.
