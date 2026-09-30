@@ -60,12 +60,26 @@ fn assert_unbound(files: HashMap<PathBuf, Vec<u8>>) {
 fn a_literal_table_name_overrides_convention_and_namespace_prefix() {
     for source in [
         "class Item < ApplicationRecord\n  self.table_name = \"legacy_entries\"\nend\n",
+        "class Item < ApplicationRecord\n  self.table_name = :legacy_entries\nend\n",
+        r#"class Item < ApplicationRecord
+  self.table_name = :"legacy\x5fentries"
+end
+"#,
         r#"module Archive
   def self.table_name_prefix
     "archive_"
   end
   class Item < ApplicationRecord
     self.table_name = "legacy_entries"
+  end
+end
+"#,
+        r#"module Archive
+  def self.table_name_prefix
+    "archive_"
+  end
+  class Item < ApplicationRecord
+    self.table_name = :legacy_entries
   end
 end
 "#,
@@ -112,9 +126,11 @@ fn unsupported_table_writes_are_ledgered_instead_of_guessed() {
         "self.table_name = ENV.fetch(\"TABLE\")",
         "self.table_name = nil",
         "self.table_name = \"legacy_#{suffix}\"",
-        "self.table_name = :legacy_entries",
+        "self.table_name = :\"legacy_#{suffix}\"",
+        "self.table_name = :\"public.legacy_entries\"",
         "self.table_name = \"public.legacy_entries\"",
         "self.table_name = \"legacy_entries\"\nself.table_name = \"other_entries\"",
+        "self.table_name = :legacy_entries\nself.table_name = :other_entries",
         "self.table_name = \"legacy_entries\"\nself.table_name = ENV.fetch(\"TABLE\")",
         "self.table_name ||= \"legacy_entries\"",
         "self.table_name &&= \"legacy_entries\"",
@@ -161,14 +177,17 @@ fn table_names_that_need_sql_quoting_are_ledgered() {
         "123_entries",
         "",
     ] {
-        let source = format!("class Item < ApplicationRecord\n  self.table_name = {name:?}\nend\n");
-        let schema = format!(
-            "ActiveRecord::Schema.define(version: 1) do\n  create_table {name:?} do |t|\n    t.string \"label\"\n  end\nend\n"
-        );
-        let mut files = tree(&source);
-        files.insert(PathBuf::from("db/schema.rb"), schema.into_bytes());
-        assert_unbound(files);
+        for literal in [format!("{name:?}"), format!(":{name:?}")] {
+            let source = format!("class Item < ApplicationRecord\n  self.table_name = {literal}\nend\n");
+            let schema = format!(
+                "ActiveRecord::Schema.define(version: 1) do\n  create_table {name:?} do |t|\n    t.string \"label\"\n  end\nend\n"
+            );
+            let mut files = tree(&source);
+            files.insert(PathBuf::from("db/schema.rb"), schema.into_bytes());
+            assert_unbound(files);
+        }
     }
+    assert_unbound(tree("class Item < ApplicationRecord\n  self.table_name = :\"ord\\u0065r\"\nend\n"));
 }
 
 #[test]

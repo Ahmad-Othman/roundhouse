@@ -878,7 +878,8 @@ fn method_ref_block_arg_runs() {
 
 /// A literal table override must reach the emitted row readers and SQL,
 /// not merely quiet the analyzer. Two differently named models share the
-/// real articles table; writes through either must be visible to Article.
+/// real articles table via string/symbol declarations; writes through either
+/// must be visible to Article, without touching convention-derived decoys.
 #[test]
 fn explicit_model_table_names_run_against_the_declared_table() {
     emit_and_run::real_blog()
@@ -906,7 +907,7 @@ fn explicit_model_table_names_run_against_the_declared_table() {
     "ledger_"
   end
   class Entry < ApplicationRecord
-    self.table_name = "articles"
+    self.table_name = :"art\x69cles"
   end
 end
 "#,
@@ -932,6 +933,12 @@ entry.update!(title: "Changed")
 raise unless Article.find(record.id).title == "Changed"
 entry.destroy!
 raise unless Article.find_by(id: record.id).nil?
+symbol_record = Ledger::Entry.create!(title: "Symbol-created", body: "A long enough body")
+raise unless Article.find(symbol_record.id).title == "Symbol-created"
+ArchivedArticle.find(symbol_record.id).update!(title: "String-updated")
+raise unless Ledger::Entry.find(symbol_record.id).title == "String-updated"
+Ledger::Entry.find(symbol_record.id).destroy!
+raise unless Article.find_by(id: symbol_record.id).nil?
 raise unless Decoy::ArchivedArticle.count == 1
 raise unless Decoy::ArchivedArticle.find(decoy.id).title == "Conventional decoy"
 raise unless LedgerEntry.count == 1

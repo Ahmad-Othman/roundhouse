@@ -17,7 +17,8 @@ use crate::{ClassId, Symbol, TableRef};
 use super::expr::ingest_expr;
 use super::util::{
     class_name_path, collect_comments, constant_id_str, constant_path_of, drain_comments_before,
-    find_first_class, flatten_statements, source_has_blank_line, string_value, symbol_value,
+    find_first_class, flatten_statements, source_has_blank_line, string_value, symbol_or_string_value,
+    symbol_value,
 };
 use super::{IngestError, IngestResult};
 
@@ -1901,7 +1902,7 @@ fn parse_primary_key_decl(stmt: &Node<'_>) -> Option<Symbol> {
     Some(Symbol::from(name.as_str()))
 }
 
-/// Bind one direct `self.table_name = "table"` before reading the schema.
+/// Bind one direct literal string/symbol `self.table_name` before reading the schema.
 /// Scan the selected class's executable body first: a conditional, compound
 /// or subsequent write must not leave a plausible but incorrect row bound.
 /// Method and nested namespace bodies are separate scopes; their headers
@@ -1922,7 +1923,7 @@ fn parse_table_name_decl(body: Node<'_>, file: &str) -> IngestResult<Option<(Str
                 let name = valid.then_some(())
                     .and_then(|_| call.arguments())
                     .filter(|args| args.arguments().len() == 1)
-                    .and_then(|args| string_value(&args.arguments().iter().next()?))
+                    .and_then(|args| symbol_or_string_value(&args.arguments().iter().next()?))
                     // Shared DDL/DML currently emits bare table names.
                     // Refuse names needing qualification or SQL quoting.
                     .filter(|name| {
@@ -1972,7 +1973,7 @@ fn parse_table_name_decl(body: Node<'_>, file: &str) -> IngestResult<Option<(Str
     } else {
         Err(IngestError::Unsupported {
             file: file.into(),
-            message: "table_name binding requires one direct self.table_name assignment to a literal string naming a safe bare SQL identifier".into(),
+            message: "table_name binding requires one direct self.table_name assignment to a literal string or symbol naming a safe bare SQL identifier".into(),
         })
     }
 }
