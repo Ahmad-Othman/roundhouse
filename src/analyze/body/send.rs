@@ -305,6 +305,9 @@ impl<'a> BodyTyper<'a> {
                 "transform_keys" => Some(vec![(**key).clone()]),
                 _ => None,
             },
+            Ty::Class { id, .. } if id.0.as_str() == "CSV" && method.as_str() == "generate" => {
+                Some(vec![recv_ty.clone()])
+            }
             // ActiveModel::Errors iteration yields an Error to the block.
             Ty::Class { id, .. } if id.0.as_str() == "ActiveModel::Errors" => {
                 match method.as_str() {

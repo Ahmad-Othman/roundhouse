@@ -329,3 +329,35 @@ fn a_partial_reading_a_reserved_word_local_assign_runs() {
     );
     run.assert_passes();
 }
+
+/// Not handed to the csv gem's `headers:`: the lowering writes the header row itself, so the output is held to what CSV.generate answers.
+#[test]
+fn csv_generate_with_written_headers_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r##"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def csv_probe
+    CSV.generate(headers: ["id", "title"], write_headers: true) do |csv|
+      csv << [1, "x"]
+      csv << [2, "y,z"]
+    end
+  end"##,
+        )
+        .write(
+            "test/models/article_csv_test.rb",
+            r#"require "test_helper"
+
+class ArticleCsvTest < ActiveSupport::TestCase
+  test "CSV.generate writes its headers as the first row" do
+    assert_equal "id,title\n1,x\n2,\"y,z\"\n", Article.new.csv_probe
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_csv_test.rb")
+        .assert_passes();
+}

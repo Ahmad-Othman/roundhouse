@@ -49,6 +49,7 @@ pub mod enumerable_ext;
 pub mod time_calendar;
 pub mod where_range_split;
 pub mod params_merge;
+pub mod csv_generate;
 pub mod duration;
 pub mod and_return;
 pub mod case_lambda;
@@ -317,6 +318,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `value.presence_in(list)` → `ActiveSupport.presence_in(value,
     // list)`; a receiver-shape rewrite of a name no other pass produces
     // or consumes, so no ordering constraints.
+    // No runs_after: it rewrites a `CSV.generate` call's own arguments and block.
+    ("csv_generate", &[]),
     ("presence_in", &[]),
     // `list.index_by { … }` → `ActiveSupport.index_by(list) { … }`.
     // Same receiver-shape rewrite, same absence of constraints.
@@ -722,6 +725,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("random_formatter");
     to_json::apply_to_json_lowering(app);
     ran!("to_json");
+    csv_generate::apply_csv_generate_lowering(app);
+    ran!("csv_generate");
     presence_in::apply_presence_in_grounding(app);
     ran!("presence_in");
     enumerable_ext::apply_enumerable_ext_grounding(app);
