@@ -2970,10 +2970,19 @@ sanitizer — what swapping in spinel-loofah under rails-html-sanitizer
 is for. The 344 are roundhouse's compilation of campfire's pipeline,
 whatever sanitizer runs under it; by cluster:
 
-- **A bare `<` truncates the message.** `1 < 2 && 3 > 2` renders `1 `:
-  the body parser takes a `<` that opens no tag as the end of the text,
-  where HTML5 reads it as text. Any chat message with a `<` in it loses
-  the rest.
+- **A bare `<` truncated the message — FIXED 2026-09-30.** `1 < 2 && 3
+  > 2` rendered `1 `: Action Text's scanners (`next_element`,
+  `element_end`, `to_plain_text`, `scan_tags`) took any `<` for a tag,
+  and SanitizeTags removed `< 2 && 3 >` and everything after it. They
+  now ask `ActionView::ViewHelpers.tag_open_at?`, HTML5's tag-open rule
+  the sanitizer engine already used — corrected on the way for `</` +
+  non-letter, which is a bogus comment the tokenizer drops, not text.
+  Presentation DOM after: ruby 212 / 251 / 304, spinel 199 / 212 / 253;
+  plain text ruby 210 / 108 / 274. Two fuzz cases (278, 349) that
+  passed by accident — the misread `<` swallowed what Rails' tree
+  builder drops — fail now, exposing the real gap: the fragment scanner
+  is not an HTML5 tree builder (an unclosed `<textarea>` is RCDATA to
+  the end; table content foster-parents out of `<form>`).
 - **Trix figures** (`<figure data-trix-attachment=…>`, what older
   installs stored) are not converted: a mention inside one renders as
   its name, an image not at all.
