@@ -189,15 +189,6 @@ fn take_delegate_decls(lc: &mut LibraryClass) -> Vec<Delegation> {
         if unknown_option || names.is_empty() {
             return true;
         }
-        // `[]=` takes two arguments (key, value) — the one shape a
-        // trailing `=` does NOT mean "single-value setter" for. Rails
-        // excludes it from the writer-arity rule for the same reason;
-        // this pass has no argument forwarding (see the module
-        // header), so it declines the whole declaration rather than
-        // synthesize a one-arg forwarder for a two-arg method.
-        if names.iter().any(|n| n.as_str() == "[]=") {
-            return true;
-        }
         // Arguments at a call site mean the forwarder needs to forward
         // them — see the module header. A setter is exempt: Ruby's own
         // assignment syntax fixes its arity at exactly one, so
@@ -243,6 +234,42 @@ fn collect_calls_with_args(expr: &Expr, out: &mut std::collections::HashSet<Stri
 /// The forwarders, as Ruby source — parsed back through ingest so the
 /// generated bodies are ordinary IR, indistinguishable from a method
 /// the app wrote. Same construction `current_attributes` uses.
+/// The receiver Rails writes for `to:`: `self.<to>` when the name is a
+/// Ruby keyword (`to: :class`, a model's `return` association) or one of
+/// the names its generated method uses itself, the name otherwise
+/// (`DELEGATION_RESERVED_METHOD_NAMES` in active_support/delegation.rb).
+fn receiver(target: &str) -> std::borrow::Cow<'_, str> {
+    const RESERVED: &[&str] = &[
+        "__ENCODING__", "__LINE__", "__FILE__", "alias", "and", "BEGIN", "begin", "break",
+        "case", "class", "def", "defined?", "do", "else", "elsif", "END", "end", "ensure",
+        "false", "for", "if", "in", "module", "next", "nil", "not", "or", "redo", "rescue",
+        "retry", "return", "self", "super", "then", "true", "undef", "unless", "until", "when",
+        "while", "yield", "_", "arg", "args", "block", "value", "key", "other", "__delegate_target",
+    ];
+    if RESERVED.contains(&target) {
+        format!("self.{target}").into()
+    } else {
+        target.into()
+    }
+}
+
+/// The forwarder for an operator method (`delegate :[], :<<, :==, to:
+/// :@hash` — a collection wrapper's usual shape), or `None` for an
+/// ordinary name. Unary operators (`!`, `-@`) forward as zero-arg sends
+/// like any reader and are not listed.
+fn operator_forwarder(t: &str, m: &str) -> Option<(&'static str, String)> {
+    const BINARY: &[&str] = &[
+        "==", "!=", "<", ">", "<=", ">=", "<=>", "===", "=~", "!~", "+", "-", "*", "/", "%", "**",
+        "<<", ">>", "&", "|", "^",
+    ];
+    match m {
+        "[]" => Some(("key", format!("{t}[key]"))),
+        "[]=" => Some(("key, value", format!("{t}[key] = value"))),
+        op if BINARY.contains(&op) => Some(("other", format!("{t} {op} other"))),
+        _ => None,
+    }
+}
+
 fn synthesized_source(lc: &LibraryClass, delegates: &[Delegation]) -> String {
     let defines = |name: &str| {
         lc.methods
@@ -254,33 +281,39 @@ fn synthesized_source(lc: &LibraryClass, delegates: &[Delegation]) -> String {
         if defines(&d.name) {
             continue;
         }
-        let (t, m) = (d.target.as_str(), d.method.as_str());
-        if let Some(setter) = m.strip_suffix('=') {
-            // Rails forwards a setter with the one argument its own
-            // `def name=(arg)` shape always takes — `delegate :name=`
-            // (and, with `prefix: true`, `d.name` is already
-            // `<prefix>_name=`) needs no argument forwarding the way a
-            // plain method might: assignment syntax fixes the arity.
-            if d.allow_nil {
-                // Parenthesized so the assignment, not the ternary,
-                // binds first — same "ends in a read" shape the getter
-                // ternary below keeps, since an assignment expression
-                // is itself a read of the value it just stored.
-                body.push_str(&format!(
-                    "  def {}(value)\n    {t}.nil? ? nil : ({t}.{setter} = value)\n  end\n\n",
-                    d.name
-                ));
-            } else {
-                body.push_str(&format!("  def {}(value)\n    {t}.{setter} = value\n  end\n\n", d.name));
-            }
-        } else if d.allow_nil {
-            // A ternary, not `return nil if …`: it leaves the method
-            // ending in a read, which is what the strict targets want
-            // of a non-void body.
-            body.push_str(&format!("  def {}\n    {t}.nil? ? nil : {t}.{m}\n  end\n\n", d.name));
+        let (target, m) = (receiver(d.target.as_str()), d.method.as_str());
+        let t = if d.allow_nil { "__delegate_target" } else { &target };
+        // A setter takes the one argument Ruby's own assignment syntax
+        // supplies (with `prefix: true`, `d.name` is already
+        // `<prefix>_name=`); an operator takes its fixed operands.
+        let (params, call) = if let Some(forwarder) = operator_forwarder(t, m) {
+            forwarder
+        } else if let Some(attr) = m.strip_suffix('=') {
+            ("value", format!("{t}.{attr} = value"))
         } else {
-            body.push_str(&format!("  def {}\n    {t}.{m}\n  end\n\n", d.name));
-        }
+            ("", format!("{t}.{m}"))
+        };
+        let signature = if params.is_empty() {
+            d.name.clone()
+        } else {
+            format!("{}({params})", d.name)
+        };
+        // Rails evaluates the receiver once. Nil's own operators still run
+        // under allow_nil (for example `nil == other` returns a Boolean).
+        // An `if`, not `return nil if …`: it leaves the method ending in a
+        // read, which is what the strict targets want of a non-void body.
+        let nil_operator = matches!(m, "==" | "!=" | "===" | "=~" | "!~" | "&" | "|" | "^" | "!");
+        let call = if d.allow_nil {
+            let result = if nil_operator {
+                call
+            } else {
+                format!("if {t}.nil?\n      nil\n    else\n      {call}\n    end")
+            };
+            format!("{t} = {target}\n    {result}")
+        } else {
+            call
+        };
+        body.push_str(&format!("  def {signature}\n    {call}\n  end\n\n"));
     }
     // The class name is irrelevant — only the METHODS are lifted out of
     // the parse — but a wrapper is needed for the bodies to be methods.
@@ -354,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn allow_nil_setter_stays_a_ternary_that_ends_in_a_read() {
+    fn allow_nil_setter_ends_in_a_nil_guard() {
         let mut lc = library_class(
             "class Deprecation\n  attr_accessor :deprecator\n\n  delegate :behavior=, to: :deprecator, allow_nil: true\nend\n",
         );
@@ -368,28 +401,34 @@ mod tests {
             .find(|m| m.name.as_str() == "behavior=")
             .expect("allow_nil setter should still be synthesized");
         assert_eq!(setter.params.len(), 1);
-        // The body is a Ternary (an `If` in this IR's expression form)
-        // rather than a bare Assign — the same "ends in a read" shape
-        // the getter's own allow_nil branch keeps.
+        // The receiver is read once into a local, then a nil guard (an
+        // `If`) rather than a bare Assign ends the body — the same "ends
+        // in a read" shape the getter's own allow_nil branch keeps.
+        let ExprNode::Seq { exprs } = &*setter.body.node else {
+            panic!("expected receiver-then-guard, got {:?}", setter.body.node)
+        };
         assert!(
-            matches!(&*setter.body.node, ExprNode::If { .. }),
-            "expected the allow_nil ternary shape, got {:?}",
+            matches!(exprs.last().map(|e| &*e.node), Some(ExprNode::If { .. })),
+            "expected the allow_nil guard to end the body, got {:?}",
             setter.body.node
         );
     }
 
     #[test]
-    fn bracket_assign_is_declined_not_half_synthesized() {
-        // `[]=` takes two arguments (key, value); this pass forwards
-        // none, so a one-arg forwarder for it would be a silent arity
-        // bug standing in for a working delegate — worse than leaving
-        // it undelegated and visible.
+    fn bracket_assign_forwards_both_operands() {
+        // `[]=` ends in `=` without being a one-value writer: it takes
+        // (key, value), and forwards both.
         let mut lc = library_class(
             "class Store\n  attr_accessor :backing\n\n  delegate :[]=, to: :backing\nend\n",
         );
         let delegates = take_delegate_decls(&mut lc);
-        assert!(delegates.is_empty(), "[]= should stay undelegated: {delegates:?}");
-        assert_eq!(lc.unknown_calls.len(), 1, "the declaration stays visible rather than half-expanded");
+        assert_eq!(delegates.len(), 1);
+        let methods = synthesized_methods(&lc, &delegates);
+        let setter = methods
+            .iter()
+            .find(|m| m.name.as_str() == "[]=")
+            .expect("[]= should be synthesized");
+        assert_eq!(setter.params.len(), 2, "[]= forwards its key and its value");
     }
 
     /// Ordinary Ruby can't actually produce a `Send { recv: None,
