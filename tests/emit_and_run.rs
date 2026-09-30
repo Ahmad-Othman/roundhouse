@@ -980,3 +980,45 @@ end
         .run_test("test/models/article_inherited_scope_test.rb")
         .assert_passes();
 }
+
+/// Not `"published".to_i`: an enum column assigned a label at run time stores the label's value, as Rails does.
+#[test]
+fn an_enum_label_assigned_at_run_time_stores_its_value() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"state\", default: 0",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  enum :state, { draft: 0, published: 1 }",
+        )
+        .write(
+            "test/models/article_enum_label_test.rb",
+            r#"require "test_helper"
+
+class ArticleEnumLabelTest < ActiveSupport::TestCase
+  test "a label reaching the setter, update or []= stores its value" do
+    labels = ["published", "draft"]
+    article = articles(:one)
+
+    article.state = labels[0]
+    article.save!
+    assert Article.find(article.id).published?
+
+    article.update(state: labels[1])
+    assert Article.find(article.id).draft?
+
+    article[:state] = labels[0]
+    article.save!
+    assert Article.find(article.id).published?
+    assert_equal 0, Article.where(state: :draft).where(id: article.id).count
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_enum_label_test.rb")
+        .assert_passes();
+}
