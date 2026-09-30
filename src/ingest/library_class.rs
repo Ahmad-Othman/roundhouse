@@ -1390,6 +1390,23 @@ fn walk_decl_body<'pr>(
                             }
                         }
                     }
+                    // `alias_method :eql?, :==` copies the method as it
+                    // stands, so a copy of the def already walked is
+                    // exact (a later redefinition of the original does
+                    // not reach the alias in Ruby either). Shopify core
+                    // has dozens; dropped, every call to the alias was a
+                    // NoMethodError. One naming a method this body does
+                    // not define (an inherited or gem method) is still
+                    // captured below.
+                    "alias_method"
+                        if alias_source(&call, &methods, force_class_receiver).is_some() =>
+                    {
+                        let (to, source) =
+                            alias_source(&call, &methods, force_class_receiver).unwrap();
+                        let mut copy = methods[source].clone();
+                        copy.name = Symbol::from(to.as_str());
+                        methods.push(copy);
+                    }
                     // `extend self` — the OTHER spelling of the same
                     // idea, and the one campfire's
                     // `RestrictedHTTP::PrivateNetworkGuard` uses. Ruby
@@ -1580,6 +1597,24 @@ fn normalize_classvars_to_ivars(e: &mut Expr) {
             e.node.for_each_child_mut(&mut |c| normalize_classvars_to_ivars(c));
         }
     }
+}
+
+/// For `alias_method :new, :old`: the new name, and the index of the
+/// last `old` already walked on the same side (instance, or class inside
+/// `class << self`). None when either name is not a literal symbol or
+/// the body has not defined `old`.
+fn alias_source(
+    call: &ruby_prism::CallNode<'_>,
+    methods: &[MethodDef],
+    class_side: bool,
+) -> Option<(String, usize)> {
+    let args: Vec<String> =
+        call.arguments()?.arguments().iter().filter_map(|a| symbol_value(&a)).collect();
+    let [to, from] = args.as_slice() else { return None };
+    let receiver = if class_side { MethodReceiver::Class } else { MethodReceiver::Instance };
+    let source =
+        methods.iter().rposition(|m| m.name.as_str() == from.as_str() && m.receiver == receiver)?;
+    Some((to.clone(), source))
 }
 
 /// Synthesize `def <name>; @<name>; end` (instance receiver) or
@@ -1803,16 +1838,25 @@ pub(super) fn ingest_library_method(
                         // campfire's `avatar_tag(user, **options)` is
                         // called with one argument from the message row,
                         // the user list and the sidebar.
-                        // Not beside a positional `*rest`: there the caller's
-                        // keywords already land in the rest, and the slot is
-                        // dropped on purpose (tests/initializer_defined_constants).
-                        if keeps_keywords && !params.iter().any(|p| p.rest && !p.keyword) {
+                        let beside_positional_rest = params.iter().any(|p| p.rest && !p.keyword);
+                        if keeps_keywords && !beside_positional_rest {
                             // The keyword group is kept in this def, so
                             // `**rest` stays a keyword-rest: flattened to
                             // `rest = {}` after a `name:` it does not parse
                             // (`def call(server_context:, arguments = {})`).
                             let mut p = Param::keyword(Symbol::from(s), None);
                             p.rest = true;
+                            params.push(p);
+                        } else if beside_positional_rest {
+                            // Beside a positional `*rest` the caller's
+                            // keywords already land in the rest, so the
+                            // slot is marked and dropped below unless the
+                            // body reads it (tests/initializer_defined_constants).
+                            // When it is read, `(*args, opts = {})` does
+                            // not parse, so it stays a real `**kwrest`.
+                            let mut p = Param::keyword(Symbol::from(s), None);
+                            p.rest = true;
+                            p.from_kwrest = true;
                             params.push(p);
                         } else {
                             let mut p = Param::with_default(
@@ -1855,8 +1899,8 @@ pub(super) fn ingest_library_method(
     // land in it as a trailing Hash, so when the body never reads the
     // kwrest the slot carries nothing and is dropped. Lobsters'
     // `Telebugs` no-ops (`def self.user *args, **kwargs; end`) are the
-    // shape. A body that does read it keeps the slot (and the parse
-    // error) until Param can say "kwrest".
+    // shape. A body that does read it keeps the slot, as a real
+    // `**kwrest` (see above).
     if params.iter().any(|p| p.rest) {
         params.retain(|p| !p.from_kwrest || expr_reads_local(&body, &p.name));
     }

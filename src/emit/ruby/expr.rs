@@ -181,6 +181,23 @@ fn emit_node(n: &ExprNode) -> String {
         // `target += value`, etc. Preserves source short-circuit
         // semantics (and Rails dirty-tracking on `||=`).
         ExprNode::OpAssign { target, op, value } => {
+            // `ENV[k] ||= v`: spinel models ENV only as a call receiver,
+            // and an op-assign target reads it as a value. Expand to the
+            // read-then-write Ruby defines it as.
+            if let LValue::Index { recv, index } = target {
+                // Only duplicate a literal key. A computed key must retain
+                // Ruby's native single-evaluation compound assignment.
+                if matches!(&*index.node, ExprNode::Lit { value: Literal::Str { .. } })
+                    && matches!(&*recv.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "ENV") {
+                    let k = emit_expr(index);
+                    let v = emit_expr(value);
+                    let infix = op.as_ruby().trim_end_matches('=');
+                    return match infix {
+                        "||" | "&&" => format!("(ENV[{k}] {infix} (ENV[{k}] = {v}))"),
+                        _ => format!("ENV[{k}] = ENV[{k}] {infix} {v}"),
+                    };
+                }
+            }
             // Attr-target arithmetic compounds (`node.string_content +=
             // user`) desugar to read-op-write: spinel AOT rejects the
             // compound form on a method attr, and arithmetic ops have no
@@ -209,7 +226,8 @@ fn emit_node(n: &ExprNode) -> String {
         }
         ExprNode::Yield { args } => {
             let args_s: Vec<String> = args.iter().map(emit_arg).collect();
-            if args_s.is_empty() { "yield".to_string() } else { format!("yield {}", args_s.join(", ")) }
+            // Parenthesized: `html << yield x` does not parse bare.
+            if args_s.is_empty() { "yield".to_string() } else { format!("yield({})", args_s.join(", ")) }
         }
         ExprNode::Raise { value } => format!("raise {}", emit_expr(value)),
         ExprNode::RescueModifier { expr, fallback } => {
@@ -228,7 +246,7 @@ fn emit_node(n: &ExprNode) -> String {
                 // syntax error. Parenthesize the value.
                 format!("return ({})", emit_expr(value))
             } else {
-                format!("return {}", emit_expr(value))
+                format!("return {}", paren_multiline(emit_expr(value)))
             }
         }
         ExprNode::Super { args } => match args {
@@ -240,11 +258,11 @@ fn emit_node(n: &ExprNode) -> String {
         },
         ExprNode::Next { value } => match value {
             None => "next".to_string(),
-            Some(v) => format!("next {}", emit_expr(v)),
+            Some(v) => format!("next {}", paren_multiline(emit_expr(v))),
         },
         ExprNode::Break { value } => match value {
             None => "break".to_string(),
-            Some(v) => format!("break {}", emit_expr(v)),
+            Some(v) => format!("break {}", paren_multiline(emit_expr(v))),
         },
         ExprNode::Retry => "retry".to_string(),
         ExprNode::Redo => "redo".to_string(),
@@ -985,7 +1003,12 @@ pub(super) fn emit_send_base(
         // parens even at equal precedence).
         (Some(r), op) if is_binary_operator(op) && args_s.len() == 1 => {
             let prec = binop_prec(op);
-            let lhs = if binop_of(r).is_some_and(|o| binop_prec(o) < prec) {
+            // Equality/comparison operators are non-associative in Ruby:
+            // `a <=> b == 0` does not parse, so an equal-precedence left
+            // operand needs parens too.
+            let lhs = if binop_of(r).is_some_and(|o| {
+                binop_prec(o) < prec || (prec == 30 && binop_prec(o) == 30)
+            }) {
                 format!("({})", emit_expr(r))
             } else {
                 emit_expr(r)
@@ -1217,6 +1240,40 @@ fn emit_do_form(base: &str, params_str: &str, body_str: &str) -> String {
     }
 }
 
+/// A multi-line value (`if … else … end`) after `return`/`next`/`break`
+/// reads as a modifier `if` unless it is parenthesized.
+fn paren_multiline(v: String) -> String {
+    if v.contains('\n') { format!("({v})") } else { v }
+}
+
+/// A double-quoted Ruby literal. Rust's `{:?}` escapes match Ruby's except
+/// for interpolation: single-quoted source `'#{{number}}'` must not come
+/// out as an interpolating `"#{{number}}"`.
+pub(crate) fn ruby_str_literal(value: &str) -> String {
+    format!("{value:?}").replace("#{", "\\#{").replace("#$", "\\#$").replace("#@", "\\#@")
+}
+
+/// `:name` when the symbol is a bare identifier (optionally `?`/`!`/`=`
+/// suffixed, or an ivar/gvar/cvar/constant) or an operator; `:"..."` otherwise.
+/// Test names like `test_x:mysql_only:true` must be quoted or they misparse.
+pub(crate) fn ruby_sym_literal(value: &str) -> String {
+    const OPS: &[&str] = &[
+        "+", "-", "*", "/", "%", "**", "==", "!=", "===", "=~", "!~", "<=>", "<", "<=", ">",
+        ">=", "<<", ">>", "&", "|", "^", "~", "!", "+@", "-@", "[]", "[]=", "`",
+    ];
+    let ident = value.trim_start_matches(['@', '$']);
+    let body = ident.strip_suffix(['?', '!', '=']).unwrap_or(ident);
+    let bare = !body.is_empty()
+        && !body.starts_with(|c: char| c.is_ascii_digit())
+        && body.chars().all(|c| c.is_alphanumeric() || c == '_')
+        && (ident.len() == value.len() || body.len() == ident.len());
+    if bare || OPS.contains(&value) {
+        format!(":{value}")
+    } else {
+        format!(":{}", ruby_str_literal(value))
+    }
+}
+
 pub(super) fn emit_literal(l: &Literal) -> String {
     match l {
         Literal::Nil => "nil".to_string(),
@@ -1226,8 +1283,8 @@ pub(super) fn emit_literal(l: &Literal) -> String {
             let s = value.to_string();
             if s.contains('.') { s } else { format!("{s}.0") }
         }
-        Literal::Str { value } => format!("{value:?}"),
-        Literal::Sym { value } => format!(":{value}"),
+        Literal::Str { value } => ruby_str_literal(value),
+        Literal::Sym { value } => ruby_sym_literal(value.as_str()),
         // `pattern` is stored unescaped (the regex engine's view), so a
         // literal `/` in it (e.g. `/page/\d+$`) must be re-escaped before
         // wrapping in `/.../` delimiters, or it terminates the literal early
