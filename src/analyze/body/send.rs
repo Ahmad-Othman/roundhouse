@@ -2162,7 +2162,7 @@ pub(super) fn hash_method(
         // ActiveSupport's `compact_blank` — `reject(&:blank?)`, so the
         // same shape as the `compact` beside it.
         | "compact_blank" | "compact_blank!"
-        | "to_unsafe_h" => Ty::Hash {
+        | "to_unsafe_h" | "permit!" => Ty::Hash {
             key: Box::new(key.clone()),
             value: Box::new(value.clone()),
         },
@@ -2553,7 +2553,7 @@ fn param_value_method(method: &Symbol, block_ret: Option<&Ty>) -> Option<Ty> {
         | "all?" | "none?" | "nil?" | "is_a?" | "==" | "!=" => Ty::Bool,
         "each" | "each_pair" | "each_value" | "each_key" | "each_with_index" | "reverse_each"
         | "select" | "filter" | "reject" | "compact" | "uniq" | "sort" | "sort_by" | "reverse"
-        | "merge" | "except" | "slice" => pv(),
+        | "merge" | "except" | "slice" | "permit" | "permit!" | "to_unsafe_h" | "to_h" | "require" => pv(),
         "map" | "collect" | "flat_map" | "filter_map" => {
             Ty::Array { elem: Box::new(block_ret.cloned().unwrap_or(Ty::Untyped)) }
         }

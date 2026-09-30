@@ -686,3 +686,31 @@ fn nested_request_params_read_as_the_request_carried_them() {
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
 }
+
+/// Not left as `permit`/`to_unsafe_h`/`require`: the emitted request's params are plain hashes, which answer none of them.
+#[test]
+fn nested_request_params_permit_and_require_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    @article = Article.new(article_params)\n",
+            r##"    @article = Article.new(article_params)
+    if params.to_unsafe_h.key?(:extra)
+      @article.title = @article.title.to_s + " " + params[:extra].permit(:suffix)[:suffix].to_s
+      @article.body = @article.body.to_s + " " + params[:extra].to_unsafe_h.keys.join(",") + " " + params[:extra].require(:suffix).to_s
+    end
+"##,
+        )
+        .edit(
+            "test/controllers/articles_controller_test.rb",
+            "      post articles_url, params: { article: { body: \"A sufficiently long body for validation.\", title: \"New Title\" } }\n",
+            "      post articles_url, params: { article: { body: \"A sufficiently long body for validation.\", title: \"New Title\" }, extra: { suffix: \"Extra\", other: \"x\" } }\n",
+        )
+        .edit(
+            "test/controllers/articles_controller_test.rb",
+            "    assert_equal \"New Title\", Article.last.title\n",
+            "    assert_equal \"New Title Extra\", Article.last.title\n    assert_equal \"A sufficiently long body for validation. suffix,other Extra\", Article.last.body\n",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}

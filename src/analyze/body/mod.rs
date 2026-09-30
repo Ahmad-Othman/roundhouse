@@ -3217,6 +3217,7 @@ fn promotes_to_param_value(
             | "map" | "collect" | "flat_map" | "filter_map" | "select" | "filter" | "reject"
             | "any?" | "all?" | "none?" | "keys" | "values" | "to_a" | "first" | "last"
             | "compact" | "uniq" | "sort" | "sort_by" | "merge" | "key?" | "has_key?" | "dig"
+            | "permit" | "permit!" | "to_unsafe_h" | "require"
     );
     keyed || (structural && matches!(send::str_method(method), Ty::Var { .. }))
 }
@@ -3235,7 +3236,9 @@ fn is_params_rooted(e: &crate::expr::Expr) -> bool {
 fn is_ivar_params_rooted(e: &crate::expr::Expr) -> bool {
     use crate::expr::ExprNode;
     match &*e.node {
-        ExprNode::Send { recv: Some(r), method, .. } if matches!(method.as_str(), "[]" | "fetch" | "dig") => {
+        ExprNode::Send { recv: Some(r), method, .. }
+            if matches!(method.as_str(), "[]" | "fetch" | "dig" | "slice" | "except" | "to_h" | "merge") =>
+        {
             matches!(&*r.node, ExprNode::Ivar { name } if name.as_str() == "params") || is_ivar_params_rooted(r)
         }
         _ => false,
