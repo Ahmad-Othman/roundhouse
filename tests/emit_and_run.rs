@@ -606,3 +606,21 @@ puts "ok"
         )
         .assert_passes();
 }
+
+/// Not a String: `params.expect(article: [...])` answers the permitted hash, so a `merge` onto it has to run as one.
+#[test]
+fn an_expected_params_hash_merges() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    @article = Article.new(article_params)\n",
+            "    @article = Article.new(article_params.merge(title: \"Merged Title\"))\n",
+        )
+        .edit(
+            "test/controllers/articles_controller_test.rb",
+            "    assert_equal \"New Title\", Article.last.title\n",
+            "    assert_equal \"Merged Title\", Article.last.title\n    assert_equal \"A sufficiently long body for validation.\", Article.last.body\n",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}

@@ -1009,6 +1009,9 @@ impl<'a> BodyTyper<'a> {
                 if let Some(t) = recv.as_ref().and_then(|r| time_parse_ty(r, method, args)) {
                     return t;
                 }
+                if let Some(t) = expect_hash_arg_ty(recv_ty.as_ref(), method.as_str(), args) {
+                    return t;
+                }
                 // Not `Integer?`: `nil.to_fs` raises in Rails, so only a number that cannot be nil types.
                 if matches!(recv_ty, Some(Ty::Int) | Some(Ty::Float))
                     && crate::lower::number_to_fs::is_delimited_to_fs(method, args)
@@ -3153,4 +3156,21 @@ fn time_parse_ty(recv: &Expr, method: &Symbol, args: &[Expr]) -> Option<Ty> {
 
 fn is_time_const(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Time")
+}
+
+// Not the value type for `expect(article: [:title, …])`: it answers the permitted Parameters; the array forms (`ids: []`, `[[…]]`) stay unmodeled until their lowering runs.
+fn expect_hash_arg_ty(recv_ty: Option<&Ty>, method: &str, args: &[crate::expr::Expr]) -> Option<Ty> {
+    use crate::expr::ExprNode;
+    if method != "expect" {
+        return None;
+    }
+    let Some(Ty::Hash { key, value }) = recv_ty else { return None };
+    let [arg] = args else { return None };
+    let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
+    let [(_, permitted)] = entries.as_slice() else { return None };
+    let ExprNode::Array { elements, .. } = &*permitted.node else { return None };
+    if elements.is_empty() || !elements.iter().all(|e| matches!(&*e.node, ExprNode::Lit { value: crate::expr::Literal::Sym { .. } })) {
+        return None;
+    }
+    Some(Ty::Hash { key: key.clone(), value: value.clone() })
 }
