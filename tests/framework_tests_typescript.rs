@@ -108,6 +108,26 @@ fn build_and_run(test_file: &Path, tag: &str) {
     static INSTALL: OnceLock<()> = OnceLock::new();
     let deps = scratch_dir("");
     INSTALL.get_or_init(|| {
+        // Each process leaves a full node_modules behind; reclaim the ones
+        // whose process has exited, leaving overlapping live runs alone.
+        if let Some(root) = deps.parent() {
+            for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+                let name = entry.file_name();
+                let Some(pid) = name.to_str().filter(|p| p.parse::<u32>().is_ok()) else {
+                    continue;
+                };
+                if pid == std::process::id().to_string() {
+                    continue;
+                }
+                let alive = Command::new("kill")
+                    .args(["-0", pid])
+                    .status()
+                    .map_or(true, |s| s.success());
+                if !alive {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
         if deps.join("node_modules").exists() {
             std::fs::remove_dir_all(deps.join("node_modules")).expect("clean dependencies");
         }
