@@ -31,6 +31,31 @@ fn tree(source: &str) -> HashMap<PathBuf, Vec<u8>> {
         .collect()
 }
 
+fn assert_unbound(files: HashMap<PathBuf, Vec<u8>>) {
+    let source = &files[&PathBuf::from("app/models/item.rb")];
+    let parsed = ruby_prism::parse(source);
+    let parse_errors: Vec<_> = parsed.errors().map(|e| e.message().to_string()).collect();
+    assert!(parse_errors.is_empty(), "invalid repro: {parse_errors:?}");
+    drop(parsed);
+
+    let error = ingest_app_from_tree(files.clone()).expect_err("unsafe binding must be refused");
+    assert!(error.to_string().contains("table_name binding"), "{error}");
+
+    survey::activate();
+    let result = ingest_app_from_tree(files);
+    let gaps = survey::drain();
+    let app = result.expect("survey records the unbound model");
+    assert!(
+        app.models.is_empty(),
+        "do not bind the model to a guessed table"
+    );
+    assert_eq!(gaps.len(), 1);
+    assert!(
+        gaps[0].to_string().contains("table_name binding"),
+        "{gaps:?}"
+    );
+}
+
 #[test]
 fn a_literal_table_name_overrides_convention_and_namespace_prefix() {
     for source in [
@@ -99,24 +124,65 @@ fn unsupported_table_writes_are_ledgered_instead_of_guessed() {
         "configure { self.table_name = \"legacy_entries\" }",
         "Other.table_name = \"legacy_entries\"",
         "self&.table_name = \"legacy_entries\"",
-        "self.table_name=(\"legacy_entries\", \"other_entries\")",
-        "self.table_name=(\"legacy_entries\") { side_effect }",
+        "self.table_name = \"legacy_entries\", \"other_entries\"",
+        "self.table_name = *[\"legacy_entries\"]",
         "class << self; self.table_name = \"legacy_entries\"; end",
     ] {
         let source = format!("class Item < ApplicationRecord\n  {declaration}\nend\n");
-        let error = ingest_app_from_tree(tree(&source)).expect_err(declaration);
-        assert!(error.to_string().contains("table_name"), "{error}");
+        assert_unbound(tree(&source));
+    }
+}
 
-        survey::activate();
-        let result = ingest_app_from_tree(tree(&source));
-        let gaps = survey::drain();
-        let app = result.expect("survey records the unbound model");
-        assert!(
-            app.models.is_empty(),
-            "do not bind the model to a stale literal"
+#[test]
+fn safe_bare_names_preserve_case_underscores_and_digits() {
+    for name in ["LegacyEntries", "_legacy_entries", "legacy_entries_2"] {
+        let source = format!("class Item < ApplicationRecord\n  self.table_name = {name:?}\nend\n");
+        let schema = format!(
+            "ActiveRecord::Schema.define(version: 1) do\n  create_table {name:?} do |t|\n    t.string \"label\", null: false\n  end\nend\n"
         );
-        assert_eq!(gaps.len(), 1);
-        assert!(gaps[0].to_string().contains("table_name"), "{gaps:?}");
+        let mut files = tree(&source);
+        files.insert(PathBuf::from("db/schema.rb"), schema.into_bytes());
+        let app = ingest_app_from_tree(files).expect("safe bare identifier");
+        let model = &app.models[0];
+        assert_eq!(model.table.0.as_str(), name);
+        assert_eq!(model.attributes.fields[&Symbol::from("label")], Ty::Str);
+        assert!(model.body.is_empty());
+    }
+}
+
+#[test]
+fn table_names_that_need_sql_quoting_are_ledgered() {
+    for name in [
+        "order",
+        "OrDeR",
+        "legacy-entries",
+        "legacy entries",
+        "legacy\"entries",
+        "123_entries",
+        "",
+    ] {
+        let source = format!("class Item < ApplicationRecord\n  self.table_name = {name:?}\nend\n");
+        let schema = format!(
+            "ActiveRecord::Schema.define(version: 1) do\n  create_table {name:?} do |t|\n    t.string \"label\"\n  end\nend\n"
+        );
+        let mut files = tree(&source);
+        files.insert(PathBuf::from("db/schema.rb"), schema.into_bytes());
+        assert_unbound(files);
+    }
+}
+
+#[test]
+fn executed_declaration_headers_cannot_hide_table_writes() {
+    for header in [
+        "class Nested < (self.table_name = \"other_entries\"; Object); end",
+        "class (self.table_name = \"other_entries\"; Object)::Nested; end",
+        "module (self.table_name = \"other_entries\"; Object)::Namespace; end",
+        "def (self.table_name = \"other_entries\").probe; end",
+    ] {
+        for earlier in ["", "self.table_name = \"legacy_entries\"\n"] {
+            let source = format!("class Item < ApplicationRecord\n  {earlier}{header}\nend\n");
+            assert_unbound(tree(&source));
+        }
     }
 }
 
@@ -128,8 +194,14 @@ fn method_and_nested_class_writes_do_not_bind_the_enclosing_model() {
   def self.change_table
     self.table_name = "other_entries"
   end
+  def change_table_later(value = self.table_name = "default_entries")
+    value
+  end
   class Nested
     self.table_name = "nested_items"
+  end
+  module Namespace
+    self.table_name = "namespace_items"
   end
 end
 "#,

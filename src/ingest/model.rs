@@ -1904,7 +1904,8 @@ fn parse_primary_key_decl(stmt: &Node<'_>) -> Option<Symbol> {
 /// Bind one direct `self.table_name = "table"` before reading the schema.
 /// Scan the selected class's executable body first: a conditional, compound
 /// or subsequent write must not leave a plausible but incorrect row bound.
-/// Methods and nested namespaces are separate scopes, not declarations here.
+/// Method and nested namespace bodies are separate scopes; their headers
+/// still execute in the enclosing scope and must not hide table writes.
 fn parse_table_name_decl(body: Node<'_>, file: &str) -> IngestResult<Option<(String, usize)>> {
     struct Collector {
         direct: Vec<(usize, usize)>,
@@ -1922,9 +1923,14 @@ fn parse_table_name_decl(body: Node<'_>, file: &str) -> IngestResult<Option<(Str
                     .and_then(|_| call.arguments())
                     .filter(|args| args.arguments().len() == 1)
                     .and_then(|args| string_value(&args.arguments().iter().next()?))
-                    // schema.rb currently strips schema qualifiers. Never
-                    // conflate an explicit qualified name with a bare table.
-                    .filter(|name| !name.contains('.'));
+                    // Shared DDL/DML currently emits bare table names.
+                    // Refuse names needing qualification or SQL quoting.
+                    .filter(|name| {
+                        let mut bytes = name.bytes();
+                        bytes.next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                            && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                            && !crate::naming::is_sqlite_keyword(name)
+                    });
                 self.writes.push(name.map(|name| (name, offset)));
             } else {
                 let name = node.as_call_and_write_node().map(|w| w.write_name())
@@ -1940,9 +1946,16 @@ fn parse_table_name_decl(body: Node<'_>, file: &str) -> IngestResult<Option<(Str
     impl<'pr> ruby_prism::Visit<'pr> for Collector {
         fn visit_branch_node_enter(&mut self, node: Node<'pr>) { self.record(&node); }
         fn visit_leaf_node_enter(&mut self, node: Node<'pr>) { self.record(&node); }
-        fn visit_def_node(&mut self, _: &ruby_prism::DefNode<'pr>) {}
-        fn visit_class_node(&mut self, _: &ruby_prism::ClassNode<'pr>) {}
-        fn visit_module_node(&mut self, _: &ruby_prism::ModuleNode<'pr>) {}
+        fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+            if let Some(receiver) = node.receiver() { self.visit(&receiver); }
+        }
+        fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+            self.visit(&node.constant_path());
+            if let Some(superclass) = node.superclass() { self.visit(&superclass); }
+        }
+        fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+            self.visit(&node.constant_path());
+        }
     }
     let mut collector = Collector {
         direct: body.as_statements_node()
@@ -1959,7 +1972,7 @@ fn parse_table_name_decl(body: Node<'_>, file: &str) -> IngestResult<Option<(Str
     } else {
         Err(IngestError::Unsupported {
             file: file.into(),
-            message: "table_name binding requires one direct self.table_name assignment to an unqualified literal string".into(),
+            message: "table_name binding requires one direct self.table_name assignment to a literal string naming a safe bare SQL identifier".into(),
         })
     }
 }

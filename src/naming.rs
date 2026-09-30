@@ -481,7 +481,7 @@ pub fn sql_ident(name: &str) -> String {
     if is_sqlite_keyword(name) { format!("\"{name}\"") } else { name.to_string() }
 }
 
-fn is_sqlite_keyword(name: &str) -> bool {
+pub(crate) fn is_sqlite_keyword(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
         "abort" | "action" | "add" | "after" | "all" | "alter" | "always" | "analyze" | "and" | "as"
