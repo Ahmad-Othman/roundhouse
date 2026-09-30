@@ -155,7 +155,7 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     // which the error-recovering parser otherwise drops — are collected
     // and reported alongside the analyze diagnostics.
     let (ingest_result, parse_diags) =
-        crate::ingest::prism::scope(|| ingest_app(path));
+        crate::timings::phase("ingest", || crate::ingest::prism::scope(|| ingest_app(path)));
 
     let survey_errors = if continue_on_error { survey::drain() } else { Vec::new() };
 
@@ -187,8 +187,8 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    Analyzer::new(&app).analyze(&mut app);
-    let mut diags = diagnose(&app);
+    crate::timings::phase("analyze", || Analyzer::new(&app).analyze(&mut app));
+    let mut diags = crate::timings::phase("diagnose", || diagnose(&app));
     // Survey mode: diagnostics that trace back to a recorded ingest gap
     // are the tool's coverage problem, not the app's — downgrade them to
     // notes with the root cause attached so the error count below means
