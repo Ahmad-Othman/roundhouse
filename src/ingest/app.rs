@@ -3239,14 +3239,29 @@ fn walk_erb<V: Vfs + ?Sized>(
                 // the last un-ingested templates in every `rails new`
                 // app, so an otherwise fully-covered app still showed
                 // four coverage gaps.
+                // `.pdf.erb` / `.csv.erb` / `.txt.erb` join the same way:
+                // ordinary ERB producing text (a PDF renderer's HTML
+                // input, a `CSV.generate` body, a mailer's plaintext
+                // part) whose format is a naming/dispatch label, not a
+                // different template shape. Lowered as `<action>_pdf` /
+                // `<action>_csv` / `<action>_txt`, beside the html
+                // template.
                 if stem.ends_with(".html")
                     || !stem.contains('.')
-                    || matches!(format, Some("turbo_stream" | "svg" | "text" | "json" | "js"))
+                    || matches!(
+                        format,
+                        Some("turbo_stream" | "svg" | "text" | "json" | "js" | "pdf" | "csv" | "txt")
+                    )
                     // Feeds: `.rss.builder` / `.atom.builder` (lobsters'
                     // `home/stories.rss.builder`), lowered as
                     // `<action>_rss` beside the html template, the same
-                    // naming answer `_json` and `_svg` use.
-                    || matches!(format, Some("rss" | "atom" | "xml"))
+                    // naming answer `_json` and `_svg` use. `.xls.builder`
+                    // joins them: it's Builder XML markup too (Microsoft's
+                    // SpreadsheetML — `xml.Workbook`/`xml.Worksheet` tags),
+                    // served with an `.xls` extension so Excel opens it;
+                    // the DSL and shape are identical to the feed formats,
+                    // not a different engine concern.
+                    || matches!(format, Some("rss" | "atom" | "xml" | "xls"))
                 {
                     out.push((path, engine));
                 } else {
