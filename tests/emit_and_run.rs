@@ -496,3 +496,45 @@ end
         .run_test("test/models/comment_abstract_base_test.rb")
         .assert_passes();
 }
+
+/// Not a plain Hash: Rails' mapping reads `statuses[:paid]` as the `"paid"` entry, so the Symbol keys are held to that.
+#[test]
+fn an_enum_plural_mapping_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"state\", default: 0, null: false",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r##"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  enum :state, { "draft" => 0, "live" => 1, "on hold" => 2 }
+
+  def self.mapping_probe
+    [states.keys.join(","), states[:live], self.states["draft"], states.key?(:live), states.fetch(:draft), states.key(1), states.map { |k, v| "#{k}=#{v}" }.join(";")].join("|")
+  end
+
+  def live_value
+    self.class.states[:live]
+  end"##,
+        )
+        .write(
+            "test/models/article_enum_mapping_test.rb",
+            r#"require "test_helper"
+
+class ArticleEnumMappingTest < ActiveSupport::TestCase
+  test "the plural mapping answers as Rails' indifferent Hash does" do
+    assert_equal "draft,live,on hold|1|0|true|0|live|draft=0;live=1;on hold=2", Article.mapping_probe
+    assert_equal 1, articles(:one).live_value
+    assert_equal 0, Article.states.fetch(:draft)
+    assert_equal 2, Article.states[:"on hold"]
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_enum_mapping_test.rb")
+        .assert_passes();
+}

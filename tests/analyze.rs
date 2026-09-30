@@ -2400,6 +2400,43 @@ end
 }
 
 #[test]
+fn an_enum_answers_its_plural_mapping() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define(version: 1) do
+  create_table "trades", force: :cascade do |t|
+    t.integer "status"
+    t.integer "delivery_category"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/trade.rb",
+            r#"class Trade < ApplicationRecord
+  enum :status, { pending: 0, "on hold" => 2 }
+  enum :delivery_category, %i[standard express]
+
+  def self.labels
+    [statuses.keys.first.upcase, Trade.statuses[:pending] + 1, Trade.delivery_categories.key(1)&.size, Trade.statuses.fetch("on hold")]
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in ["statuses", "delivery_categories", "keys", "upcase", "+", "key", "fetch"] {
+        assert!(!failures.iter().any(|f| f == m), "`{m}` should resolve; failures = {failures:?}");
+    }
+}
+
+#[test]
 fn time_operands_compare_without_incompatible_binop() {
     let app = app_from_files(&[
         (

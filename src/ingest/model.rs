@@ -586,6 +586,7 @@ pub(super) fn expand_enum_decl(
             ),
         }
     })?;
+    let all_labels = labels.clone();
     // A label that is not a Ruby identifier (`32bits`, `64bits`) has no
     // predicate, scope or bang writer Ruby could name: Rails reaches them
     // through `send`, which the emit has no equivalent of. Skipped.
@@ -682,6 +683,40 @@ pub(super) fn expand_enum_decl(
         ));
         items.push(method_def(format!("{base}!"), call_with_pair("update!")));
     }
+    // `Model.statuses`: every label, identifier or not, keyed by String as Rails' mapping is.
+    let mapping_hash = Expr::new(
+        span,
+        ExprNode::Hash {
+            entries: all_labels
+                .iter()
+                .map(|(label, value)| {
+                    (
+                        Expr::new(span, ExprNode::Lit { value: Literal::Str { value: label.clone() } }),
+                        Expr::new(span, ExprNode::Lit { value: value.clone() }),
+                    )
+                })
+                .collect(),
+            kwargs: false,
+        },
+    );
+    items.push(ModelBodyItem::Method {
+        method: MethodDef {
+            name_span: crate::span::Span::synthetic(),
+            name: Symbol::from(crate::naming::pluralize_snake(&column)),
+            receiver: MethodReceiver::Class,
+            params: Vec::new(),
+            block_param: None,
+            body: mapping_hash,
+            signature: None,
+            effects: EffectSet::pure(),
+            enclosing_class: None,
+            kind: crate::dialect::AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+        },
+        leading_comments: Vec::new(),
+        leading_blank_line: false,
+    });
     Ok(Some(EnumExpansion { column: Symbol::from(column.as_str()), mapping: labels, items }))
 }
 

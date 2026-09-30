@@ -119,6 +119,7 @@ pub mod route_url_options;
 pub mod route_helper_receiver;
 pub mod config_reader;
 pub mod symbolize_keys;
+pub mod enum_mapping_keys;
 pub mod exists_conditions;
 pub mod destroy_by;
 pub mod has_one_builder;
@@ -463,6 +464,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // until that pass has rewritten the `config` chain and stamped its
     // type.
     ("symbolize_keys", &["config_reader"]),
+    // No runs_after: it reads the ingested enum tables and rewrites only the key argument.
+    ("enum_mapping_keys", &[]),
     ("arel_attribute", &[]),
     // `"lit" << x` → `"lit" + x`; local expression rewrite, no ordering
     // constraints.
@@ -804,6 +807,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("config_reader");
     symbolize_keys::apply_symbolize_keys_grounding(app);
     ran!("symbolize_keys");
+    enum_mapping_keys::apply_enum_mapping_keys(app);
+    ran!("enum_mapping_keys");
     arel_attribute::apply_arel_attribute_lowering(app);
     ran!("arel_attribute");
     literal_append::apply_literal_append_lowering(app);

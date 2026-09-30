@@ -2079,6 +2079,7 @@ pub(super) fn hash_method(
         "values" => Ty::Array { elem: Box::new(value.clone()) },
         "empty?" | "any?" | "none?" | "key?" | "has_key?" | "include?" => Ty::Bool,
         "keys" => Ty::Array { elem: Box::new(key.clone()) },
+        "key" => Ty::Union { variants: vec![key.clone(), Ty::Nil] },
         // `Hash#fetch(k, default)` answers `default` when the key is
         // missing, so the result is `value | typeof(default)` — a Nil
         // arm appears only when the default IS nil. Reading the
