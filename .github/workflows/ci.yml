@@ -336,10 +336,10 @@ jobs:
         run: cargo test --test crystal_toolchain -- --ignored --nocapture
 
   framework-tests-swift:
-    needs: generate-fixture
     # Per-target framework-test conformance gate for the Swift target:
     # transpiles runtime/ruby/test/**/*_test.rb to XCTest classes and runs
-    # them under `swift test`. Complements smoke-swift (the archive's
+    # them together under one `swift test`, independent of the fixtures.
+    # Complements smoke-swift (the archive's
     # real-blog suite): this one runs the framework runtime's own
     # assertions, catching adapter drift the app tests miss. Sibling of
     # framework-tests-kotlin. NOTE: needs a full toolchain with XCTest —
