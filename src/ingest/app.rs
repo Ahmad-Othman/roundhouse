@@ -1734,9 +1734,9 @@ fn rehome_default_fk(
     let mut out = item.clone();
     let ModelBodyItem::Association { assoc, .. } = &mut out else { return out };
     let concern_default =
-        crate::ident::Symbol::from(format!("{}_id", crate::naming::snake_case(concern.0.as_str())));
+        crate::ident::Symbol::from(format!("{}_id", crate::naming::snake_case(crate::naming::demodulize(concern.0.as_str()))));
     let model_default =
-        crate::ident::Symbol::from(format!("{}_id", crate::naming::snake_case(model.0.as_str())));
+        crate::ident::Symbol::from(format!("{}_id", crate::naming::snake_case(crate::naming::demodulize(model.0.as_str()))));
     match assoc {
         Association::HasMany { foreign_key, .. } | Association::HasOne { foreign_key, .. } => {
             if *foreign_key == concern_default {

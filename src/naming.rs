@@ -5,6 +5,11 @@
 //! missed irregular plural, fix the rule here rather than working around it
 //! in the caller.
 
+/// `Billing::Invoice` → `Invoice`, as `ActiveSupport::Inflector#demodulize`.
+pub fn demodulize(class_name: &str) -> &str {
+    class_name.rsplit("::").next().unwrap_or(class_name)
+}
+
 pub fn snake_case(class_name: &str) -> String {
     let mut s = String::with_capacity(class_name.len() + 4);
     for (i, c) in class_name.char_indices() {

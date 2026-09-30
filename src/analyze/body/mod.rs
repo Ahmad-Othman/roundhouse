@@ -230,6 +230,10 @@ fn resolve_owner_path(
     classes: &HashMap<ClassId, ClassInfo>,
     index: &ConstIndex,
 ) -> Option<ClassId> {
+    if let Some(absolute) = written.strip_prefix("::") {
+        let id = ClassId(Symbol::from(absolute));
+        return classes.contains_key(&id).then_some(id);
+    }
     if let Some(Ty::Class { id, .. }) = &ctx.self_ty {
         let mut scope: Vec<&str> = id.0.as_str().split("::").collect();
         while !scope.is_empty() {
@@ -303,6 +307,12 @@ fn expand_bare_const(
     // the recursive app walk, nested same-named classes were rarely
     // ingested, so this case never fired; now it's the common one.
     if classes.contains_key(&ClassId(name.clone())) {
+        return None;
+    }
+    // Ruby's own top-level constants are never app classes, so an app's
+    // `ActiveModel::Serializers::JSON` must not capture a bare `JSON.parse`
+    // (shopify core; it then typed a stdlib call as the app module's).
+    if RUBY_TOP_LEVEL.contains(&target) {
         return None;
     }
     index.unique_suffix(target)
@@ -502,7 +512,8 @@ impl<'a> BodyTyper<'a> {
                     .collect::<Vec<_>>()
                     .join("::");
                 Ty::Class {
-                    id: ClassId(Symbol::from(joined_path)),
+                    // Rooting changes lookup, not the registry's class identity.
+                    id: ClassId(Symbol::from(joined_path.trim_start_matches("::"))),
                     args: vec![],
                 }
             }
@@ -3244,3 +3255,16 @@ fn is_ivar_params_rooted(e: &crate::expr::Expr) -> bool {
         _ => false,
     }
 }
+/// Top-level constants Ruby and its default/bundled gems define. A bare
+/// reference to one of these means the stdlib constant; see
+/// `expand_bare_const`.
+const RUBY_TOP_LEVEL: &[&str] = &[
+    "Base64", "Benchmark", "BigDecimal", "CGI", "CSV", "Comparable", "Complex", "Coverage",
+    "Date", "DateTime", "Digest", "Dir", "ERB", "Encoding", "Enumerable", "Errno", "Etc",
+    "Fiber", "File", "FileUtils", "Find", "Forwardable", "GC", "IO", "IPAddr", "JSON",
+    "Kernel", "Logger", "Marshal", "Math", "Monitor", "Mutex", "Net", "ObjectSpace", "Open3",
+    "OpenSSL", "OpenStruct", "PP", "Pathname", "Prism", "Process", "Psych", "Random",
+    "Rational", "Ripper", "SecureRandom", "Set", "Shellwords", "Signal", "Singleton",
+    "Socket", "StringIO", "Struct", "Tempfile", "Thread", "Time", "Timeout", "URI", "YAML",
+    "Zlib",
+];
