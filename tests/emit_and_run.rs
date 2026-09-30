@@ -875,3 +875,68 @@ fn method_ref_block_arg_runs() {
         .run_test("test/models/doubler_test.rb")
         .assert_passes();
 }
+
+/// A literal table override must reach the emitted row readers and SQL,
+/// not merely quiet the analyzer. Two differently named models share the
+/// real articles table; writes through either must be visible to Article.
+#[test]
+fn explicit_model_table_names_run_against_the_declared_table() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "  add_foreign_key \"comments\", \"articles\"",
+            r#"  create_table "archived_articles" do |t|
+    t.string "title"
+    t.text "body"
+  end
+  create_table "ledger_entries" do |t|
+    t.string "title"
+    t.text "body"
+  end
+  add_foreign_key "comments", "articles""#,
+        )
+        .write(
+            "app/models/archived_article.rb",
+            "class ArchivedArticle < ApplicationRecord\n  self.table_name = \"articles\"\nend\n",
+        )
+        .write(
+            "app/models/ledger/entry.rb",
+            r#"module Ledger
+  def self.table_name_prefix
+    "ledger_"
+  end
+  class Entry < ApplicationRecord
+    self.table_name = "articles"
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/decoy/archived_article.rb",
+            "class Decoy::ArchivedArticle < ApplicationRecord\nend\n",
+        )
+        .write(
+            "app/models/ledger_entry.rb",
+            "class LedgerEntry < ApplicationRecord\nend\n",
+        )
+        .run_ruby(
+            r#"raise ArchivedArticle.table_name.inspect unless ArchivedArticle.table_name == "articles"
+raise Ledger::Entry.table_name.inspect unless Ledger::Entry.table_name == "articles"
+decoy = Decoy::ArchivedArticle.create!(title: "Conventional decoy", body: "Leave untouched")
+prefixed_decoy = LedgerEntry.create!(title: "Prefixed decoy", body: "Leave untouched too")
+record = ArchivedArticle.create!(title: "Original", body: "A long enough body")
+raise unless Article.find(record.id).title == "Original"
+entry = Ledger::Entry.find(record.id)
+raise unless entry.title == "Original"
+entry.update!(title: "Changed")
+raise unless Article.find(record.id).title == "Changed"
+entry.destroy!
+raise unless Article.find_by(id: record.id).nil?
+raise unless Decoy::ArchivedArticle.count == 1
+raise unless Decoy::ArchivedArticle.find(decoy.id).title == "Conventional decoy"
+raise unless LedgerEntry.count == 1
+raise unless LedgerEntry.find(prefixed_decoy.id).title == "Prefixed decoy"
+"#,
+        )
+        .assert_passes();
+}

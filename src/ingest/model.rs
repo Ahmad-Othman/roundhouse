@@ -302,7 +302,10 @@ pub(super) fn ingest_model_with_enum_constants(
     // Rails: `full_table_name_prefix + undecorated_table_name`. The
     // prefix comes from the nearest module parent that declares one,
     // searched innermost-out the way `module_parents` walks.
-    let table_name = {
+    let table_decl = class.body().map(|body| parse_table_name_decl(body, file)).transpose()?.flatten();
+    let table_name = if let Some((name, _)) = &table_decl {
+        name.clone()
+    } else {
         let mut segments: Vec<&str> = class_name.as_str().split("::").collect();
         segments.pop();
         let mut prefix = String::new();
@@ -357,6 +360,13 @@ pub(super) fn ingest_model_with_enum_constants(
             }
         };
         for stmt in stmts {
+            // Explicit names override convention before schema binding.
+            // Like primary_key, the setter is consumed: lowering already
+            // synthesizes table_name from Model::table for every target.
+            if table_decl.as_ref().is_some_and(|(_, offset)| *offset == stmt.location().start_offset()) {
+                prev_end = Some(stmt.location().end_offset());
+                continue;
+            }
             // `self.primary_key = "key"` is recognized into
             // `Model::primary_key` instead of being kept as a body item:
             // the lowering synthesizes a reader from it, and re-emitting
@@ -1889,6 +1899,69 @@ fn parse_primary_key_decl(stmt: &Node<'_>) -> Option<Symbol> {
     let first = args.arguments().iter().next()?;
     let name = string_value(&first).or_else(|| symbol_value(&first))?;
     Some(Symbol::from(name.as_str()))
+}
+
+/// Bind one direct `self.table_name = "table"` before reading the schema.
+/// Scan the selected class's executable body first: a conditional, compound
+/// or subsequent write must not leave a plausible but incorrect row bound.
+/// Methods and nested namespaces are separate scopes, not declarations here.
+fn parse_table_name_decl(body: Node<'_>, file: &str) -> IngestResult<Option<(String, usize)>> {
+    struct Collector {
+        direct: Vec<(usize, usize)>,
+        writes: Vec<Option<(String, usize)>>,
+    }
+    impl Collector {
+        fn record(&mut self, node: &Node<'_>) {
+            if let Some(call) = node.as_call_node() {
+                if constant_id_str(&call.name()) != "table_name=" { return; }
+                let offset = node.location().start_offset();
+                let valid = self.direct.contains(&(offset, node.location().end_offset()))
+                    && call.receiver().is_some_and(|r| r.as_self_node().is_some())
+                    && !call.is_safe_navigation() && call.block().is_none();
+                let name = valid.then_some(())
+                    .and_then(|_| call.arguments())
+                    .filter(|args| args.arguments().len() == 1)
+                    .and_then(|args| string_value(&args.arguments().iter().next()?))
+                    // schema.rb currently strips schema qualifiers. Never
+                    // conflate an explicit qualified name with a bare table.
+                    .filter(|name| !name.contains('.'));
+                self.writes.push(name.map(|name| (name, offset)));
+            } else {
+                let name = node.as_call_and_write_node().map(|w| w.write_name())
+                    .or_else(|| node.as_call_or_write_node().map(|w| w.write_name()))
+                    .or_else(|| node.as_call_operator_write_node().map(|w| w.write_name()))
+                    .or_else(|| node.as_call_target_node().map(|w| w.name()));
+                if name.is_some_and(|name| constant_id_str(&name) == "table_name=") {
+                    self.writes.push(None);
+                }
+            }
+        }
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Collector {
+        fn visit_branch_node_enter(&mut self, node: Node<'pr>) { self.record(&node); }
+        fn visit_leaf_node_enter(&mut self, node: Node<'pr>) { self.record(&node); }
+        fn visit_def_node(&mut self, _: &ruby_prism::DefNode<'pr>) {}
+        fn visit_class_node(&mut self, _: &ruby_prism::ClassNode<'pr>) {}
+        fn visit_module_node(&mut self, _: &ruby_prism::ModuleNode<'pr>) {}
+    }
+    let mut collector = Collector {
+        direct: body.as_statements_node()
+            .map(|stmts| stmts.body().iter().filter_map(|s| s.as_call_node())
+                .map(|s| (s.location().start_offset(), s.location().end_offset())).collect())
+            .unwrap_or_else(|| vec![(body.location().start_offset(), body.location().end_offset())]),
+        writes: Vec::new(),
+    };
+    ruby_prism::Visit::visit(&mut collector, &body);
+    if collector.writes.is_empty() {
+        Ok(None)
+    } else if collector.writes.len() == 1 && collector.writes[0].is_some() {
+        Ok(collector.writes.pop().unwrap())
+    } else {
+        Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "table_name binding requires one direct self.table_name assignment to an unqualified literal string".into(),
+        })
+    }
 }
 
 fn dependent_from_sym(s: &str) -> Option<crate::dialect::Dependent> {
