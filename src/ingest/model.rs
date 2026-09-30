@@ -869,7 +869,7 @@ fn ingest_singleton_class_methods(
     use crate::dialect::MethodReceiver;
 
     let Some(body) = sc.body() else { return Ok(Vec::new()) };
-    let mut methods = Vec::new();
+    let mut methods: Vec<crate::dialect::MethodDef> = Vec::new();
     for stmt in super::util::flatten_statements(body) {
         // A bare `private` (or `protected` / `public`) inside the
         // singleton block is a VISIBILITY MARKER, not a statement with
@@ -894,6 +894,54 @@ fn ingest_singleton_class_methods(
                 );
             if bare_marker {
                 continue;
+            }
+            // `deprecate(name: { message: …, deprecator: … })` — pure
+            // call-site metadata (ActiveSupport::Deprecation wraps the
+            // method to warn; callers still dispatch through it), no
+            // singleton-scope state to carry. `ChangeOrderRequest`,
+            // `ChangeOrderPackage`, and `PotentialChangeOrder` all
+            // deprecate a class method exactly this way. Dropped like
+            // an unknown-call annotation elsewhere, rather than
+            // refused — refusing killed the whole model's ingest for
+            // one annotation on an otherwise-modeled class method.
+            if call.receiver().is_none()
+                && call.block().is_none()
+                && constant_id_str(&call.name()) == "deprecate"
+            {
+                continue;
+            }
+            // `alias_method :new_name, :old_name` — the other call
+            // shape the corpus uses here (`PaymentApplicationMarkup
+            // LineItem` aliases `vattr` to `virtual_attribute`).
+            // Unlike the marker/annotation cases above, this DOES need
+            // modeling: `vattr` is called from sibling class methods.
+            // Clone the already-ingested target — `alias_method`
+            // always follows its target in this corpus — under the
+            // new name. A target ingested outside this singleton
+            // block, or not found, falls through to the refusal below
+            // rather than silently doing nothing.
+            if call.receiver().is_none()
+                && call.block().is_none()
+                && constant_id_str(&call.name()) == "alias_method"
+            {
+                if let Some(args) = call.arguments() {
+                    let args: Vec<_> = args.arguments().iter().collect();
+                    if let [new_name, old_name] = &args[..] {
+                        if let (Some(new_name), Some(old_name)) =
+                            (symbol_value(new_name), symbol_value(old_name))
+                        {
+                            if let Some(target) =
+                                methods.iter().find(|m| m.name.as_str() == old_name)
+                            {
+                                let mut alias = target.clone();
+                                alias.name = Symbol::from(new_name);
+                                alias.name_span = Span::synthetic();
+                                methods.push(alias);
+                                continue;
+                            }
+                        }
+                    }
+                }
             }
         }
         let Some(def) = stmt.as_def_node() else {
