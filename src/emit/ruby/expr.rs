@@ -805,7 +805,12 @@ fn recv_needs_parens(r: &Expr) -> bool {
 /// indifferent-access *effect/color* would be consulted in place of the
 /// raw type: the emit site stays put, only the predicate swaps.
 fn is_string_keyed_hash(recv: &Expr) -> bool {
-    matches!(recv.ty.as_ref(), Some(Ty::Hash { key, .. }) if matches!(key.as_ref(), Ty::Str))
+    match recv.ty.as_ref() {
+        Some(Ty::Hash { key, .. }) => matches!(key.as_ref(), Ty::Str),
+        // Not left to the source's Symbol keys: every hash in a request's params is String-keyed at run time.
+        Some(Ty::Class { id, .. }) => id.0.as_str() == crate::analyze::PARAM_VALUE,
+        _ => false,
+    }
 }
 
 /// Coerce a key indexing a string-keyed hash: a symbol literal `:id` →

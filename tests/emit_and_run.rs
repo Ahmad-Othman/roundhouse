@@ -624,3 +624,33 @@ fn an_expected_params_hash_merges() {
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
 }
+
+/// Not read with the Symbol keys the source writes: every hash in a request's params is String-keyed at run time.
+#[test]
+fn nested_request_params_read_as_the_request_carried_them() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    @article = Article.new(article_params)\n",
+            r##"    @article = Article.new(article_params)
+    if params[:extra].present? && params[:extra].key?(:suffix)
+      @article.title = @article.title.to_s + " " + params[:extra][:suffix].to_s
+    end
+    if params[:tags].present?
+      params[:tags].each { |t| @article.body = @article.body.to_s + " #" + t.to_s }
+    end
+"##,
+        )
+        .edit(
+            "test/controllers/articles_controller_test.rb",
+            "      post articles_url, params: { article: { body: \"A sufficiently long body for validation.\", title: \"New Title\" } }\n",
+            "      post articles_url, params: { article: { body: \"A sufficiently long body for validation.\", title: \"New Title\" }, extra: { suffix: \"Extra\" }, tags: [\"a\", \"b\"] }\n",
+        )
+        .edit(
+            "test/controllers/articles_controller_test.rb",
+            "    assert_equal \"New Title\", Article.last.title\n",
+            "    assert_equal \"New Title Extra\", Article.last.title\n    assert_equal \"A sufficiently long body for validation. #a #b\", Article.last.body\n",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}

@@ -41,6 +41,7 @@ pub use inquiry::inquirer_methods;
 pub use diagnostics::{diagnose, diagnose_with_coverage};
 
 pub use body::{BodyTyper, ClassInfo, ConstScope, Ctx};
+pub(crate) use body::PARAM_VALUE;
 use render::{
     collect_action_render_views, collect_content_partial_literals,
     collect_dynamic_render_ivars, content_partial_view_name,

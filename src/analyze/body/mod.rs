@@ -23,6 +23,7 @@ use crate::ty::{Row, Ty};
 mod diagnostic;
 mod narrowing;
 mod send;
+pub(crate) use send::PARAM_VALUE;
 pub(crate) use send::string_answers;
 
 /// Recursion context — what `self` is, what locals/ivars are in scope.
@@ -876,11 +877,17 @@ impl<'a> BodyTyper<'a> {
                     });
                 }
 
-                let recv_ty = match recv.as_mut() {
+                let mut recv_ty = match recv.as_mut() {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
                 for a in args.iter_mut() { self.analyze_expr(a, ctx); }
+                if let Some(r) = recv.as_mut() {
+                    if promotes_to_param_value(r, recv_ty.as_ref(), method, args) {
+                        r.ty = Some(send::param_value_ty());
+                        recv_ty = r.ty.clone();
+                    }
+                }
                 let block_ret = if let Some(b) = block {
                     let block_ctx = self.block_ctx_for(ctx, recv_ty.as_ref(), method, args, b);
                     self.analyze_expr(b, &block_ctx);
@@ -3173,4 +3180,64 @@ fn expect_hash_arg_ty(recv_ty: Option<&Ty>, method: &str, args: &[crate::expr::E
         return None;
     }
     Some(Ty::Hash { key: key.clone(), value: value.clone() })
+}
+
+// Not every `params[...]` read: a scalar read stays a String, and only a call no String answers (or a Symbol-keyed index) reads the request's nested shape.
+fn promotes_to_param_value(
+    recv: &crate::expr::Expr,
+    recv_ty: Option<&Ty>,
+    method: &crate::ident::Symbol,
+    args: &[crate::expr::Expr],
+) -> bool {
+    use crate::expr::{ExprNode, Literal};
+    let stringish = match recv_ty {
+        Some(Ty::Str) => true,
+        Some(Ty::Union { variants }) => {
+            variants.iter().any(|v| matches!(v, Ty::Str)) && variants.iter().all(|v| matches!(v, Ty::Str | Ty::Nil))
+        }
+        _ => false,
+    };
+    // Not only the source's `params`: after the controller lowering it reads `@params`, a `Hash[String, untyped]`.
+    let untyped = match recv_ty {
+        Some(Ty::Untyped) => true,
+        Some(Ty::Union { variants }) => variants.iter().all(|v| matches!(v, Ty::Untyped | Ty::Nil)),
+        _ => false,
+    };
+    let lowered = untyped && is_ivar_params_rooted(recv);
+    if !(stringish && is_params_rooted(recv)) && !lowered {
+        return false;
+    }
+    let keyed = matches!(
+        method.as_str(),
+        "[]" | "[]=" | "fetch" | "dig" | "key?" | "has_key?" | "delete" | "slice" | "except"
+    ) && matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Sym { .. } }));
+    let structural = matches!(
+        method.as_str(),
+        "each" | "each_pair" | "each_value" | "each_key" | "each_with_index" | "reverse_each"
+            | "map" | "collect" | "flat_map" | "filter_map" | "select" | "filter" | "reject"
+            | "any?" | "all?" | "none?" | "keys" | "values" | "to_a" | "first" | "last"
+            | "compact" | "uniq" | "sort" | "sort_by" | "merge" | "key?" | "has_key?" | "dig"
+    );
+    keyed || (structural && matches!(send::str_method(method), Ty::Var { .. }))
+}
+
+fn is_params_rooted(e: &crate::expr::Expr) -> bool {
+    use crate::expr::ExprNode;
+    match &*e.node {
+        ExprNode::Send { recv: None, method, args, .. } => method.as_str() == "params" && args.is_empty(),
+        ExprNode::Send { recv: Some(r), method, .. } => {
+            matches!(method.as_str(), "[]" | "fetch" | "dig" | "require") && is_params_rooted(r)
+        }
+        _ => false,
+    }
+}
+
+fn is_ivar_params_rooted(e: &crate::expr::Expr) -> bool {
+    use crate::expr::ExprNode;
+    match &*e.node {
+        ExprNode::Send { recv: Some(r), method, .. } if matches!(method.as_str(), "[]" | "fetch" | "dig") => {
+            matches!(&*r.node, ExprNode::Ivar { name } if name.as_str() == "params") || is_ivar_params_rooted(r)
+        }
+        _ => false,
+    }
 }

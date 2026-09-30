@@ -135,6 +135,7 @@ pub mod session_options;
 pub mod status_literal;
 pub mod to_param_residue;
 pub mod relation_residue;
+pub mod params_residue;
 pub mod relation_select_block;
 pub mod send_dispatch;
 pub(crate) mod secure_password;
@@ -277,6 +278,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Deletes provably-dead `false && …` tails before any pass can
     // ledger residue for (or rewrite inside) code that cannot run.
     ("bool_fold", &[]),
+    // Reads the analyzer's nested request-params types before any pass rewrites the controller bodies that carry them.
+    ("params_residue", &["bool_fold"]),
     ("blank", &[]),
     ("time_current", &[]),
     ("as_json_super", &[]),
@@ -706,6 +709,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("spliced_concern_bodies");
     bool_fold::apply_bool_fold_lowering(app);
     ran!("bool_fold");
+    diags.extend(params_residue::apply_params_residue_ledger(app));
+    ran!("params_residue");
     diags.extend(blank::apply_blank_lowering(app));
     ran!("blank");
     time_current::apply_time_current_lowering(app);

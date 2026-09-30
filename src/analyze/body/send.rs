@@ -256,6 +256,17 @@ impl<'a> BodyTyper<'a> {
         method: &Symbol,
     ) -> Option<Vec<Ty>> {
         let recv_ty = recv_ty?;
+        if matches!(recv_ty, Ty::Class { id, .. } if id.0.as_str() == PARAM_VALUE) {
+            return match method.as_str() {
+                "each_with_index" | "each_with_object" => Some(vec![param_value_ty(), Ty::Int]),
+                "each" | "each_pair" | "map" | "collect" | "flat_map" | "filter_map" | "select"
+                | "filter" | "reject" | "any?" | "all?" | "none?" | "count" | "find" | "detect"
+                | "each_value" | "each_key" | "sort_by" | "group_by" | "partition" | "sum" => {
+                    Some(vec![param_value_ty(), param_value_ty()])
+                }
+                _ => None,
+            };
+        }
         // `then` / `yield_self` / `tap` yield the RECEIVER itself, on
         // every type — Kernel methods, not container ones, so they are
         // answered before the shape match rather than repeated inside
@@ -582,6 +593,9 @@ impl<'a> BodyTyper<'a> {
         if let Some(Ty::Class { id, args: of }) = recv_ty {
             if id.0.as_str() == "Class" && of.len() == 1 {
                 return self.dispatch(Some(&of[0]), method, block_ret, args);
+            }
+            if id.0.as_str() == PARAM_VALUE {
+                return param_value_method(method, block_ret).unwrap_or_else(|| str_method(method));
             }
         }
         // `obj.class` is receiver-aware: our type system flattens the
@@ -2519,4 +2533,39 @@ fn flatten_elem(t: &Ty) -> Ty {
             .fold(Ty::Bottom, union_of),
         other => other.clone(),
     }
+}
+
+/// The request-params value a nested read answers: a scalar, a hash or an array, whichever the request carried.
+pub(crate) const PARAM_VALUE: &str = "Roundhouse::ParamValue";
+
+pub(crate) fn param_value_ty() -> Ty {
+    Ty::Class { id: crate::ident::ClassId(Symbol::from(PARAM_VALUE)), args: vec![] }
+}
+
+// Not `permit`/`to_unsafe_h`/`require`: ActionController::Parameters methods no ruby-family runtime Hash answers.
+fn param_value_method(method: &Symbol, block_ret: Option<&Ty>) -> Option<Ty> {
+    let pv = param_value_ty;
+    let maybe_pv = || Ty::Union { variants: vec![pv(), Ty::Nil] };
+    Some(match method.as_str() {
+        "[]" | "dig" | "first" | "last" | "presence" => maybe_pv(),
+        "fetch" | "[]=" => pv(),
+        "key?" | "has_key?" | "include?" | "member?" | "present?" | "blank?" | "empty?" | "any?"
+        | "all?" | "none?" | "nil?" | "is_a?" | "==" | "!=" => Ty::Bool,
+        "each" | "each_pair" | "each_value" | "each_key" | "each_with_index" | "reverse_each"
+        | "select" | "filter" | "reject" | "compact" | "uniq" | "sort" | "sort_by" | "reverse"
+        | "merge" | "except" | "slice" => pv(),
+        "map" | "collect" | "flat_map" | "filter_map" => {
+            Ty::Array { elem: Box::new(block_ret.cloned().unwrap_or(Ty::Untyped)) }
+        }
+        "keys" => Ty::Array { elem: Box::new(Ty::Str) },
+        "values" | "to_a" => Ty::Array { elem: Box::new(pv()) },
+        "size" | "length" | "count" | "to_i" => Ty::Int,
+        "to_f" => Ty::Float,
+        "to_s" | "join" => Ty::Str,
+        "to_sym" => Ty::Sym,
+        "tap" | "dup" | "freeze" => pv(),
+        "!" => Ty::Bool,
+        "inspect" | "to_json" => Ty::Str,
+        _ => return None,
+    })
 }
