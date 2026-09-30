@@ -910,6 +910,45 @@ jobs:
       - name: scripts/campfire-db-differential
         run: scripts/campfire-db-differential /tmp/campfire
 
+  # All GC modes execute the same program; compile it once and preserve
+  # its executable bit in a tarball. The DB differential builds its own
+  # scenario overlay and must not reuse this binary.
+  build-campfire-compare-spinel:
+    needs: build-spinel
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: spinel-dist
+          path: spinel-dist
+      - name: Stage spinel binaries
+        run: |
+          chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
+          echo "$PWD/spinel-dist" >> $GITHUB_PATH
+      - name: System libvips + libsqlite3-dev + libjemalloc-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvips-dev libsqlite3-dev libjemalloc-dev
+      - name: Fetch pinned once-campfire
+        run: |
+          curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
+          mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
+      - name: Emit and build the comparison binary
+        run: |
+          cargo run --quiet --bin roundhouse -- --target spinel /tmp/campfire \
+            -o build/campfire-compare-spinel --allow-unsupported
+          make -C build/campfire-compare-spinel build
+          tar -czf campfire-compare-spinel.tar.gz -C build campfire-compare-spinel
+      - uses: actions/upload-artifact@v7
+        with:
+          name: campfire-compare-spinel
+          path: campfire-compare-spinel.tar.gz
+          compression-level: 0
+          retention-days: 1
+
   # campfire-compare-spinel: the same equivalence, with the compiled
   # BINARY as the emit lane — Rails' broadcast frames vs the binary's.
   # A real gate since matz/spinel#4240 (SanitizeTags inert through an
@@ -928,7 +967,7 @@ jobs:
   # decision needs a workload with a large, stable retained heap, and a
   # long-lived process holding connection registries and a rendered
   # room page is that shape — lobsters is request-shaped, LangArena the
-  # opposite. Both legs consume the SAME build-spinel artifact of the
+  # opposite. All legs consume the SAME comparison binary artifact of the
   # SAME run, so a red `minor-gc` beside a green `default` is the
   # collector alone. That is the report he wants most: reduce it, file
   # it upstream, and say minor-GC-only in the title. Only the served
@@ -953,7 +992,7 @@ jobs:
   # nothing.
   campfire-compare-spinel:
     name: campfire-compare-spinel (${{ matrix.gc }})
-    needs: build-spinel
+    needs: build-campfire-compare-spinel
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
@@ -988,6 +1027,14 @@ jobs:
         run: |
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
+      - uses: actions/download-artifact@v8
+        with:
+          name: campfire-compare-spinel
+      - name: Extract the comparison binary
+        run: |
+          mkdir -p build
+          tar -xzf campfire-compare-spinel.tar.gz -C build
+          test -x build/campfire-compare-spinel/build/blog
       - name: System libvips + libsqlite3-dev + libjemalloc-dev
         # libjemalloc-dev because the emitted spin.toml names jemalloc as
         # this program's allocator and `spin build` links `-ljemalloc`.
@@ -1010,7 +1057,7 @@ jobs:
       - name: Walk gems
         run: gem install websocket-driver --no-document
       - name: scripts/campfire-compare --spinel ${{ matrix.flag }}
-        run: scripts/campfire-compare --spinel ${{ matrix.flag }} /tmp/campfire
+        run: scripts/campfire-compare --reuse "$PWD/build/campfire-compare-spinel" --spinel ${{ matrix.flag }} /tmp/campfire
       - name: scripts/campfire-db-differential --spinel
         if: matrix.gc == 'default'
         run: scripts/campfire-db-differential --spinel /tmp/campfire
