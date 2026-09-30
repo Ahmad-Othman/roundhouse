@@ -67,3 +67,40 @@ fn a_custom_form_builder_runs() {
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
 }
+
+/// `enum :x, CONST.map { |v| [v, v.to_s] }.to_h` — Procore's
+/// `bid_package.rb` computes an identity string mapping over a
+/// constant instead of writing the hash literal out. Pins that the
+/// generated predicate and bang-writer methods actually work against a
+/// real column, not just that `check` accepts the declaration.
+#[test]
+fn computed_enum_map_to_h_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "t.string \"title\"\n    t.text \"body\"",
+            "t.string \"title\"\n    t.text \"body\"\n    t.string \"kind\", default: \"post\", null: false",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n\n  \
+             KINDS = %i[post announcement]\n  \
+             enum :kind, KINDS.map { |k| [k, k.to_s] }.to_h",
+        )
+        .write(
+            "test/models/article_enum_test.rb",
+            "require \"test_helper\"\n\n\
+             class ArticleEnumTest < ActiveSupport::TestCase\n  \
+               test \"a computed .map{}.to_h enum mapping generates working predicates\" do\n    \
+                 article = articles(:one)\n    \
+                 assert article.post?\n    \
+                 article.announcement!\n    \
+                 assert article.announcement?\n    \
+                 assert_equal \"announcement\", article.kind\n  \
+               end\n\
+             end\n",
+        )
+        .run_test("test/models/article_enum_test.rb")
+        .assert_passes();
+}
