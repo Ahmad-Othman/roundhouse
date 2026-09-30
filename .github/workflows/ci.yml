@@ -83,19 +83,20 @@ jobs:
   # goes red it is the analyzer's next entry, not noise.
   # -------------------------------------------------------------------
   store-check:
+    needs: generate-fixture
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: ruby/setup-ruby@v1
+      # generate-fixture already builds the store and runs the guide's
+      # Rails tests before uploading it; analyze that same source tree.
+      - uses: actions/download-artifact@v8
         with:
-          ruby-version: "3.4"
-      - name: Install Rails
-        run: gem install rails
-      - name: Build the store by following the guide (runs its tests)
-        run: cd fixtures && ../scripts/create-store store
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
       - name: cargo build
         run: cargo build --release --bin roundhouse
       - name: The analyzer reports no errors, no warnings and no ingest gaps on the store
