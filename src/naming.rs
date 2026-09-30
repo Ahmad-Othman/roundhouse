@@ -488,7 +488,7 @@ pub fn sql_ident(name: &str) -> String {
     }
 }
 
-fn is_sqlite_keyword(name: &str) -> bool {
+pub(crate) fn is_sqlite_keyword(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
         "abort" | "action" | "add" | "after" | "all" | "alter" | "always" | "analyze" | "and" | "as"
