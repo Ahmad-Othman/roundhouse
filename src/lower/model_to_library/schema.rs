@@ -143,20 +143,27 @@ pub(super) fn push_schema_methods(
     // push::subscriptions` and SQLite answered "unrecognized token
     // ':'". Third copy of this rule found in one session
     // ([[feedback_port_dont_derive_inflections]]).
-    methods.push(MethodDef {
-        name_span: crate::span::Span::synthetic(),
-        name: Symbol::from("table_name"),
-        receiver: MethodReceiver::Class,
-        params: Vec::new(),
-        body: lit_str(model.table.0.as_str().to_string()),
-        signature: Some(fn_sig(vec![], Ty::Str)),
-        effects: EffectSet::default(),
-        enclosing_class: Some(owner.0.clone()),
-        kind: AccessorKind::Method,
-        is_async: false,
+    // Public metadata stays raw; Relation consumes the SQL spelling so
+    // dynamic chains use the same quoting authority as compiled Arel.
+    for (name, value) in [
+        ("table_name", model.table.0.as_str().to_string()),
+        ("_table_sql", crate::naming::sql_ident(model.table.0.as_str())),
+    ] {
+        methods.push(MethodDef {
+            name_span: crate::span::Span::synthetic(),
+            name: Symbol::from(name),
+            receiver: MethodReceiver::Class,
+            params: Vec::new(),
+            body: lit_str(value),
+            signature: Some(fn_sig(vec![], Ty::Str)),
+            effects: EffectSet::default(),
+            enclosing_class: Some(owner.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
             mutates_self: false,
             block_param: None,
-    });
+        });
+    }
 
     // def self.primary_key — emitted ONLY when the model overrode
     // Rails' default, so the runtime Base's `"id"` answers for everyone
