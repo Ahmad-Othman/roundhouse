@@ -1830,6 +1830,7 @@ impl Analyzer {
                     &chained_bodies,
                     MAX_FILTER_CALL_DEPTH,
                     &mut visited,
+                    true,
                 );
                 if transitive.is_empty() {
                     continue;
@@ -4641,6 +4642,7 @@ fn collect_transitive_filter_ivars(
     bodies: &HashMap<Symbol, Expr>,
     depth: usize,
     visited: &mut BTreeSet<Symbol>,
+    own: bool,
 ) -> HashMap<Symbol, Ty> {
     if depth == 0 {
         return HashMap::new();
@@ -4649,7 +4651,7 @@ fn collect_transitive_filter_ivars(
         ExprNode::Seq { exprs } => {
             let mut out = HashMap::new();
             for e in exprs {
-                union_ivar_maps(&mut out, collect_transitive_filter_ivars(e, bodies, depth, visited));
+                union_ivar_maps(&mut out, collect_transitive_filter_ivars(e, bodies, depth, visited, own));
             }
             out
         }
@@ -4664,19 +4666,19 @@ fn collect_transitive_filter_ivars(
         // `else_branch` is a literal `nil` expression when the source
         // omitted one, and walking it yields `{}`.
         ExprNode::If { cond, then_branch, else_branch } => {
-            let mut out = collect_transitive_filter_ivars(cond, bodies, depth, visited);
+            let mut out = collect_transitive_filter_ivars(cond, bodies, depth, visited, own);
             let branches = vec![
-                collect_transitive_filter_ivars(then_branch, bodies, depth, visited),
-                collect_transitive_filter_ivars(else_branch, bodies, depth, visited),
+                collect_transitive_filter_ivars(then_branch, bodies, depth, visited, own),
+                collect_transitive_filter_ivars(else_branch, bodies, depth, visited, own),
             ];
             union_ivar_maps(&mut out, merge_alternative_branches(branches));
             out
         }
         ExprNode::Case { scrutinee, arms } => {
-            let mut out = collect_transitive_filter_ivars(scrutinee, bodies, depth, visited);
+            let mut out = collect_transitive_filter_ivars(scrutinee, bodies, depth, visited, own);
             let mut branches: Vec<HashMap<Symbol, Ty>> = arms
                 .iter()
-                .map(|arm| collect_transitive_filter_ivars(&arm.body, bodies, depth, visited))
+                .map(|arm| collect_transitive_filter_ivars(&arm.body, bodies, depth, visited, own))
                 .collect();
             // No `when`/pattern may match — Ruby's `case` with nothing
             // matching (and no `else`) evaluates to nil — so an
@@ -4688,8 +4690,8 @@ fn collect_transitive_filter_ivars(
             out
         }
         ExprNode::BoolOp { left, right, .. } => {
-            let mut out = collect_transitive_filter_ivars(left, bodies, depth, visited);
-            let right_out = collect_transitive_filter_ivars(right, bodies, depth, visited);
+            let mut out = collect_transitive_filter_ivars(left, bodies, depth, visited, own);
+            let right_out = collect_transitive_filter_ivars(right, bodies, depth, visited, own);
             // `right` only evaluates if `left` doesn't short-circuit
             // the operator — may-not-run, same treatment as an `If`
             // with no `else`.
@@ -4697,31 +4699,31 @@ fn collect_transitive_filter_ivars(
             out
         }
         ExprNode::While { cond, body, .. } => {
-            let mut out = collect_transitive_filter_ivars(cond, bodies, depth, visited);
-            let body_out = collect_transitive_filter_ivars(body, bodies, depth, visited);
+            let mut out = collect_transitive_filter_ivars(cond, bodies, depth, visited, own);
+            let body_out = collect_transitive_filter_ivars(body, bodies, depth, visited, own);
             // The body may run zero times.
             union_ivar_maps(&mut out, merge_alternative_branches(vec![body_out, HashMap::new()]));
             out
         }
         ExprNode::RescueModifier { expr: e, fallback } => {
-            let mut out = collect_transitive_filter_ivars(e, bodies, depth, visited);
-            let fb = collect_transitive_filter_ivars(fallback, bodies, depth, visited);
+            let mut out = collect_transitive_filter_ivars(e, bodies, depth, visited, own);
+            let fb = collect_transitive_filter_ivars(fallback, bodies, depth, visited, own);
             union_ivar_maps(&mut out, merge_alternative_branches(vec![fb, HashMap::new()]));
             out
         }
         ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
-            let mut out = collect_transitive_filter_ivars(body, bodies, depth, visited);
+            let mut out = collect_transitive_filter_ivars(body, bodies, depth, visited, own);
             let mut alt: Vec<HashMap<Symbol, Ty>> = rescues
                 .iter()
-                .map(|r| collect_transitive_filter_ivars(&r.body, bodies, depth, visited))
+                .map(|r| collect_transitive_filter_ivars(&r.body, bodies, depth, visited, own))
                 .collect();
             alt.push(HashMap::new()); // no rescue triggers
             union_ivar_maps(&mut out, merge_alternative_branches(alt));
             if let Some(e) = else_branch {
-                union_ivar_maps(&mut out, collect_transitive_filter_ivars(e, bodies, depth, visited));
+                union_ivar_maps(&mut out, collect_transitive_filter_ivars(e, bodies, depth, visited, own));
             }
             if let Some(e) = ensure {
-                union_ivar_maps(&mut out, collect_transitive_filter_ivars(e, bodies, depth, visited));
+                union_ivar_maps(&mut out, collect_transitive_filter_ivars(e, bodies, depth, visited, own));
             }
             out
         }
@@ -4767,6 +4769,7 @@ fn collect_transitive_filter_ivars(
                                 bodies,
                                 depth - 1,
                                 visited,
+                                false,
                             ),
                         );
                         visited.remove(method);
@@ -4774,24 +4777,24 @@ fn collect_transitive_filter_ivars(
                 }
             }
             if let Some(r) = recv {
-                union_ivar_maps(&mut out, collect_transitive_filter_ivars(r, bodies, depth, visited));
+                union_ivar_maps(&mut out, collect_transitive_filter_ivars(r, bodies, depth, visited, own));
             }
             for a in args {
-                union_ivar_maps(&mut out, collect_transitive_filter_ivars(a, bodies, depth, visited));
+                union_ivar_maps(&mut out, collect_transitive_filter_ivars(a, bodies, depth, visited, own));
             }
             if let Some(b) = block {
-                union_ivar_maps(&mut out, collect_transitive_filter_ivars(b, bodies, depth, visited));
+                union_ivar_maps(&mut out, collect_transitive_filter_ivars(b, bodies, depth, visited, own));
             }
             out
         }
-        ExprNode::Lambda { body, .. } => collect_transitive_filter_ivars(body, bodies, depth, visited),
+        ExprNode::Lambda { body, .. } => collect_transitive_filter_ivars(body, bodies, depth, visited, own),
         ExprNode::Let { value, body, .. } => {
-            let mut out = collect_transitive_filter_ivars(value, bodies, depth, visited);
-            union_ivar_maps(&mut out, collect_transitive_filter_ivars(body, bodies, depth, visited));
+            let mut out = collect_transitive_filter_ivars(value, bodies, depth, visited, own);
+            union_ivar_maps(&mut out, collect_transitive_filter_ivars(body, bodies, depth, visited, own));
             out
         }
         ExprNode::Return { value } | ExprNode::Raise { value } => {
-            collect_transitive_filter_ivars(value, bodies, depth, visited)
+            collect_transitive_filter_ivars(value, bodies, depth, visited, own)
         }
         // A direct ivar write, recorded the same way
         // `extract_ivar_assignments` records one — from `value.ty`,
@@ -4803,18 +4806,20 @@ fn collect_transitive_filter_ivars(
         // `extract_ivar_assignments` on the whole callee body would.
         ExprNode::Assign { target: LValue::Ivar { name }, value }
         | ExprNode::OpAssign { target: LValue::Ivar { name }, value, .. } => {
-            let mut out = collect_transitive_filter_ivars(value, bodies, depth, visited);
-            if let Some(ty) = value.ty.clone() {
-                union_ivar_maps(&mut out, HashMap::from([(name.clone(), ty)]));
+            let mut out = collect_transitive_filter_ivars(value, bodies, depth, visited, own);
+            if !own {
+                if let Some(ty) = value.ty.clone() {
+                    union_ivar_maps(&mut out, HashMap::from([(name.clone(), ty)]));
+                }
             }
             out
         }
         // `@a, @b = expr` — same per-position typing
         // `extract_ivar_assignments` uses for the non-transitive case.
         ExprNode::MultiAssign { targets, value } => {
-            let mut out = collect_transitive_filter_ivars(value, bodies, depth, visited);
+            let mut out = collect_transitive_filter_ivars(value, bodies, depth, visited, own);
             for (i, target) in targets.iter().enumerate() {
-                if let LValue::Ivar { name } = target {
+                if let (LValue::Ivar { name }, false) = (target, own) {
                     if let Some(ty) = body::multiassign_target_ty(&value.ty, i) {
                         union_ivar_maps(&mut out, HashMap::from([(name.clone(), ty)]));
                     }
@@ -4830,10 +4835,10 @@ fn collect_transitive_filter_ivars(
         // refinement this transitive walk doesn't attempt — out of
         // scope for the filter-chain gap this function targets).
         ExprNode::Assign { target, value } | ExprNode::OpAssign { target, value, .. } => {
-            let mut out = collect_transitive_filter_ivars(value, bodies, depth, visited);
+            let mut out = collect_transitive_filter_ivars(value, bodies, depth, visited, own);
             if let LValue::Index { recv, index } = target {
-                union_ivar_maps(&mut out, collect_transitive_filter_ivars(recv, bodies, depth, visited));
-                union_ivar_maps(&mut out, collect_transitive_filter_ivars(index, bodies, depth, visited));
+                union_ivar_maps(&mut out, collect_transitive_filter_ivars(recv, bodies, depth, visited, own));
+                union_ivar_maps(&mut out, collect_transitive_filter_ivars(index, bodies, depth, visited, own));
             }
             out
         }

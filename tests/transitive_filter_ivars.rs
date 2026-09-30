@@ -353,3 +353,81 @@ end
         ),
     }
 }
+
+/// A filter target's OWN direct writes are not the walk's to report:
+/// they are already in the chain's bindings, typed by the controller-
+/// wide pass. The walk reads each body as the per-action pass typed it,
+/// where `@account` — set by a different filter — is not known yet, so
+/// re-collecting `@status = @account.statuses.find(...)` from there
+/// unioned an `untyped` into the resolved `Status`. Mastodon's
+/// `StatusesController#set_status` is this shape; the IDE's hover on
+/// `@status` in `statuses/show` read `Status | untyped`.
+#[test]
+fn transitive_filter_ivars_leave_the_targets_own_writes_to_the_chain() {
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/statuses_controller.rb",
+            r#"class StatusesController < ApplicationController
+  before_action :set_account
+  before_action :set_status
+
+  def show
+  end
+
+  private
+
+  def set_account
+    @account = Account.find(params[:account_id])
+  end
+
+  def set_status
+    @status = @account.statuses.find(params[:id])
+    check_status
+  end
+
+  def check_status
+  end
+end
+"#,
+        ),
+        (
+            "app/models/account.rb",
+            "class Account < ApplicationRecord\n  has_many :statuses\nend\n",
+        ),
+        (
+            "app/models/status.rb",
+            "class Status < ApplicationRecord\n  belongs_to :account\nend\n",
+        ),
+        ("app/views/statuses/show.html.erb", "<p><%= @status.text %></p>\n"),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "accounts", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "statuses", force: :cascade do |t|
+    t.integer "account_id"
+    t.string "text"
+  end
+end
+"#,
+        ),
+    ]);
+
+    let view = app
+        .views
+        .iter()
+        .find(|v| v.name.as_str() == "statuses/show")
+        .expect("statuses/show view");
+    let mut reads = Vec::new();
+    collect_ivar_reads(&view.body, &mut reads);
+    let ty = ivar_read_ty(&reads, "status").expect("@status read carries a type");
+    match ty {
+        Ty::Class { id, .. } => assert_eq!(id.0.as_str(), "Status"),
+        other => panic!("expected @status : Status, got {other:?}"),
+    }
+}
