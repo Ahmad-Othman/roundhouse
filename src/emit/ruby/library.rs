@@ -6552,6 +6552,12 @@ fn require_path_for_body_const(
     // what to load. Strip it before resolving, or rooting a reference
     // silently deletes its require and the constant is undefined at load
     // for a different reason than the one rooting fixed.
+    // Ingest marks the root either way: as a `::X` head or as an empty
+    // leading segment (`::Logger::Formatter` → ["", "Logger", "Formatter"]).
+    let path = match path.split_first() {
+        Some((head, rest)) if head.is_empty() => rest,
+        _ => path,
+    };
     let rooted;
     let path: &[String] = match path.first().and_then(|f| f.strip_prefix("::")) {
         Some(bare) => {
