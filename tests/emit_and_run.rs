@@ -395,3 +395,49 @@ end
         .run_test("test/models/article_as_hash_boolean_test.rb")
         .assert_passes();
 }
+
+/// Not a diagnostic count: each core method's value is held to what CRuby answers.
+#[test]
+fn core_integer_float_string_array_methods_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r##"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def core_surface_probe
+    n = 17
+    ints = [n.clamp(1, 10), n.div(5), n.modulo(5), n.gcd(4), n.lcm(4), n.pow(2), n.bit_length, n.divmod(5).first]
+    f = 7.5
+    floats = [n.fdiv(2), f.clamp(1.0, 5.0), f.modulo(2.0), f.fdiv(2)]
+    ups = 1.upto(3).map { |i| i * 2 }
+    downs = 3.downto(1).map { |i| i }
+    steps = 0.step(6, 3).map { |i| i }
+    seen = []
+    3.times { |i| seen << i }
+    labels = %w[a b c].map.with_index { |s, i| "#{i}#{s}" }
+    arr = [3, 1, 2]
+    arr.sort_by! { |x| -x }
+    arr.select! { |x| x > 1 }
+    arr.insert(1, 9)
+    s = "hello".dup
+    s.gsub!("l", "L")
+    [ints.join(","), floats.join(","), ups.join(","), downs.join(","), steps.join(","), seen.join(","), labels.join(","), arr.join(","), s, Regexp.escape("a.b")].join("|")
+  end"##,
+        )
+        .write(
+            "test/models/article_core_surface_test.rb",
+            r#"require "test_helper"
+
+class ArticleCoreSurfaceTest < ActiveSupport::TestCase
+  test "core Integer, Float, String and Array methods answer as CRuby does" do
+    assert_equal "10,3,2,1,68,289,5,3|8.5,5.0,1.5,3.75|2,4,6|3,2,1|0,3,6|0,1,2|0a,1b,2c|3,9,2|heLLo|a\\.b",
+                 Article.new.core_surface_probe
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_core_surface_test.rb")
+        .assert_passes();
+}

@@ -2527,6 +2527,38 @@ end
 }
 
 #[test]
+fn core_numeric_string_and_array_surface_types() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/thing.rb",
+            r#"class Thing < ApplicationRecord
+  def compute(name)
+    doubled = 1.upto(3).map { |i| i * 2 }
+    indexed = [10, 20].map.with_index { |d, i| d + i }
+    ratio = 7.fdiv(2).round(1)
+    capped = 300.clamp(0, 255) + 1
+    list = [1, 2]
+    list.insert(1, 9).sort_by! { |x| -x }
+    quotient, rest = 17.divmod(5)
+    name.gsub!("-", "_")
+    [doubled.sum, indexed.first, ratio, capped, list.size, quotient + rest, Regexp.escape(name).size, 2.5.fdiv(2).floor]
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in ["upto", "with_index", "fdiv", "clamp", "insert", "sort_by!", "divmod", "gsub!", "escape", "sum", "round", "floor"] {
+        assert!(!failures.iter().any(|f| f == m), "`{m}` should resolve; failures = {failures:?}");
+    }
+}
+
+#[test]
 fn gem_catalog_resolves_third_party_surface() {
     // The gem catalog (src/catalog/gems.rs) resolves the third-party
     // surface apps call: class methods (`Arel.sql`, `ROTP::Base32.random`),

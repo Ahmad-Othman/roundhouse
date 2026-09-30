@@ -280,7 +280,12 @@ impl<'a> BodyTyper<'a> {
                 | "index" | "find_index"
                 | "any?" | "all?" | "none?" | "one?"
                 | "to_h" => Some(vec![(**elem).clone()]),
-                "each_with_index" => Some(vec![(**elem).clone(), Ty::Int]),
+                "each_with_index" | "with_index" => Some(vec![(**elem).clone(), Ty::Int]),
+                "sort_by!" | "select!" | "reject!" | "keep_if" | "delete_if" => Some(vec![(**elem).clone()]),
+                _ => None,
+            },
+            Ty::Int => match method.as_str() {
+                "times" | "upto" | "downto" | "step" => Some(vec![Ty::Int]),
                 _ => None,
             },
             // A relation iterates its element model — same block
@@ -1079,6 +1084,7 @@ impl<'a> BodyTyper<'a> {
                         "match?" | "===" => return Ty::Bool,
                         "source" | "to_s" | "inspect" => return Ty::Str,
                         "options" | "casefold?" => return Ty::Int,
+                        "escape" | "quote" => return Ty::Str,
                         _ => {}
                     }
                 }
@@ -1904,7 +1910,9 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         },
         // In-place / index-yielding transforms return the array itself.
         "each_with_index" | "keep_if" | "delete_if" | "select!" | "reject!" | "sort!"
-        | "uniq!" | "compact!" | "reverse!" => Ty::Array { elem: Box::new(elem.clone()) },
+        | "uniq!" | "compact!" | "reverse!" | "sort_by!" | "insert" => Ty::Array { elem: Box::new(elem.clone()) },
+        // Not the receiver's elements: `map.with_index { }` builds from the block, the only enumerator its callers chain.
+        "with_index" => Ty::Array { elem: Box::new(block_ret.cloned().unwrap_or_else(|| elem.clone())) },
         // `group_by`/`index_by` (ActiveSupport) force evaluation to a Hash.
         "group_by" => Ty::Hash {
             key: Box::new(Ty::Untyped),
@@ -2225,6 +2233,9 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // Case-insensitive comparison: `casecmp` returns -1/0/1 (Int),
         // `casecmp?` returns Bool.
         "casecmp" => Ty::Int,
+        // Bang forms answer nil when nothing changed, so the value is `String?`.
+        "gsub!" | "sub!" | "strip!" | "lstrip!" | "rstrip!" | "chomp!" | "chop!" | "squeeze!"
+        | "downcase!" | "upcase!" | "capitalize!" | "tr!" | "delete!" => Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
         "casecmp?" => Ty::Bool,
         // `ord` → the codepoint of the first character.
         "ord" => Ty::Int,
@@ -2332,7 +2343,11 @@ pub(super) fn int_method(method: &Symbol) -> Ty {
         "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
         // Bit access (`flags[0]`) returns the bit as Int; `times` returns
         // the receiver (Int) — `n.times { }` evaluates to `n`.
-        "[]" | "times" => Ty::Int,
+        "[]" | "times" | "clamp" | "div" | "modulo" | "gcd" | "lcm" | "pow" | "bit_length" => Ty::Int,
+        "fdiv" => Ty::Float,
+        "divmod" => Ty::Array { elem: Box::new(Ty::Int) },
+        // Not the block form's receiver: the corpus chains these (`1.upto(5).map`), so the enumerator's values are what flows.
+        "upto" | "downto" | "step" => Ty::Array { elem: Box::new(Ty::Int) },
         // ActiveSupport byte-size helpers — like the duration helpers,
         // they yield a Numeric-ish value we don't model structurally.
         "bytes" | "kilobytes" | "megabytes" | "gigabytes" | "terabytes"
@@ -2361,7 +2376,9 @@ pub(super) fn float_method(method: &Symbol) -> Ty {
         // arg it returns Float, but we don't see args here — Int is the
         // safer default for the bare call.
         "to_i" | "to_int" | "round" | "ceil" | "floor" | "truncate" => Ty::Int,
-        "to_f" | "abs" => Ty::Float,
+        "to_f" | "abs" | "fdiv" | "clamp" | "modulo" => Ty::Float,
+        "div" => Ty::Int,
+        "divmod" => Ty::Array { elem: Box::new(Ty::Float) },
         // Unary minus/plus: `-x` desugars to `x.-@`. Float stays Float.
         "-@" | "+@" => Ty::Float,
         "zero?" | "positive?" | "negative?" | "nan?" | "finite?" | "infinite?" => Ty::Bool,
