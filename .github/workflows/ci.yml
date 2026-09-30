@@ -1897,7 +1897,7 @@ jobs:
   # boot knowledge lives here (that's the point — it's all in the
   # archive). The repo-side playwright install pre-warms the browser
   # cache + system deps so the README's own `npx playwright install
-  # chromium` (same ^1.49 range) is a cache hit.
+  # chromium` (version pinned to the repo's e2e lockfile) is a cache hit.
   #
   # ruby/jruby ride smoke too: their scaffold document ships as
   # SPECIMEN.md and the generated quick-start takes README.md. Only
