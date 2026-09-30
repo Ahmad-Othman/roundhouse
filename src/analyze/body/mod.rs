@@ -894,7 +894,7 @@ impl<'a> BodyTyper<'a> {
                 };
                 for a in args.iter_mut() { self.analyze_expr(a, ctx); }
                 if let Some(r) = recv.as_mut() {
-                    if promotes_to_param_value(r, recv_ty.as_ref(), method, args) {
+                    if promotes_to_param_value(r, recv_ty.as_ref(), method, args, &ctx.local_bindings) {
                         r.ty = Some(send::param_value_ty());
                         recv_ty = r.ty.clone();
                     }
@@ -1124,6 +1124,12 @@ impl<'a> BodyTyper<'a> {
                 // {}`) — the Hash counterpart of `array_seed_idx`.
                 let mut hash_seed_idx: HashMap<(bool, Symbol), usize> = HashMap::new();
                 for i in 0..exprs.len() {
+                    let read_structurally_later = match &*exprs[i].node {
+                        ExprNode::Assign { target: LValue::Var { name, .. }, .. } => {
+                            exprs[i + 1..].iter().any(|later| reads_structurally(later, name))
+                        }
+                        _ => false,
+                    };
                     let e = &mut exprs[i];
                     last = self.analyze_expr(e, &local_ctx);
                     if let ExprNode::Assign { target, value } = &*e.node {
@@ -1138,6 +1144,20 @@ impl<'a> BodyTyper<'a> {
                                     local_ctx.ivar_bindings.insert(name.clone(), ty);
                                 } else {
                                     local_ctx.local_bindings.insert(name.clone(), ty);
+                                }
+                            }
+                            if !is_ivar {
+                                let mark = param_local_mark(&name);
+                                if is_params_rooted(value, &local_ctx.local_bindings)
+                                    || is_ivar_params_rooted(value, &local_ctx.local_bindings)
+                                {
+                                    local_ctx.local_bindings.insert(mark, Ty::Nil);
+                                    // Not per use: a local the rest of the body reads as a hash or an array is one from its assignment on, so its `present?` grounds for that too.
+                                    if read_structurally_later {
+                                        local_ctx.local_bindings.insert(name.clone(), send::param_value_ty());
+                                    }
+                                } else {
+                                    local_ctx.local_bindings.remove(&mark);
                                 }
                             }
                             let empty_seed = matches!(&*value.node,
@@ -3199,6 +3219,7 @@ fn promotes_to_param_value(
     recv_ty: Option<&Ty>,
     method: &crate::ident::Symbol,
     args: &[crate::expr::Expr],
+    locals: &HashMap<Symbol, Ty>,
 ) -> bool {
     use crate::expr::{ExprNode, Literal};
     let stringish = match recv_ty {
@@ -3214,45 +3235,72 @@ fn promotes_to_param_value(
         Some(Ty::Union { variants }) => variants.iter().all(|v| matches!(v, Ty::Untyped | Ty::Nil)),
         _ => false,
     };
-    let lowered = untyped && is_ivar_params_rooted(recv);
-    if !(stringish && is_params_rooted(recv)) && !lowered {
+    let lowered = untyped && is_ivar_params_rooted(recv, locals);
+    if !(stringish && is_params_rooted(recv, locals)) && !lowered {
         return false;
     }
     let keyed = matches!(
         method.as_str(),
         "[]" | "[]=" | "fetch" | "dig" | "key?" | "has_key?" | "delete" | "slice" | "except"
     ) && matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Sym { .. } }));
-    let structural = matches!(
-        method.as_str(),
-        "each" | "each_pair" | "each_value" | "each_key" | "each_with_index" | "reverse_each"
-            | "map" | "collect" | "flat_map" | "filter_map" | "select" | "filter" | "reject"
-            | "any?" | "all?" | "none?" | "keys" | "values" | "to_a" | "first" | "last"
-            | "compact" | "uniq" | "sort" | "sort_by" | "merge" | "key?" | "has_key?" | "dig"
-            | "permit" | "permit!" | "to_unsafe_h" | "require"
-    );
+    let structural = STRUCTURAL.contains(&method.as_str());
     keyed || (structural && matches!(send::str_method(method), Ty::Var { .. }))
 }
 
-fn is_params_rooted(e: &crate::expr::Expr) -> bool {
+// Not a field on `Ctx`: a name no Ruby local can take rides in `local_bindings`, which every scope already clones.
+fn param_local_mark(name: &Symbol) -> Symbol {
+    Symbol::from(format!("#params-local:{}", name.as_str()).as_str())
+}
+
+fn is_param_local(e: &crate::expr::Expr, locals: &HashMap<Symbol, Ty>) -> bool {
+    matches!(&*e.node, crate::expr::ExprNode::Var { name, .. } if locals.contains_key(&param_local_mark(name)))
+}
+
+fn reads_structurally(e: &crate::expr::Expr, name: &Symbol) -> bool {
+    use crate::expr::{ExprNode, Literal};
+    if let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node {
+        if matches!(&*r.node, ExprNode::Var { name: n, .. } if n == name) {
+            let keyed = matches!(method.as_str(), "[]" | "[]=" | "fetch" | "dig" | "key?" | "has_key?")
+                && matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Sym { .. } }));
+            if keyed || STRUCTURAL.contains(&method.as_str()) {
+                return true;
+            }
+        }
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found = found || reads_structurally(c, name));
+    found
+}
+
+const STRUCTURAL: &[&str] = &[
+    "each", "each_pair", "each_value", "each_key", "each_with_index", "reverse_each", "map", "collect",
+    "flat_map", "filter_map", "select", "filter", "reject", "any?", "all?", "none?", "keys", "values", "to_a",
+    "first", "last", "compact", "uniq", "sort", "sort_by", "merge", "key?", "has_key?", "dig", "permit",
+    "permit!", "to_unsafe_h", "require",
+];
+
+fn is_params_rooted(e: &crate::expr::Expr, locals: &HashMap<Symbol, Ty>) -> bool {
     use crate::expr::ExprNode;
     match &*e.node {
         ExprNode::Send { recv: None, method, args, .. } => method.as_str() == "params" && args.is_empty(),
         ExprNode::Send { recv: Some(r), method, .. } => {
-            matches!(method.as_str(), "[]" | "fetch" | "dig" | "require") && is_params_rooted(r)
+            matches!(method.as_str(), "[]" | "fetch" | "dig" | "require") && is_params_rooted(r, locals)
         }
-        _ => false,
+        _ => is_param_local(e, locals),
     }
 }
 
-fn is_ivar_params_rooted(e: &crate::expr::Expr) -> bool {
+fn is_ivar_params_rooted(e: &crate::expr::Expr, locals: &HashMap<Symbol, Ty>) -> bool {
     use crate::expr::ExprNode;
     match &*e.node {
         ExprNode::Send { recv: Some(r), method, .. }
             if matches!(method.as_str(), "[]" | "fetch" | "dig" | "slice" | "except" | "to_h" | "merge") =>
         {
-            matches!(&*r.node, ExprNode::Ivar { name } if name.as_str() == "params") || is_ivar_params_rooted(r)
+            matches!(&*r.node, ExprNode::Ivar { name } if name.as_str() == "params")
+                || is_ivar_params_rooted(r, locals)
+                || is_param_local(r, locals)
         }
-        _ => false,
+        _ => is_param_local(e, locals),
     }
 }
 /// Top-level constants Ruby and its default/bundled gems define. A bare

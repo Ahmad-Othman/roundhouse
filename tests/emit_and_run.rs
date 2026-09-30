@@ -809,3 +809,35 @@ fn nested_request_params_permit_and_require_run() {
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
 }
+
+/// Not only a `params[...]` chain: a local assigned from one holds the same request value, and reads through it the same way.
+#[test]
+fn a_local_holding_a_request_params_value_reads_it() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    @article = Article.new(article_params)\n",
+            r##"    @article = Article.new(article_params)
+    extra = params[:extra]
+    tags = params[:tags]
+    if extra.present? && extra.key?(:suffix)
+      @article.title = @article.title.to_s + " " + extra[:suffix].to_s
+    end
+    if tags.present?
+      tags.each { |t| @article.body = @article.body.to_s + " #" + t.to_s }
+    end
+"##,
+        )
+        .edit(
+            "test/controllers/articles_controller_test.rb",
+            "      post articles_url, params: { article: { body: \"A sufficiently long body for validation.\", title: \"New Title\" } }\n",
+            "      post articles_url, params: { article: { body: \"A sufficiently long body for validation.\", title: \"New Title\" }, extra: { suffix: \"Extra\" }, tags: [\"a\", \"b\"] }\n",
+        )
+        .edit(
+            "test/controllers/articles_controller_test.rb",
+            "    assert_equal \"New Title\", Article.last.title\n",
+            "    assert_equal \"New Title Extra\", Article.last.title\n    assert_equal \"A sufficiently long body for validation. #a #b\", Article.last.body\n",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}

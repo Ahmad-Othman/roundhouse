@@ -2550,7 +2550,8 @@ fn param_value_method(method: &Symbol, block_ret: Option<&Ty>) -> Option<Ty> {
         "[]" | "dig" | "first" | "last" | "presence" => maybe_pv(),
         "fetch" | "[]=" => pv(),
         "key?" | "has_key?" | "include?" | "member?" | "present?" | "blank?" | "empty?" | "any?"
-        | "all?" | "none?" | "nil?" | "is_a?" | "==" | "!=" => Ty::Bool,
+        | "all?" | "none?" | "nil?" | "is_a?" | "kind_of?" | "instance_of?" | "respond_to?" | "=="
+        | "!=" | "===" | "equal?" | "eql?" => Ty::Bool,
         "each" | "each_pair" | "each_value" | "each_key" | "each_with_index" | "reverse_each"
         | "select" | "filter" | "reject" | "compact" | "uniq" | "sort" | "sort_by" | "reverse"
         | "merge" | "except" | "slice" | "permit" | "permit!" | "to_unsafe_h" | "to_h" | "require" => pv(),
