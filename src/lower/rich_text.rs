@@ -231,6 +231,8 @@ fn push_record_methods(methods: &mut Vec<MethodDef>, model: &Model) {
         methods,
         model,
         MethodDef {
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: body_col.clone(),
             receiver: MethodReceiver::Instance,
@@ -259,6 +261,8 @@ fn push_record_methods(methods: &mut Vec<MethodDef>, model: &Model) {
         methods,
         model,
         MethodDef {
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("body="),
             receiver: MethodReceiver::Instance,
@@ -295,6 +299,8 @@ fn push_record_methods(methods: &mut Vec<MethodDef>, model: &Model) {
         methods,
         model,
         MethodDef {
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("body_before_type_cast"),
             receiver: MethodReceiver::Instance,
@@ -895,6 +901,8 @@ pub(crate) fn push_preload_scope_methods(methods: &mut Vec<MethodDef>, model: &M
             continue;
         }
         methods.push(MethodDef {
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name,
             receiver: MethodReceiver::Class,

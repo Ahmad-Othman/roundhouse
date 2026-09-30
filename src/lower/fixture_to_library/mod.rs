@@ -179,6 +179,8 @@ fn build_fixture_class(
             let id = (idx + 1) as i64;
             let body = build_find_call(&f.class, id);
             MethodDef {
+                unsupported_formals: None,
+                has_anonymous_block: false,
                 name_span: crate::span::Span::synthetic(),
                 name: r.label.clone(),
                 receiver: MethodReceiver::Class,
@@ -210,6 +212,8 @@ fn build_fixture_class(
     // (spinel's AOT model has no constant table to `send` through).
     if wants_by_label {
         methods.push(MethodDef {
+            unsupported_formals: None,
+            has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
             name: Symbol::from("by_label"),
         receiver: MethodReceiver::Class,
@@ -218,6 +222,7 @@ fn build_fixture_class(
             default: None,
             keyword: false,
             rest: false,
+            forwarding: false,
             from_keyword: false,
             from_kwrest: false,
         }],
@@ -241,6 +246,8 @@ fn build_fixture_class(
     // ids the label methods look up. Body is a Seq of Sends.
     let load_body = build_load_method_body(&f.class, &f.records, &f.preamble, all);
     methods.push(MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: Symbol::from("_fixtures_load!"),
         receiver: MethodReceiver::Class,
@@ -694,4 +701,3 @@ pub fn rewrite_fixture_calls(body: &Expr, fixture_names: &[Symbol]) -> Expr {
         ))
     })
 }
-

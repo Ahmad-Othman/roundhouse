@@ -863,6 +863,8 @@ pub(super) fn expand_enum_decl(
                 name: Symbol::from(name),
                 receiver: MethodReceiver::Instance,
                 params: Vec::new(),
+                unsupported_formals: None,
+                has_anonymous_block: false,
                 block_param: None,
                 body,
                 signature: None,
@@ -928,6 +930,8 @@ pub(super) fn expand_enum_decl(
             name: Symbol::from(crate::naming::pluralize_snake(&column)),
             receiver: MethodReceiver::Class,
             params: Vec::new(),
+            unsupported_formals: None,
+            has_anonymous_block: false,
             block_param: None,
             body: mapping_hash,
             signature: None,
@@ -1225,6 +1229,7 @@ pub(super) fn ingest_method(
 ) -> IngestResult<crate::dialect::MethodDef> {
     use crate::dialect::{MethodDef, MethodReceiver};
 
+    let formals = super::forwarding::parse(def);
     let name = Symbol::from(constant_id_str(&def.name()));
     // `def self.foo` / `def Post.foo` have explicit receivers; plain `def foo`
     // is an instance method.
@@ -1301,6 +1306,8 @@ pub(super) fn ingest_method(
         }
     }
 
+    params.extend(formals.anonymous.map(super::forwarding::AnonymousFormal::into_param));
+
     let body = match def.body() {
         Some(b) => ingest_expr(&b, file)?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
@@ -1311,6 +1318,8 @@ pub(super) fn ingest_method(
         name,
         receiver,
         params,
+        unsupported_formals: formals.unsupported,
+        has_anonymous_block: formals.has_anonymous_block,
         body,
         signature: None,
         effects: EffectSet::pure(),

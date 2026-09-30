@@ -20,6 +20,7 @@ pub mod app;
 pub mod controller;
 pub mod expr;
 pub mod fixture;
+pub(crate) mod forwarding;
 pub mod jbuilder;
 pub mod library_class;
 pub mod channel_callbacks;

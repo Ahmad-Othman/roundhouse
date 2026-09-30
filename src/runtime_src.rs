@@ -16,12 +16,27 @@ use crate::dialect::{MethodDef, MethodReceiver, Param};
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::Symbol;
-use crate::ingest::ingest_expr;
 use crate::rbs::parse_signatures;
 use crate::span::Span;
 use crate::ty::Ty;
 
 const VIRTUAL_FILE: &str = "<runtime>";
+
+// Each runtime parser projects its artifact before typing: the standalone
+// expression parser below, or the complete library parser. Neither admits
+// native full declarations, so keyword producers keep the existing runtime ABI.
+fn project_runtime_keywords(e: &mut Expr) {
+    if let ExprNode::KeywordSplat { value } = &mut *e.node {
+        *e = std::mem::replace(value, crate::lower::typing::nil_lit());
+    }
+    e.node.for_each_child_mut(&mut project_runtime_keywords);
+}
+
+fn ingest_expr(node: &Node<'_>, file: &str) -> Result<Expr, crate::ingest::IngestError> {
+    let mut expr = crate::ingest::ingest_expr(node, file)?;
+    project_runtime_keywords(&mut expr);
+    Ok(expr)
+}
 
 /// Parse Ruby source and collect module/class-level constant
 /// assignments whose value is a typeable literal. Patterns recognized:
@@ -427,6 +442,13 @@ pub fn parse_library_with_rbs(
             .unwrap_or_default();
 
         for m in &mut lc.methods {
+            if m.params.iter().any(|p| p.forwarding) {
+                return Err(format!("class `{class_name}` method `{}`: full forwarding is outside the typed runtime-source subset", m.name));
+            }
+            project_runtime_keywords(&mut m.body);
+            for default in m.params.iter_mut().filter_map(|p| p.default.as_mut()) {
+                project_runtime_keywords(default);
+            }
             let sig = class_sigs.remove(&m.name).ok_or_else(|| {
                 format!(
                     "class `{}` method `{}` has no matching RBS signature",
@@ -459,6 +481,12 @@ pub fn parse_library_with_rbs(
         // becomes the attribute it stands in for, plus its zero in
         // `initialize` (see the fn).
         reclassify_abstract_attributes(&mut lc.methods);
+        for (_, value) in &mut lc.constants {
+            project_runtime_keywords(value);
+        }
+        for call in &mut lc.unknown_calls {
+            project_runtime_keywords(call);
+        }
 
         // Drop abstract sigs from the orphan check. Subclass-overridden
         // contract methods declared `%a{abstract}` in the RBS have no
@@ -1108,6 +1136,8 @@ fn reclassify_abstract_attributes(methods: &mut [MethodDef]) {
             if m.receiver != MethodReceiver::Instance {
                 continue;
             }
+            let unsupported_formals = m.unsupported_formals;
+            let has_anonymous_block = m.has_anonymous_block;
             if m.name == name {
                 let enclosing = m.enclosing_class.as_ref().map(|s| s.as_str().to_string());
                 let sig = m.signature.take();
@@ -1122,6 +1152,8 @@ fn reclassify_abstract_attributes(methods: &mut [MethodDef]) {
                 *m = synthesize_writer(name.as_str(), enclosing.as_deref());
                 m.signature = sig;
             }
+            m.unsupported_formals = unsupported_formals;
+            m.has_anonymous_block = has_anonymous_block;
         }
         let Some(zero) = zero else { continue };
         if let Some(init) = methods
@@ -1174,6 +1206,8 @@ fn synthesize_reader(attr: &str, enclosing: Option<&str>) -> MethodDef {
         ExprNode::Ivar { name: name.clone() },
     );
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name,
         receiver: MethodReceiver::Instance,
@@ -1211,6 +1245,8 @@ fn synthesize_writer(attr: &str, enclosing: Option<&str>) -> MethodDef {
         },
     );
     MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
         name: setter_name,
         receiver: MethodReceiver::Instance,
@@ -1242,6 +1278,10 @@ fn method_def_from(
         MethodReceiver::Instance
     };
 
+    let formals = crate::ingest::forwarding::parse(def);
+    if formals.anonymous == Some(crate::ingest::forwarding::AnonymousFormal::Forwarding) {
+        return Err(format!("method `{name}`: full forwarding is outside the typed runtime-source subset"));
+    }
     let (params, block_param) = method_params(def, name.as_str())?;
 
     let body = match def.body() {
@@ -1250,6 +1290,8 @@ fn method_def_from(
     };
 
     Ok(MethodDef {
+        unsupported_formals: formals.unsupported,
+        has_anonymous_block: formals.has_anonymous_block,
         name_span: crate::span::Span::synthetic(),
         name,
         receiver,

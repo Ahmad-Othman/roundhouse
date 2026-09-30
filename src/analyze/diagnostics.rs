@@ -72,6 +72,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     if let Some(seeds) = &app.seeds {
         diagnose_expr(seeds, &mut out);
     }
+    out.extend(super::forwarding::diagnose(app));
 
     // Static N+1 pass (#64): missing-preload warnings over the typed
     // query chains, same-procedure and through the controller→view
@@ -433,7 +434,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         ExprNode::Next { value } | ExprNode::Break { value } => {
             if let Some(v) = value { diagnose_expr(v, out); }
         }
-        ExprNode::Splat { value } => diagnose_expr(value, out),
+        ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => diagnose_expr(value, out),
         ExprNode::MultiAssign { targets, value } => {
             diagnose_expr(value, out);
             for target in targets {
@@ -461,6 +462,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         | ExprNode::Const { .. }
         | ExprNode::Retry
         | ExprNode::Redo
+        | ExprNode::ForwardArgs
         | ExprNode::SelfRef => {}
     }
 }
