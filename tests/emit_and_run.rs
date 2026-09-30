@@ -219,3 +219,113 @@ fn a_before_action_that_calls_another_private_method_runs() {
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
 }
+
+const INDEX_VIEW: &str = "app/views/articles/index.html.erb";
+const INDEX_HEADING: &str = "<h1 class=\"font-bold text-4xl\">Articles</h1>";
+const CONTROLLER_TEST: &str = "test/controllers/articles_controller_test.rb";
+const INDEX_ASSERTION: &str = "assert_select \"h1\", \"Articles\"\n";
+
+/// Render `calls` on the articles index, then assert `assertions` in
+/// the index test. The expected HTML in each caller is Rails' output.
+fn on_the_index(overlay: emit_and_run::Overlay, calls: &str, assertions: &str) -> emit_and_run::Run {
+    overlay
+        .edit(INDEX_VIEW, INDEX_HEADING, &format!("{INDEX_HEADING}\n{calls}"))
+        .edit(CONTROLLER_TEST, INDEX_ASSERTION, &format!("{INDEX_ASSERTION}{assertions}"))
+        .run_test(CONTROLLER_TEST)
+}
+
+/// B1 in NEXUS_BUGS.md: a helper keyword named `class`, read with the
+/// `class:` shorthand, emitted a bare `class` and compared it with the
+/// String `"nil"`. Rails leaves the attribute out for `class: nil`.
+#[test]
+fn a_helper_reads_a_reserved_word_keyword_with_the_shorthand_runs() {
+    let run = on_the_index(
+        emit_and_run::real_blog().write(
+            "app/helpers/application_helper.rb",
+            "module ApplicationHelper\n  \
+               def badge(text, class: \"badge\")\n    \
+                 tag.span(text, class:)\n  \
+               end\n\n  \
+               def merged_badge(text, class: \"badge\", **options)\n    \
+                 tag.span(text, **options.merge(class:))\n  \
+               end\n\
+             end\n",
+        ),
+        "<i id=\"b1-default\"><%= badge(\"hi\") %></i>\n\
+         <i id=\"b1-given\"><%= badge(\"hi\", class: \"big\") %></i>\n\
+         <i id=\"b1-nil\"><%= badge(\"hi\", class: nil) %></i>\n\
+         <i id=\"b1-merged\"><%= merged_badge(\"hi\", class: \"big\", id: \"b\") %></i>\n",
+        "    assert_match(/<i id=\"b1-default\"><span class=\"badge\">hi<\\/span><\\/i>/, response.body)\n    \
+             assert_match(/<i id=\"b1-given\"><span class=\"big\">hi<\\/span><\\/i>/, response.body)\n    \
+             assert_match(/<i id=\"b1-nil\"><span>hi<\\/span><\\/i>/, response.body)\n    \
+             assert_match(/<i id=\"b1-merged\"><span id=\"b\" class=\"big\">hi<\\/span><\\/i>/, response.body)\n",
+    );
+    run.assert_passes();
+}
+
+/// A String keyword that no caller passes as nil keeps Rails' nil
+/// rule: `class: "nil"` renders `class="nil"`. The inquiry lowering
+/// read `value.nil?` as `StringInquirer#nil?` and emitted
+/// `value == "nil"`, which dropped the attribute.
+#[test]
+fn a_string_keyword_named_nil_keeps_its_attribute() {
+    let run = on_the_index(
+        emit_and_run::real_blog().write(
+            "app/helpers/application_helper.rb",
+            "module ApplicationHelper\n  \
+               def badge(text, class: \"badge\")\n    \
+                 tag.span(text, class: binding.local_variable_get(:class))\n  \
+               end\n\
+             end\n",
+        ),
+        "<i id=\"n-literal\"><%= badge(\"hi\", class: \"nil\") %></i>\n\
+         <i id=\"n-default\"><%= badge(\"hi\") %></i>\n",
+        "    assert_match(/<i id=\"n-literal\"><span class=\"nil\">hi<\\/span><\\/i>/, response.body)\n    \
+             assert_match(/<i id=\"n-default\"><span class=\"badge\">hi<\\/span><\\/i>/, response.body)\n",
+    );
+    run.assert_passes();
+}
+
+/// B2 in NEXUS_BUGS.md: strict locals named after reserved words
+/// emitted a positional `for` parameter. Nexus reads them with
+/// `local_assigns`; the repro reads them with `binding`.
+#[test]
+fn a_partial_with_reserved_word_strict_locals_runs() {
+    let run = on_the_index(
+        emit_and_run::real_blog()
+            .write(
+                "app/views/articles/_empty_la.html.erb",
+                "<%# locals: (for:, class: \"\") %>\n\
+                 <p id=\"b2-la\" class=\"<%= local_assigns[:class] %>\"><%= local_assigns[:for] %></p>\n",
+            )
+            .write(
+                "app/views/articles/_empty_bind.html.erb",
+                "<%# locals: (for:, class: \"\") %>\n\
+                 <p id=\"b2-bind\" class=\"<%= binding.local_variable_get(:class) %>\"><%= binding.local_variable_get(:for) %></p>\n",
+            ),
+        "<%= render \"empty_la\", for: Article, class: \"muted\" %>\n\
+         <%= render \"empty_la\", for: Article %>\n\
+         <%= render \"empty_bind\", for: Article, class: \"muted\" %>\n",
+        "    assert_match(/<p id=\"b2-la\" class=\"muted\">Article<\\/p>/, response.body)\n    \
+             assert_match(/<p id=\"b2-la\" class=\"\">Article<\\/p>/, response.body)\n    \
+             assert_match(/<p id=\"b2-bind\" class=\"muted\">Article<\\/p>/, response.body)\n",
+    );
+    run.assert_passes();
+}
+
+/// B3 in NEXUS_BUGS.md: `local_assigns[:class]` in a partial without
+/// strict locals emitted a positional `class` parameter.
+#[test]
+fn a_partial_reading_a_reserved_word_local_assign_runs() {
+    let run = on_the_index(
+        emit_and_run::real_blog().write(
+            "app/views/articles/_card.html.erb",
+            "<div id=\"b3\" class=\"card <%= local_assigns[:class] %>\"><%= title %></div>\n",
+        ),
+        "<%= render \"card\", title: \"hi\", class: \"wide\" %>\n\
+         <%= render \"card\", title: \"hi\" %>\n",
+        "    assert_match(/<div id=\"b3\" class=\"card wide\">hi<\\/div>/, response.body)\n    \
+             assert_match(/<div id=\"b3\" class=\"card \">hi<\\/div>/, response.body)\n",
+    );
+    run.assert_passes();
+}
