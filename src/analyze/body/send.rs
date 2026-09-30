@@ -2008,6 +2008,13 @@ pub(super) fn hash_method(
 ) -> Ty {
     match method.as_str() {
         "[]" => Ty::Union { variants: vec![value.clone(), Ty::Nil] },
+        // Not `deep_*` on nested values: grounding is identity or one-level conversion, and nested hashes stay as they are.
+        "symbolize_keys" | "symbolize_keys!" | "deep_symbolize_keys" => {
+            Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(value.clone()) }
+        }
+        "stringify_keys" | "deep_stringify_keys" => {
+            Ty::Hash { key: Box::new(Ty::Str), value: Box::new(value.clone()) }
+        }
         // `h[k] = v` returns the assigned value in Ruby, but here we
         // can't tell the argument's type from just the receiver's
         // generic Value — and the result is rarely chained. Return

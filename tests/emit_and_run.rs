@@ -361,3 +361,37 @@ end
         .run_test("test/models/article_csv_test.rb")
         .assert_passes();
 }
+
+/// Not left on the receiver: no ruby-family runtime ships `ActiveModel::Type::Boolean` or the ActiveSupport key conversions.
+#[test]
+fn boolean_cast_and_key_conversions_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r##"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def as_hash_boolean_probe(flag)
+    on = ActiveModel::Type::Boolean.new.cast(flag)
+    h = { a: "x", b: "y" }
+    [on.inspect, h.stringify_keys.keys.join(","), h.deep_symbolize_keys.keys.join(","), h.symbolize_keys.size, { "c" => 1 }.stringify_keys.keys.first].join("|")
+  end"##,
+        )
+        .write(
+            "test/models/article_as_hash_boolean_test.rb",
+            r#"require "test_helper"
+
+class ArticleAsHashBooleanTest < ActiveSupport::TestCase
+  test "Boolean#cast and the key conversions answer as ActiveModel and ActiveSupport do" do
+    article = Article.new
+    assert_equal "false|a,b|a,b|2|c", article.as_hash_boolean_probe("off")
+    assert_equal "true|a,b|a,b|2|c", article.as_hash_boolean_probe("1")
+    assert_equal "nil|a,b|a,b|2|c", article.as_hash_boolean_probe("")
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_as_hash_boolean_test.rb")
+        .assert_passes();
+}

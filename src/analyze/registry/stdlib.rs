@@ -435,6 +435,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         let methods: Vec<(&str, Ty)> = methods;
         register_stdlib_class(classes, exc, &[], &methods);
     }
+    // `ActiveModel::Type::Boolean.new.cast(v)`: nil for a blank value, else the boolean.
+    register_stdlib_class(classes, "ActiveModel::Type::Boolean", &[], &[
+        ("cast", Ty::Union { variants: vec![Ty::Bool, Ty::Nil] }),
+    ]);
     // Not a typed store: a thread-local slot holds whatever the caller put there, so `[]` answers untyped.
     let thread = Ty::Class { id: ClassId(Symbol::from("Thread")), args: vec![] };
     register_stdlib_class(classes, "Thread", &[("current", thread.clone())], &[
