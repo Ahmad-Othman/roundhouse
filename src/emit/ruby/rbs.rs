@@ -333,6 +333,10 @@ fn render_union(variants: &[Ty], enclosing: &[&str]) -> String {
         }
     }
     if has_nil && rendered.len() == 1 {
+        // A nested union (`(T | nil) | nil`) already rendered `T?`.
+        if rendered[0].ends_with('?') {
+            return rendered.into_iter().next().unwrap();
+        }
         return format!("{}?", rendered[0]);
     }
     if rendered.is_empty() {
