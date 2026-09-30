@@ -1143,6 +1143,11 @@ impl<'a> BodyTyper<'a> {
                     if let Some(t) = self.column_projection(id, method, args) {
                         return t;
                     }
+                    // Not only the element model's own scopes: one inherited from an abstract base answers on an association of the subclass too.
+                    if let Some(anc) = self.ancestor_defining_class_method(id, method) {
+                        let base = Ty::Array { elem: Box::new(Ty::Class { id: anc.clone(), args: vec![] }) };
+                        return self.dispatch(Some(&base), method, block_ret, args).rebind_class(&anc, id);
+                    }
                     if let Some(cls) = self.classes().get(id) {
                         match cls.class_methods.get(method) {
                             Some(scope_ret @ Ty::Array { .. }) => {

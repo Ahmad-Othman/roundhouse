@@ -940,3 +940,36 @@ raise unless LedgerEntry.find(prefixed_decoy.id).title == "Prefixed decoy"
         )
         .assert_passes();
 }
+
+/// Not only `Model.scope`: a scope the target model inherits from an abstract base answers on an association reaching it too.
+#[test]
+fn an_inherited_scope_answers_on_an_association() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/remark_base.rb",
+            "class RemarkBase < ApplicationRecord\n  self.abstract_class = true\n  scope :by_alice, -> { where(commenter: \"Alice\") }\nend\n",
+        )
+        .edit("app/models/comment.rb", "class Comment < ApplicationRecord", "class Comment < RemarkBase")
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n\n  def alice_count\n    comments.by_alice.count\n  end",
+        )
+        .write(
+            "test/models/article_inherited_scope_test.rb",
+            r#"require "test_helper"
+
+class ArticleInheritedScopeTest < ActiveSupport::TestCase
+  test "an association answers a scope its model inherits" do
+    article = articles(:one)
+    before = article.alice_count
+    article.comments.create!(commenter: "Alice", body: "A comment from Alice.")
+    article.comments.create!(commenter: "Bob", body: "A comment from Bob.")
+    assert_equal before + 1, article.alice_count
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_inherited_scope_test.rb")
+        .assert_passes();
+}
