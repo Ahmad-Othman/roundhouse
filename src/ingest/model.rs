@@ -1191,6 +1191,14 @@ fn parse_scope(
     let name = Symbol::from(name_str.as_str());
 
     let Some(body_node) = iter.next() else { return Ok(None) };
+    // `scope :for_tools, (lambda do |tools| … end)` — Procore wraps the
+    // spelled-out form in its own parens (`reports/app/models/
+    // report.rb`'s `for_tools`, `for_data_sets`, `shared`). The parens
+    // are surface-only (same treatment `ingest_expr` gives them
+    // generally); unwrapping to the single inner statement is what
+    // lets the `lambda`/`proc`/`->` checks below see the call or
+    // lambda node they expect instead of a `ParenthesesNode`.
+    let body_node = unwrap_parenthesized_single_statement(body_node);
     // A scope body is a lambda in one of two spellings: the arrow form
     // `->(x) { ... }` (a LambdaNode) or the spelled-out `lambda { |x| … }`
     // / `proc { |x| … }` (a receiverless CallNode whose block carries the
@@ -1256,6 +1264,22 @@ fn parse_scope(
     };
 
     Ok(Some(Scope { name, params, body }))
+}
+
+/// `(expr)` around a single statement — surface-only parens, same as
+/// the ones `ingest_expr`'s own `ParenthesesNode` arm strips. Only
+/// unwraps when there's exactly one statement inside: `(a; b)`'s two
+/// void statements aren't a lambda in disguise, so those are left
+/// alone and fail the caller's lambda check same as before.
+fn unwrap_parenthesized_single_statement(node: Node<'_>) -> Node<'_> {
+    let Some(paren) = node.as_parentheses_node() else { return node };
+    let Some(inner) = paren.body() else { return node };
+    let mut stmts = flatten_statements(inner);
+    if stmts.len() == 1 {
+        stmts.pop().unwrap()
+    } else {
+        node
+    }
 }
 
 /// `lambda { |x| … }` / `proc { |x| … }` — a receiverless call whose

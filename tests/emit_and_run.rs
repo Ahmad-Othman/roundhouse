@@ -145,3 +145,36 @@ fn included_hook_class_methods_run() {
         .run_test("test/models/article_sluggable_test.rb")
         .assert_passes();
 }
+
+/// `scope :x, (lambda do |v| … end)` — Procore's `reports/app/models/
+/// report.rb` wraps the spelled-out `lambda`/`proc` scope body in its
+/// own parens (`for_tools`, `for_data_sets`, `shared`). Before the fix
+/// the parens sat between `parse_scope` and the call it expected, so
+/// `check` reported "scope body must be a lambda" — this pins that the
+/// emitted scope actually filters, not just that `check` goes quiet.
+#[test]
+fn parenthesized_lambda_scope_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "validates :body, presence: true, length: { minimum: 10 }",
+            "validates :body, presence: true, length: { minimum: 10 }\n\n  \
+             scope :with_title, (lambda do |value|\n    \
+               where(title: value)\n  \
+             end)",
+        )
+        .write(
+            "test/models/article_scope_test.rb",
+            "require \"test_helper\"\n\n\
+             class ArticleScopeTest < ActiveSupport::TestCase\n  \
+               test \"a parenthesized lambda scope filters by title\" do\n    \
+                 found = Article.with_title(\"Getting Started with Rails\").first\n    \
+                 assert_not_nil found\n    \
+                 assert_equal \"Getting Started with Rails\", found.title\n    \
+                 assert_nil Article.with_title(\"No Such Title\").first\n  \
+               end\n\
+             end\n",
+        )
+        .run_test("test/models/article_scope_test.rb")
+        .assert_passes();
+}
