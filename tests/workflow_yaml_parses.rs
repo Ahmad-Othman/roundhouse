@@ -45,3 +45,49 @@ fn every_workflow_file_parses_as_yaml() {
     assert!(checked > 0, "no workflow files found under {dir:?}");
     assert!(errors.is_empty(), "{}", errors.join("\n"));
 }
+
+#[test]
+fn spinel_model_differential_does_not_wait_for_the_gc_comparison_build() {
+    let src = fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
+    let ci: serde_yaml_ng::Value = serde_yaml_ng::from_str(&src).expect("parse CI workflow");
+    let jobs = &ci["jobs"];
+    let db = &jobs["campfire-db-differential-spinel"];
+    assert_eq!(db["needs"].as_str(), Some("build-spinel"));
+    assert_eq!(db["continue-on-error"].as_bool(), Some(true));
+
+    let command = "scripts/campfire-db-differential --spinel /tmp/campfire";
+    let db_steps = db["steps"].as_sequence().expect("DB job steps");
+    let runs: Vec<_> = db_steps
+        .iter()
+        .filter(|step| step["run"].as_str() == Some(command))
+        .collect();
+    assert_eq!(runs.len(), 1, "run the model differential exactly once");
+    assert!(
+        runs[0].get("if").is_none(),
+        "do not gate it on a GC matrix value"
+    );
+
+    let gc = &jobs["campfire-compare-spinel"];
+    assert_eq!(gc["needs"].as_str(), Some("build-campfire-compare-spinel"));
+    let modes: Vec<_> = gc["strategy"]["matrix"]["include"]
+        .as_sequence()
+        .expect("GC matrix")
+        .iter()
+        .map(|mode| (mode["gc"].as_str().unwrap(), mode["flag"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        modes,
+        [
+            ("default", ""),
+            ("minor-gc", "--minor-gc"),
+            ("verify-gen", "--verify-gen")
+        ]
+    );
+    assert!(
+        gc["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .all(|step| step["run"].as_str() != Some(command))
+    );
+}
