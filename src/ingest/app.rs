@@ -1250,7 +1250,12 @@ end
     // `test/mailers` (the store fixture has one, against
     // `ActionMailer::TestCase`) and `test/jobs` are the next two, and
     // each is a harness the runtime does not have yet.
-    for subdir in ["test/models", "test/controllers", "test/helpers", "test/channels", "test/lib"] {
+    // `test/unit` and `test/utils` are plain `ActiveSupport::TestCase`
+    // lanes in larger apps (Shopify core keeps most unit tests there).
+    for subdir in [
+        "test/models", "test/controllers", "test/helpers", "test/channels", "test/lib", "test/unit",
+        "test/utils",
+    ] {
         let tests_dir = dir.join(subdir);
         if vfs.is_dir(&tests_dir) {
             for entry in read_rb_files(vfs, &tests_dir)? {

@@ -5308,7 +5308,21 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         // The class and the count come from one call, so the drop and
         // the snapshot cannot disagree. The require rewrite below
         // changes neither.
-        let counted = if in_lane { Some(test_class_and_count(&entry.1, &entry.0)?) } else { None };
+        let counted = if in_lane {
+            match test_class_and_count(&entry.1, &entry.0) {
+                Ok(counted) => Some(counted),
+                // A test program the snapshot runner cannot shape is
+                // dropped with a note rather than failing the project:
+                // a large app's suite has files outside the lane shape.
+                Err(e) => {
+                    eprintln!("roundhouse: {e}; dropped");
+                    dropped.push(entry.0.clone());
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
         // An emitted lane test with no `def test_` compiles to a program
         // that tests nothing, so the spin tree omits it. `rails generate
         // model` writes such a class. The same shape also comes from
