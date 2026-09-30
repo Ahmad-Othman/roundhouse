@@ -441,3 +441,58 @@ end
         .run_test("test/models/article_core_surface_test.rb")
         .assert_passes();
 }
+
+/// Not only the `check` side: an enum, scope and method a namespaced abstract base declares have to run when another model reaches them.
+#[test]
+fn an_abstract_base_reaches_its_model() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"state\", default: 0, null: false",
+        )
+        .write(
+            "app/models/base_model/content_base.rb",
+            r#"class BaseModel::ContentBase < ApplicationRecord
+  self.abstract_class = true
+  self.table_name = "articles"
+  enum :state, { draft: 0, live: 1 }
+  scope :titled, -> { where.not(title: nil) }
+
+  def shout
+    title.to_s.upcase
+  end
+end
+"#,
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < BaseModel::ContentBase\n  has_many :comments, dependent: :destroy\n  scope :newest_first, -> { order(id: :desc) }",
+        )
+        .edit(
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord",
+            r#"class Comment < ApplicationRecord
+  def base_probe
+    a = Article.find(article_id)
+    [article.draft?, a.shout, Article.titled.newest_first.to_a.size, Article.newest_first.titled.first.nil?, Article.draft.count].join("|")
+  end
+"#,
+        )
+        .write(
+            "test/models/comment_abstract_base_test.rb",
+            r#"require "test_helper"
+
+class CommentAbstractBaseTest < ActiveSupport::TestCase
+  test "another model reaches an abstract base's enum, scope and method" do
+    comment = comments(:one)
+    title = comment.article.title.to_s.upcase
+    assert_equal "true|#{title}|#{Article.count}|false|#{Article.count}", comment.base_probe
+  end
+end
+"#,
+        )
+        .run_test("test/models/comment_abstract_base_test.rb")
+        .assert_passes();
+}

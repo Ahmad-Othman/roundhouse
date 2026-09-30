@@ -675,6 +675,11 @@ impl Analyzer {
                 cls.includes = includes;
             }
 
+            // Not every parent: only another app model, so an abstract base's enums and methods reach the classes below it.
+            if let Some(parent) = model.parent.as_ref().filter(|p| model_parents.contains_key(p)) {
+                cls.parent = Some(parent.clone());
+            }
+
             classes.insert(model.name.clone(), cls);
         }
 

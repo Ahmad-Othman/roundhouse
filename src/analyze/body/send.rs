@@ -541,6 +541,23 @@ impl<'a> BodyTyper<'a> {
         }
     }
 
+    fn ancestor_defining_class_method(&self, of: &ClassId, method: &Symbol) -> Option<ClassId> {
+        let own = self.classes().get(of)?;
+        if own.class_methods.contains_key(method) {
+            return None;
+        }
+        let mut current = own.parent.clone();
+        for _ in 0..32 {
+            let id = current?;
+            let cls = self.classes().get(&id)?;
+            if cls.table.is_some() && cls.class_methods.contains_key(method) {
+                return Some(id);
+            }
+            current = cls.parent.clone();
+        }
+        None
+    }
+
     pub(super) fn dispatch(
         &self,
         recv_ty: Option<&Ty>,
@@ -921,8 +938,11 @@ impl<'a> BodyTyper<'a> {
                     // before `unwrap_fn_ret` so a signature's params
                     // are substituted too, and the arity and
                     // kwargs-flip checks see a concrete type.
+                    // Not the ancestor's own class either: an inherited scope or finder answers the receiver's (`User.active` is a `Relation[User]`).
                     let subst = |ty: &Ty| {
-                        ty.subst_self(&Ty::Class { id: id.clone(), args: Vec::new() })
+                        let ty = ty.subst_self(&Ty::Class { id: id.clone(), args: Vec::new() });
+                        let receiver_is_model = self.classes().get(id).is_some_and(|c| c.table.is_some());
+                        if cid != id && cls.table.is_some() && receiver_is_model { ty.rebind_class(cid, id) } else { ty }
                     };
                     if let Some(ty) = cls.class_methods.get(method) {
                         return unwrap_fn_ret(&subst(ty));
@@ -1253,6 +1273,11 @@ impl<'a> BodyTyper<'a> {
                     if let Some(kind) = entry.return_kind {
                         return crate::analyze::instantiate_return_kind(kind, of);
                     }
+                }
+                // Not only the element model's own scopes: one inherited from an abstract base answers on the subclass's relation.
+                if let Some(anc) = self.ancestor_defining_class_method(of, method) {
+                    let t = self.dispatch(Some(&Ty::Relation { of: anc.clone() }), method, block_ret, args);
+                    return t.rebind_class(&anc, of);
                 }
                 if let Some(cls) = self.classes().get(of) {
                     match cls.class_methods.get(method) {

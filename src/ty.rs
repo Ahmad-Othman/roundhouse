@@ -201,6 +201,32 @@ impl Ty {
         }
     }
 
+    /// Every `Class { from }` / `Relation { of: from }` rewritten to `to`, recursing like [`Self::subst_self`].
+    pub fn rebind_class(&self, from: &ClassId, to: &ClassId) -> Ty {
+        let go = |t: &Ty| t.rebind_class(from, to);
+        match self {
+            Ty::Class { id, args } => Ty::Class {
+                id: if id == from { to.clone() } else { id.clone() },
+                args: args.iter().map(go).collect(),
+            },
+            Ty::Relation { of } if of == from => Ty::Relation { of: to.clone() },
+            Ty::Array { elem } => Ty::Array { elem: Box::new(go(elem)) },
+            Ty::Hash { key, value } => Ty::Hash { key: Box::new(go(key)), value: Box::new(go(value)) },
+            Ty::Tuple { elems } => Ty::Tuple { elems: elems.iter().map(go).collect() },
+            Ty::Union { variants } => Ty::Union { variants: variants.iter().map(go).collect() },
+            Ty::Fn { params, block, ret, effects } => Ty::Fn {
+                params: params
+                    .iter()
+                    .map(|p| Param { name: p.name.clone(), ty: go(&p.ty), kind: p.kind.clone() })
+                    .collect(),
+                block: block.as_ref().map(|b| Box::new(go(b))),
+                ret: Box::new(go(ret)),
+                effects: effects.clone(),
+            },
+            other => other.clone(),
+        }
+    }
+
     /// True for the two "no known type" variants: [`Ty::Var`] (the
     /// analyzer couldn't infer a type) and [`Ty::Untyped`] (an
     /// author-signed gradual-typing opt-out). Both mean "don't reason

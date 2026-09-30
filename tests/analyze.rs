@@ -1799,6 +1799,68 @@ end
 }
 
 #[test]
+fn a_model_inherits_from_its_abstract_base() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n",
+        ),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define(version: 1) do
+  create_table "users", force: :cascade do |t|
+    t.string "name"
+    t.integer "role"
+  end
+  create_table "trades", force: :cascade do |t|
+    t.integer "user_id"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/base_model/user_base.rb",
+            r#"class BaseModel::UserBase < ApplicationRecord
+  self.abstract_class = true
+  self.table_name = "users"
+  enum :role, { admin: 1, staff: 3 }
+  scope :named, -> { where.not(name: nil) }
+
+  def greeting
+    "hi"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/user.rb",
+            r#"class User < BaseModel::UserBase
+  has_many :trades
+  scope :recent, -> { order(id: :desc) }
+end
+"#,
+        ),
+        (
+            "app/models/trade.rb",
+            r#"class Trade < ApplicationRecord
+  belongs_to :user
+
+  def owner
+    u = User.find(1)
+    [user.staff?, u.greeting.upcase, User.named.recent.to_a, User.recent.named.first, User.first&.trades, User.staff.count]
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in ["staff?", "greeting", "upcase", "named", "recent", "to_a", "first", "trades", "staff", "count"] {
+        assert!(!failures.iter().any(|f| f == m), "`{m}` should resolve through the abstract base; failures = {failures:?}");
+    }
+}
+
+#[test]
 fn stdlib_singletons_and_set_resolve() {
     // The hardcoded Ruby stdlib catalog (SecureRandom, CGI, Digest::*,
     // Math, File, Dir, Set) resolves the common call surface, and unary
