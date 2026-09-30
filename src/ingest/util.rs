@@ -310,7 +310,12 @@ fn body_has_direct_method_decl(body: Option<Node<'_>>) -> bool {
         if let Some(call) = stmt.as_call_node() {
             if call.receiver().is_none() {
                 let kw = constant_id_str(&call.name());
-                if matches!(kw, "attr_reader" | "attr_writer" | "attr_accessor") {
+                // Not only `attr_*`: a module whose only content is `mattr_accessor` / `thread_mattr_accessor` is state the app reads.
+                if matches!(kw, "attr_reader" | "attr_writer" | "attr_accessor")
+                    || ["cattr_", "mattr_", "thread_mattr_", "thread_cattr_"].iter().any(|p| {
+                        kw.strip_prefix(p).is_some_and(|rest| matches!(rest, "reader" | "writer" | "accessor"))
+                    })
+                {
                     return true;
                 }
                 // ActiveSupport::Concern's `class_methods do … end`: its

@@ -573,3 +573,36 @@ end
         .run_test("test/models/article_errors_messages_test.rb")
         .assert_passes();
 }
+
+/// Not one value per process: a `thread_mattr_accessor` written on one thread reads nil on another, as in Rails.
+#[test]
+fn a_thread_mattr_accessor_runs_per_thread() {
+    emit_and_run::real_blog()
+        .write(
+            "lib/request_context.rb",
+            "module RequestContext\n  thread_mattr_accessor :article\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def remember
+    RequestContext.article = self
+  end
+
+  def self.remembered_title
+    RequestContext.article.title
+  end"#,
+        )
+        .run_ruby(
+            r#"article = Article.new(title: "kept", body: "long enough body")
+article.remember
+raise "the writing thread lost it" unless Article.remembered_title == "kept"
+raise "another thread saw it" unless Thread.new { RequestContext.article.nil? }.value
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
