@@ -137,6 +137,7 @@ fn article_lowers_with_schema_methods() {
     // update.
     for expected in [
         "table_name",
+        "_table_sql",
         "schema_columns",
         "schema_time_columns",
         "instantiate",
@@ -157,6 +158,7 @@ fn article_lowers_with_schema_methods() {
     // class methods; everything else is instance.
     let class_methods = [
         "table_name",
+        "_table_sql",
         "schema_columns",
         "schema_time_columns",
         "instantiate",
