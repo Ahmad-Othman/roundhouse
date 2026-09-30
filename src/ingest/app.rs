@@ -255,7 +255,12 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         }
     }
 
-    let models_dir = dir.join("app/models");
+    // App-layer roots: `app`, plus `<pkg>/app` for every Packwerk
+    // package that has one. Every layer walk below loops over these
+    // instead of a single hardwired `app/…` — see `app_roots`'s doc
+    // comment for why a Packwerk app needs more than one.
+    let roots = app_roots(vfs, dir);
+    app.app_roots = roots.iter().map(|r| r.display().to_string()).collect();
     // A namespace's `table_name_prefix` has to be known BEFORE the model
     // it prefixes is ingested, and file order does not guarantee that
     // (`push/subscription.rb` may be read before `push.rb`). One cheap
@@ -281,7 +286,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // another file, possibly later.
     let mut model_bases = super::library_class::ModelBases::new();
     let mut base_pairs: Vec<(String, String)> = Vec::new();
-    if vfs.is_dir(&models_dir) {
+    for root in &roots {
+        let models_dir = dir.join(root).join("models");
+        if !vfs.is_dir(&models_dir) {
+            continue;
+        }
         for entry in read_rb_files(vfs, &models_dir)? {
             let source = vfs.read(&entry)?;
             table_prefixes
@@ -293,7 +302,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // package under `lib/`, or in whatever the app adds to its
     // autoload paths. Collected before anything is classified, so a
     // model in either tree resolves against a base in either tree.
-    for sub in support_roots(vfs, dir, &lib_ignores) {
+    for sub in support_roots(vfs, dir, &roots, &lib_ignores) {
         let support_dir = dir.join(sub.as_str());
         if !vfs.is_dir(&support_dir) {
             continue;
@@ -309,7 +318,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         }
     }
     model_bases.close_over(&base_pairs);
-    if vfs.is_dir(&models_dir) {
+    for root in &roots {
+        let models_dir = dir.join(root).join("models");
+        if !vfs.is_dir(&models_dir) {
+            continue;
+        }
         for entry in read_rb_files(vfs, &models_dir)? {
             let source = vfs.read(&entry)?;
             let path_str = entry.display().to_string();
@@ -408,7 +421,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // files itself, from an initializer — and dropping them lost
     // `String#all_emoji?`, which every message row calls. A subdir some
     // initializer explicitly requires is app code after all.
-    for sub in support_roots(vfs, dir, &lib_ignores) {
+    for sub in support_roots(vfs, dir, &roots, &lib_ignores) {
         let sub = sub.as_str();
         let support_dir = dir.join(sub);
         if !vfs.is_dir(&support_dir) {
@@ -484,8 +497,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // Rails' include order would resolve). Empty-module helpers (the blog's
     // `module ApplicationHelper; end`) contribute nothing, keeping the
     // registry — and every downstream consumer — a no-op for them.
-    let helpers_dir = dir.join("app/helpers");
-    if vfs.is_dir(&helpers_dir) {
+    for root in &roots {
+        let helpers_dir = dir.join(root).join("helpers");
+        if !vfs.is_dir(&helpers_dir) {
+            continue;
+        }
         if let Ok(entries) = read_rb_files(vfs, &helpers_dir) {
             for entry in entries {
                 let Ok(source) = vfs.read(&entry) else { continue };
@@ -939,8 +955,11 @@ end
         }
     }
 
-    let controllers_dir = dir.join("app/controllers");
-    if vfs.is_dir(&controllers_dir) {
+    for root in &roots {
+        let controllers_dir = dir.join(root).join("controllers");
+        if !vfs.is_dir(&controllers_dir) {
+            continue;
+        }
         for entry in read_rb_files(vfs, &controllers_dir)? {
             let source = vfs.read(&entry)?;
             let path_str = entry.display().to_string();
@@ -1039,8 +1058,11 @@ end
         }
     }
 
-    let views_dir = dir.join("app/views");
-    if vfs.is_dir(&views_dir) {
+    for root in &roots {
+        let views_dir = dir.join(root).join("views");
+        if !vfs.is_dir(&views_dir) {
+            continue;
+        }
         let erb_files = read_erb_files(vfs, &views_dir)?;
         for (erb_path, engine) in erb_files {
             let source = vfs.read_to_string(&erb_path)?;
@@ -1254,7 +1276,7 @@ end
         .iter()
         .flat_map(|m| &m.pins)
         .any(|p| p.name == "trix");
-    let links_all = layouts_link_all_stylesheets(vfs, dir);
+    let links_all = layouts_link_all_stylesheets(vfs, dir, &roots);
     for (gem, stems) in crate::gems::GEM_STYLESHEETS {
         if !links_all {
             continue;
@@ -3302,15 +3324,223 @@ fn nested_under(
 /// A LIST OF ROOTS on purpose: a Packwerk app puts the same layers under
 /// `packs/*/app/*`, which becomes one more source of roots here rather
 /// than a second walker.
-fn support_roots<V: Vfs + ?Sized>(vfs: &V, dir: &Path, lib_ignores: &[String]) -> Vec<String> {
-    // Directories under `app/` that another pass already ingests
+fn support_roots<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    roots: &[PathBuf],
+    lib_ignores: &[String],
+) -> Vec<String> {
+    // Directories under an app root that another pass already ingests
     // (models, controllers, views, helpers) or that hold no Ruby at all
     // (assets, javascript).
     const OWN_PASS: &[&str] =
         &["models", "controllers", "views", "helpers", "assets", "javascript"];
 
-    let mut roots: Vec<String> = vec!["extras".to_string(), "lib".to_string()];
-    if let Ok(entries) = vfs.read_dir(&dir.join("app")) {
+    let mut out: Vec<String> = vec!["extras".to_string(), "lib".to_string()];
+    for root in roots {
+        if let Ok(entries) = vfs.read_dir(&dir.join(root)) {
+            for entry in entries {
+                if !vfs.is_dir(&entry) {
+                    continue;
+                }
+                let Some(name) = entry.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if OWN_PASS.contains(&name) {
+                    continue;
+                }
+                out.push(format!("{}/{name}", root.display()));
+            }
+        }
+        // A package's `lib/` sits beside its `app/` (`packs/blog/lib`
+        // beside `packs/blog/app`) and is autoloaded the same way the
+        // root app's `lib/` is. `root.parent()` of the bare `app` root
+        // is the empty path, whose `lib` is the root `lib` already
+        // pushed above — deduped below, not special-cased here.
+        if let Some(parent) = root.parent() {
+            let lib = parent.join("lib");
+            if vfs.is_dir(&dir.join(&lib)) {
+                out.push(lib.display().to_string());
+            }
+        }
+    }
+    if let Ok(source) = vfs.read(&dir.join("config/application.rb")) {
+        out.extend(extract_autoload_path_roots(&source));
+    }
+    // `autoload_lib(ignore: %w[…])` names directories the app takes off
+    // the autoload paths; a root by that name is off the list for the
+    // same reason its `lib/` namesake is skipped below.
+    out.retain(|root| !lib_ignores.iter().any(|ignored| ignored == root));
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// App-layer roots for one Rails app: `app` first, then one
+/// `<pkg>/app` per Packwerk package that has an `app/` directory —
+/// sorted (after `app`) and deduplicated. Every other layer walk in
+/// this file loops over these instead of hardwiring `app/…`, so a
+/// Packwerk app's `packs/*/app/*` (or `components/*/app/*`,
+/// `engines/*/app/*`) gets the same models/controllers/views/helpers
+/// passes the root `app/` does.
+///
+/// Non-Packwerk apps (no `packwerk.yml` or `packs.yml` at the root)
+/// get exactly `["app"]` — zero behavior change, which the fixtures'
+/// zero-diagnostic gates depend on.
+pub(super) fn app_roots<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from("app")];
+    let has_packwerk = vfs.exists(&dir.join("packwerk.yml")) || vfs.exists(&dir.join("packs.yml"));
+    if !has_packwerk {
+        return roots;
+    }
+    let package_paths = vfs
+        .read(&dir.join("packwerk.yml"))
+        .ok()
+        .and_then(|bytes| parse_package_paths(&bytes));
+
+    let mut package_dirs: Vec<PathBuf> = Vec::new();
+    match package_paths {
+        Some(globs) => {
+            for glob in globs {
+                expand_package_glob(vfs, dir, &glob, &mut package_dirs);
+            }
+        }
+        // No `package_paths:` key (absent, or commented out — the
+        // common case): Packwerk's own default, `**/` — every
+        // directory, any depth, that carries a `package.yml`.
+        None => default_package_scan(vfs, dir, &mut package_dirs),
+    }
+    package_dirs.sort();
+    package_dirs.dedup();
+
+    for pkg in package_dirs {
+        let rel = pkg.strip_prefix(dir).unwrap_or(&pkg);
+        // The root's own `package.yml` names the root package, whose
+        // app root is already `app` above — not a second root.
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let app_dir = pkg.join("app");
+        if vfs.is_dir(&app_dir) {
+            roots.push(rel.join("app"));
+        }
+    }
+    roots[1..].sort();
+    roots.dedup();
+    roots
+}
+
+/// `package_paths:` from a `packwerk.yml`'s bytes, as the raw glob
+/// strings (Packwerk accepts either a single string or a list).
+/// `None` when the key is absent (including commented out — YAML
+/// never sees it) or the file doesn't parse as YAML; both cases fall
+/// back to Packwerk's own default in [`app_roots`].
+fn parse_package_paths(bytes: &[u8]) -> Option<Vec<String>> {
+    #[derive(serde::Deserialize)]
+    struct PackwerkYml {
+        #[serde(default)]
+        package_paths: Option<PackagePathsValue>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum PackagePathsValue {
+        One(String),
+        Many(Vec<String>),
+    }
+    let text = String::from_utf8_lossy(bytes);
+    let parsed: PackwerkYml = serde_yaml_ng::from_str(&text).ok()?;
+    match parsed.package_paths? {
+        PackagePathsValue::One(s) => Some(vec![s]),
+        PackagePathsValue::Many(v) => Some(v),
+    }
+}
+
+/// Directories under `dir` matching a `package_paths:` glob that
+/// actually carry a `package.yml` — the candidates for
+/// [`app_roots`]. Supports `*` (one directory level) and `**` (any
+/// depth, capped at 4 levels beyond the match point); a trailing `/`
+/// is insignificant. Not a general glob engine — Packwerk's own
+/// globs are this small.
+fn expand_package_glob<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    glob: &str,
+    out: &mut Vec<PathBuf>,
+) {
+    let segments: Vec<&str> = glob.split('/').filter(|s| !s.is_empty()).collect();
+    let mut candidates = Vec::new();
+    expand_glob_segments(vfs, dir, &segments, 4, &mut candidates);
+    for candidate in candidates {
+        if vfs.exists(&candidate.join("package.yml")) {
+            out.push(candidate);
+        }
+    }
+}
+
+fn expand_glob_segments<V: Vfs + ?Sized>(
+    vfs: &V,
+    base: &Path,
+    segments: &[&str],
+    depth_budget: usize,
+    out: &mut Vec<PathBuf>,
+) {
+    let Some((seg, rest)) = segments.split_first() else {
+        out.push(base.to_path_buf());
+        return;
+    };
+    match *seg {
+        "**" => {
+            // Zero levels consumed by `**`, then the rest of the
+            // pattern against `base` itself…
+            expand_glob_segments(vfs, base, rest, depth_budget, out);
+            // …or one more level consumed, `**` still pending against
+            // each subdirectory, capped so a pathological tree can't
+            // make this unbounded.
+            if depth_budget == 0 {
+                return;
+            }
+            if let Ok(entries) = vfs.read_dir(base) {
+                for entry in entries {
+                    if vfs.is_dir(&entry) {
+                        expand_glob_segments(vfs, &entry, segments, depth_budget - 1, out);
+                    }
+                }
+            }
+        }
+        "*" => {
+            if let Ok(entries) = vfs.read_dir(base) {
+                for entry in entries {
+                    if vfs.is_dir(&entry) {
+                        expand_glob_segments(vfs, &entry, rest, depth_budget, out);
+                    }
+                }
+            }
+        }
+        literal => {
+            let next = base.join(literal);
+            if vfs.is_dir(&next) {
+                expand_glob_segments(vfs, &next, rest, depth_budget, out);
+            }
+        }
+    }
+}
+
+/// Packwerk's own default `package_paths` (`**/`, any directory at any
+/// depth) when the app declares none: directories carrying a
+/// `package.yml`, found by walking down from `dir`, at most 3 levels
+/// deep, skipping directories that are never a Packwerk package tree
+/// (VCS/dependency/build noise, test trees, and `app` itself — a
+/// package never nests a `package.yml` under the layer this scan
+/// exists to find roots for).
+fn default_package_scan<V: Vfs + ?Sized>(vfs: &V, dir: &Path, out: &mut Vec<PathBuf>) {
+    const SKIP: &[&str] = &[
+        ".git", "node_modules", "vendor", "tmp", "log", "public", "storage", "spec", "test",
+        "db", "config", "app",
+    ];
+    const MAX_DEPTH: usize = 3;
+
+    fn scan<V: Vfs + ?Sized>(vfs: &V, current: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = vfs.read_dir(current) else { return };
         for entry in entries {
             if !vfs.is_dir(&entry) {
                 continue;
@@ -3318,22 +3548,18 @@ fn support_roots<V: Vfs + ?Sized>(vfs: &V, dir: &Path, lib_ignores: &[String]) -
             let Some(name) = entry.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if OWN_PASS.contains(&name) {
+            if SKIP.contains(&name) {
                 continue;
             }
-            roots.push(format!("app/{name}"));
+            if vfs.exists(&entry.join("package.yml")) {
+                out.push(entry.clone());
+            }
+            if depth < MAX_DEPTH {
+                scan(vfs, &entry, depth + 1, out);
+            }
         }
     }
-    if let Ok(source) = vfs.read(&dir.join("config/application.rb")) {
-        roots.extend(extract_autoload_path_roots(&source));
-    }
-    // `autoload_lib(ignore: %w[…])` names directories the app takes off
-    // the autoload paths; a root by that name is off the list for the
-    // same reason its `lib/` namesake is skipped below.
-    roots.retain(|root| !lib_ignores.iter().any(|ignored| ignored == root));
-    roots.sort();
-    roots.dedup();
-    roots
+    scan(vfs, dir, 1, out);
 }
 
 /// Roots an app adds to `config.autoload_paths` / `config.eager_load_paths`
@@ -3962,19 +4188,21 @@ fn content_helper_attribute_additions<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app:
 /// walks the whole asset path, gems' stylesheets included? Read off the
 /// layout SOURCES: views are not ingested yet where the stylesheet list
 /// is built, and the call is a literal wherever an app writes it.
-fn layouts_link_all_stylesheets<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> bool {
-    let layouts = dir.join("app/views/layouts");
-    if !vfs.is_dir(&layouts) {
-        return false;
-    }
-    let Ok(entries) = vfs.read_dir(&layouts) else { return false };
-    entries.iter().any(|entry| {
-        vfs.read_to_string(entry)
-            .map(|src| {
-                src.contains("stylesheet_link_tag :all")
-                    || src.contains("stylesheet_link_tag(:all")
-            })
-            .unwrap_or(false)
+fn layouts_link_all_stylesheets<V: Vfs + ?Sized>(vfs: &V, dir: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| {
+        let layouts = dir.join(root).join("views/layouts");
+        if !vfs.is_dir(&layouts) {
+            return false;
+        }
+        let Ok(entries) = vfs.read_dir(&layouts) else { return false };
+        entries.iter().any(|entry| {
+            vfs.read_to_string(entry)
+                .map(|src| {
+                    src.contains("stylesheet_link_tag :all")
+                        || src.contains("stylesheet_link_tag(:all")
+                })
+                .unwrap_or(false)
+        })
     })
 }
 
