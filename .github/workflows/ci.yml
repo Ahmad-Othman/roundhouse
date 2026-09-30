@@ -862,8 +862,9 @@ jobs:
       # only defines that method against libvips >= 8.13 — the runner
       # image's copy is older, so `bin/rails db:prepare` died on the
       # app's own hardening line.
+      # CRuby binds libvips through FFI; only compiled Spinel needs headers.
       - name: System libvips
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvips-dev sqlite3
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvips42 sqlite3
       - name: Cache the prepared oracle
         id: oracle
         uses: actions/cache@v4
@@ -1119,7 +1120,7 @@ jobs:
       #             the poster frame got attached.
       - name: Install libvips (ruby-vips binds it through FFI) and ffmpeg
         run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev ffmpeg
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42 ffmpeg
       #   concurrent-ruby, net-http-persistent, web-push — also from the
       #             app, all three behind `WebPush::Pool`: the thread
       #             pools it posts deliveries to, the keep-alive client
