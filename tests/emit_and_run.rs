@@ -78,8 +78,10 @@ fn computed_enum_map_to_h_runs() {
     emit_and_run::real_blog()
         .edit(
             "db/schema.rb",
-            "t.string \"title\"\n    t.text \"body\"",
-            "t.string \"title\"\n    t.text \"body\"\n    t.string \"kind\", default: \"post\", null: false",
+            // Anchored on the table, not its columns: Rails 8.1 dumps
+            // columns alphabetically, older Rails in creation order.
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"kind\", default: \"post\", null: false",
         )
         .edit(
             "app/models/article.rb",
