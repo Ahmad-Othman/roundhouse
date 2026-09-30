@@ -1009,6 +1009,12 @@ impl<'a> BodyTyper<'a> {
                 if let Some(t) = recv.as_ref().and_then(|r| time_parse_ty(r, method, args)) {
                     return t;
                 }
+                // Not `Integer?`: `nil.to_fs` raises in Rails, so only a number that cannot be nil types.
+                if matches!(recv_ty, Some(Ty::Int) | Some(Ty::Float))
+                    && crate::lower::number_to_fs::is_delimited_to_fs(method, args)
+                {
+                    return Ty::Str;
+                }
                 self.dispatch(recv_ty.as_ref(), method, block_ret.as_ref(), args)
             }
 

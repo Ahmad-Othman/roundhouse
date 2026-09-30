@@ -2568,6 +2568,51 @@ end
 }
 
 #[test]
+fn delimited_to_fs_and_errors_messages_type() {
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/thing.rb",
+            r#"class Thing < ApplicationRecord
+  def labels(ratio)
+    [1234.to_fs(:delimited).upcase, (ratio * 1.5).to_fs(:delimited).strip]
+  end
+
+  def problems
+    [errors.messages.key?(:name), errors.messages[:name].join(",") + 1]
+  end
+
+  def total
+    1234.to_fs(:delimited) + 1
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in ["upcase", "strip", "join", "key?"] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "`{m}` should resolve; failures = {failures:?}"
+        );
+    }
+    let binops: Vec<String> = diagnose(&app)
+        .into_iter()
+        .filter(|d| matches!(d.kind, DiagnosticKind::IncompatibleBinop { .. }))
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(
+        binops.len(),
+        2,
+        "a messages entry and a delimited number both type as String; binops = {binops:?}"
+    );
+}
+
+#[test]
 fn activesupport_calendar_methods_type_on_a_time() {
     let app = app_from_files(&[
         (

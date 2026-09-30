@@ -538,3 +538,38 @@ end
         .run_test("test/models/article_enum_mapping_test.rb")
         .assert_passes();
 }
+
+/// Not left on the receiver: no ruby-family runtime ships Numeric#to_fs or an errors object with `messages`.
+#[test]
+fn delimited_numbers_and_errors_messages_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r##"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def errors_probe
+    bad = Article.new(title: "", body: "short")
+    bad.valid?
+    good = Article.new(title: "t", body: "long enough body")
+    good.valid?
+    [bad.errors.messages.key?(:title), bad.errors.messages.key?(:created_at), bad.errors.messages.blank?, bad.errors.messages[:body].join(";"),
+     good.errors.messages.blank?, good.errors.messages.present?, 1234567.to_fs(:delimited), 1234.5.to_fs(:delimited), -1234.to_fs(:delimited)].join("|")
+  end"##,
+        )
+        .write(
+            "test/models/article_errors_messages_test.rb",
+            r#"require "test_helper"
+
+class ArticleErrorsMessagesTest < ActiveSupport::TestCase
+  test "errors.messages and to_fs(:delimited) answer as ActiveModel and ActiveSupport do" do
+    assert_equal "true|false|false|is too short (minimum is 10 characters)|true|false|1,234,567|1,234.5|-1,234",
+                 Article.new.errors_probe
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_errors_messages_test.rb")
+        .assert_passes();
+}

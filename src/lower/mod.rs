@@ -89,6 +89,7 @@ pub mod as_json_super;
 pub mod parameterize;
 pub mod random_formatter;
 pub mod to_json;
+pub mod number_to_fs;
 pub mod presence_in;
 pub mod relation_ivar_materialize;
 pub mod records_to_relation_arg;
@@ -180,6 +181,7 @@ pub use as_json_super::apply_as_json_super_grounding;
 pub use parameterize::apply_parameterize_grounding;
 pub use random_formatter::apply_random_formatter_grounding;
 pub use to_json::apply_to_json_lowering;
+pub use number_to_fs::apply_number_to_fs_grounding;
 pub use presence_in::apply_presence_in_grounding;
 pub use relation_ivar_materialize::apply_relation_ivar_materialize;
 pub use defined_ivar_memo::apply_defined_ivar_memo_lowering;
@@ -314,6 +316,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Const no pass produces and writes a name no pass consumes, so
     // no ordering constraints.
     ("random_formatter", &[]),
+    // `number.to_fs(:delimited)` → `ActiveSupport.number_delimited(number)`;
+    // a rewrite of a name no other pass produces or consumes.
+    ("number_to_fs", &[]),
     // `hash.to_json` → `JSON.generate(hash)`; a receiver-shape rewrite
     // of a name no other pass produces or consumes.
     ("to_json", &[]),
@@ -729,6 +734,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("try_guard");
     random_formatter::apply_random_formatter_grounding(app);
     ran!("random_formatter");
+    number_to_fs::apply_number_to_fs_grounding(app);
+    ran!("number_to_fs");
     to_json::apply_to_json_lowering(app);
     ran!("to_json");
     csv_generate::apply_csv_generate_lowering(app);
