@@ -1468,13 +1468,42 @@ The receiver stays where it is — a relation is lazy, so reading
 `scope_attributes` off it runs no query — and the caller's own
 attributes ride on the OUTSIDE of the merge, which is Rails' order.
 
-**Still divergent:** the seed itself. Rails' `scope_for_create` is
-`where_values_hash`, so EVERY equality condition on the relation
-pre-fills the record; here only an association seed (`where_scope`)
-writes the create-seed slot, so a plain scope's conditions filter reads
-and do not seed writes. `User.active_bots.new` comes back without its
-`role`. An argument shape the rewrite does not admit — a positional
-value, a splat — is left alone and still raises.
+**Supported find-or-create subset:** `Model.where(column: scalar_literal)`
+chains followed by `find_or_create_by` / `find_or_create_by!` with a literal
+Symbol-keyed scalar conditions Hash are expanded at the call site. Keys
+must be ordinary schema columns (not the primary key), and literal types
+must fit the column; this pass does not introduce attribute type casting. The
+lookup retains every predicate; on a miss, the concrete constructor receives
+a typed literal Hash containing the scope defaults and explicit conditions
+(which win). Supported constructor callbacks (block-form `after_initialize` or an
+instance `after_initialize` method) therefore see the initialized attributes. A
+directly attached single-parameter initialization block runs only for a new
+record, before validation/save. Existing matches are returned without yielding.
+Supported
+positions are a statement, local/instance-variable assignment, or the whole
+method body. Effectful attribute/index assignment targets remain unsupported.
+Shadowing an outer local with the initialization parameter, or rebinding that
+parameter, preserves the original saved record.
+
+**Still divergent:** the general create seed. Rails' `scope_for_create`
+is `where_values_hash`, so EVERY equality condition on the relation
+pre-fills the record; the runtime still records only an association seed
+(`where_scope`). `User.active_bots.new` comes back without its `role`.
+General relations, associations, nonliteral/collection predicates and
+initialization blocks with control flow, compound/parallel assignment, new
+local-variable assignments, rescue exception bindings or rest/block parameters
+remain outside the new find-or-create subset. Block locals and optional, post,
+keyword, block and anonymous-rest parameter declarations are rejected before
+ingest can lose their unrepresented signature fields. Forwarded initialization
+blocks (`&proc`, `&lambda`, `&->` and other block arguments) stay unsupported,
+as do nested blocks inside the initializer. Unsupported initialization-block,
+bang and scoped forms receive an explicit error.
+Symbol-form `after_initialize` callbacks are not yet lowered and are excluded
+from this new path. Existing blockless non-bang lowering and runtime association
+finders remain unchanged. OR/removed predicates are not guessed from an old
+create seed.
+An argument shape the plain-constructor rewrite does not admit — a
+positional value, a splat — is left alone and still raises.
 
 ### A scope-INDIFFERENT class method runs unscoped
 
