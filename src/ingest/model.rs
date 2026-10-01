@@ -335,6 +335,7 @@ pub(super) fn ingest_model_with_enum_constants(
     drain_comments_before(&mut comments, class.location().start_offset());
     let mut body: Vec<ModelBodyItem> = Vec::new();
     let mut enums: IndexMap<Symbol, Vec<(String, Literal)>> = IndexMap::new();
+    let mut enum_defaults: IndexMap<Symbol, Literal> = IndexMap::new();
     let mut primary_key: Option<Symbol> = None;
     if let Some(class_body) = class.body() {
         let mut prev_end: Option<usize> = None;
@@ -393,6 +394,9 @@ pub(super) fn ingest_model_with_enum_constants(
             if let Some(call) = stmt.as_call_node() {
                 match expand_enum_decl(&call, file, &leading, &resolve_constant) {
                     Ok(Some(expanded)) => {
+                        if let Some(d) = expanded.default {
+                            enum_defaults.insert(expanded.column.clone(), d);
+                        }
                         enums.insert(expanded.column, expanded.mapping);
                         let mut blank = leading_blank;
                         for mut item in expanded.items {
@@ -493,6 +497,7 @@ pub(super) fn ingest_model_with_enum_constants(
         attributes,
         body,
         enums,
+        enum_defaults,
         span: Span {
             file: super::sources::file_id(file),
             start: class_loc.start_offset() as u32,
@@ -749,6 +754,8 @@ pub(super) struct EnumExpansion {
     pub column: Symbol,
     /// Label → stored value, in declaration order.
     pub mapping: Vec<(String, Literal)>,
+    /// The stored value `default:` names.
+    pub default: Option<Literal>,
     pub items: Vec<ModelBodyItem>,
 }
 
@@ -772,16 +779,19 @@ pub(super) fn expand_enum_decl(
     // Two spellings: `enum :status, <mapping>, **opts` (Rails 7) and the
     // older `enum status: <mapping>, **opts`, where the column and its
     // mapping are the first pair of one keyword hash.
-    let (column, mapping_node, prefix, suffix) = match symbol_value(&first) {
+    let (column, mapping_node, prefix, suffix, default_label) = match symbol_value(&first) {
         Some(col) => {
             let column: String = col;
             let mapping = iter.next();
             let opts = iter.next();
-            let (prefix, suffix) = match opts.as_ref().and_then(|o| o.as_keyword_hash_node()) {
-                Some(kh) => enum_affixes(&kh.elements(), &column),
-                None => (String::new(), String::new()),
+            let (prefix, suffix, default_label) = match opts.as_ref().and_then(|o| o.as_keyword_hash_node()) {
+                Some(kh) => {
+                    let (p, s) = enum_affixes(&kh.elements(), &column);
+                    (p, s, enum_default_label(&kh.elements()))
+                }
+                None => (String::new(), String::new(), None),
             };
-            (column, mapping, prefix, suffix)
+            (column, mapping, prefix, suffix, default_label)
         }
         None => {
             let Some(kh) = first.as_keyword_hash_node() else { return Ok(None) };
@@ -791,7 +801,8 @@ pub(super) fn expand_enum_decl(
             };
             let Some(column) = symbol_value(&pair.key()) else { return Ok(None) };
             let (prefix, suffix) = enum_affixes(&elements, &column);
-            (column, Some(pair.value()), prefix, suffix)
+            let default_label = enum_default_label(&elements);
+            (column, Some(pair.value()), prefix, suffix, default_label)
         }
     };
     let Some(mapping_node) = mapping_node else { return Ok(None) };
@@ -810,6 +821,7 @@ pub(super) fn expand_enum_decl(
         }
     })?;
     let all_labels = labels.clone();
+    let default = default_label.and_then(|d| labels.iter().find(|(l, _)| *l == d).map(|(_, v)| v.clone()));
     // A label that is not a Ruby identifier (`32bits`, `64bits`) has no
     // predicate, scope or bang writer Ruby could name: Rails reaches them
     // through `send`, which the emit has no equivalent of. Skipped.
@@ -947,7 +959,7 @@ pub(super) fn expand_enum_decl(
         leading_comments: Vec::new(),
         leading_blank_line: false,
     });
-    Ok(Some(EnumExpansion { column: Symbol::from(column.as_str()), mapping: labels, items }))
+    Ok(Some(EnumExpansion { column: Symbol::from(column.as_str()), mapping: labels, default, items }))
 }
 
 /// Label → stored value for an `enum` mapping. An array literal maps by
@@ -1098,6 +1110,18 @@ fn enum_label_values(
 /// the column name" (Rails' own convention); a symbol or string names
 /// the affix directly. Returns the strings to splice around each label,
 /// already carrying their separating underscore.
+// `_default:` is the pre-Rails-7 spelling, as `_prefix:` is.
+fn enum_default_label(elements: &ruby_prism::NodeList<'_>) -> Option<String> {
+    elements.iter().find_map(|el| {
+        let assoc = el.as_assoc_node()?;
+        let key = symbol_value(&assoc.key())?;
+        if key.trim_start_matches('_') != "default" {
+            return None;
+        }
+        symbol_value(&assoc.value()).or_else(|| string_value(&assoc.value()))
+    })
+}
+
 fn enum_affixes(elements: &ruby_prism::NodeList<'_>, column: &str) -> (String, String) {
     let mut prefix = String::new();
     let mut suffix = String::new();

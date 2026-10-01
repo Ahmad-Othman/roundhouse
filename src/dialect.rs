@@ -81,6 +81,11 @@ pub struct Model {
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub enums: IndexMap<Symbol, Vec<(String, crate::expr::Literal)>>,
 
+    /// `enum :status, …, default: :active` — the stored value an unset
+    /// attribute starts at, which Rails prefers over the column default.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub enum_defaults: IndexMap<Symbol, crate::expr::Literal>,
+
     /// STI subclass class-ids whose rows live in THIS model's table
     /// (stamped by `lower::sti_scope`, which already derives the
     /// subclass->base map for scoping and `becomes!`). Non-empty turns

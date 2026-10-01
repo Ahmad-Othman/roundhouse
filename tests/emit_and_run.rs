@@ -1033,6 +1033,50 @@ end
         .assert_passes();
 }
 
+/// Not the column default: `enum …, default:` is the value Rails gives an unset attribute, and a value the caller passes still wins.
+#[test]
+fn an_enum_default_option_seeds_a_new_record() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"priority\"\n    t.string \"tone\", default: \"quiet\"",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  enum :priority, { low: 0, high: 1 }, default: :high\n  enum :tone, { quiet: \"quiet\", loud: \"loud\" }, default: :loud",
+        )
+        .write(
+            "test/models/article_enum_default_test.rb",
+            r#"require "test_helper"
+
+class ArticleEnumDefaultTest < ActiveSupport::TestCase
+  test "an unset enum takes the declared default" do
+    article = Article.new
+    assert article.high?
+    assert article.loud?
+  end
+
+  test "a created record keeps it" do
+    article = Article.create!(title: "Defaults", body: "A body long enough to validate.")
+    reloaded = Article.find(article.id)
+    assert_equal "high", reloaded.priority
+    assert_equal "loud", reloaded.tone
+  end
+
+  test "a value the caller passes wins" do
+    article = Article.new(priority: :low, tone: :quiet)
+    assert article.low?
+    assert article.quiet?
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_enum_default_test.rb")
+        .assert_passes();
+}
+
 /// Not stored as 0: a label no mapping names raises ArgumentError as Rails' enum type does, and a string-backed enum reads back its label.
 #[test]
 fn an_enum_rejects_a_label_it_does_not_name() {

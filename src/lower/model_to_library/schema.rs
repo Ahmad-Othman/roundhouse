@@ -2012,7 +2012,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
         // is the default, and only the type-zero case (no default
         // declared) leaves it NULL.
         let col_ty = ty_of_column(&col.col_type);
-        let schema_default = schema_default_literal(col);
+        let schema_default = column_default_literal(model, col);
         let nullable = matches!(super::ty_of_column_slot(col), Ty::Union { .. })
             && schema_default.is_none();
         let default = schema_default.unwrap_or_else(|| default_literal_for_ty(&col_ty));
@@ -2198,7 +2198,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
                     parenthesized: false,
                 },
             ));
-            if overrides_schema_default(col) && json_assign_is_none {
+            if overrides_schema_default(model, col) && json_assign_is_none {
                 stmts.push(given_value_assign(model, col, &attrs));
             }
         }
@@ -2920,8 +2920,8 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
 /// Widening the ingest is its own change with its own measurement —
 /// it moves those columns' emitted constructors in a second app.
 // Not the `||` alone: `new(flag: false)` under `default: true` and `new(n: nil)` under `default: 7` would read back the default.
-fn overrides_schema_default(col: &Column) -> bool {
-    schema_default_literal(col).is_some()
+fn overrides_schema_default(model: &Model, col: &Column) -> bool {
+    column_default_literal(model, col).is_some()
         && !is_temporal_col(col)
         && (matches!(col.col_type, crate::schema::ColumnType::Boolean)
             || matches!(super::ty_of_column_slot(col), Ty::Union { .. }))
@@ -2964,6 +2964,15 @@ fn given_value_assign(model: &Model, col: &Column, attrs: &Symbol) -> Expr {
         },
     );
     Expr::new(Span::synthetic(), ExprNode::If { cond, then_branch: assign, else_branch: nil_lit() })
+}
+
+// Not the schema's alone: `enum :status, …, default: :active` is the value Rails gives an unset attribute, over the column default.
+fn column_default_literal(model: &Model, col: &Column) -> Option<Expr> {
+    match model.enum_defaults.get(&col.name) {
+        Some(Literal::Int { value }) => Some(lit_int(*value)),
+        Some(Literal::Str { value }) => Some(lit_str(value.clone())),
+        _ => schema_default_literal(col),
+    }
 }
 
 fn schema_default_literal(col: &Column) -> Option<Expr> {
