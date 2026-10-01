@@ -359,6 +359,9 @@ impl Analyzer {
                     ty.clone()
                 };
                 cls.instance_methods.insert(name.clone(), reader_ty);
+                if model.enums.contains_key(name) {
+                    cls.instance_methods.entry(Symbol::from(format!("{n}_before_type_cast"))).or_insert(ty.clone());
+                }
                 let predicate = Symbol::from(format!("{n}?"));
                 cls.instance_methods.entry(predicate).or_insert(Ty::Bool);
                 let writer = Symbol::from(format!("{n}="));

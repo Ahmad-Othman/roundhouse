@@ -1033,6 +1033,45 @@ end
         .assert_passes();
 }
 
+/// Not a NoMethodError: an enum's `not_<label>` scope and `<column>_before_type_cast` exist, as Rails generates them.
+#[test]
+fn an_enum_negative_scope_and_before_type_cast_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"state\", default: 0, null: false\n    t.string \"tone\"",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  enum :state, { draft: 0, published: 1 }\n  enum :tone, { quiet: \"q\", loud: \"l\" }, prefix: true",
+        )
+        .write(
+            "test/models/article_enum_scope_test.rb",
+            r#"require "test_helper"
+
+class ArticleEnumScopeTest < ActiveSupport::TestCase
+  test "negative scopes" do
+    article = Article.create!(title: "Scopes", body: "A body long enough to validate.", state: :published, tone: :loud)
+    assert_equal 1, Article.not_draft.where(id: article.id).count
+    assert_equal 0, Article.not_published.where(id: article.id).count
+    assert_equal 0, Article.not_tone_loud.where(id: article.id).count
+  end
+
+  test "the stored value before the label" do
+    article = Article.create!(title: "Raw", body: "A body long enough to validate.", state: :published, tone: :loud)
+    reloaded = Article.find(article.id)
+    assert_equal 1, reloaded.state_before_type_cast
+    assert_equal "l", reloaded.tone_before_type_cast
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_enum_scope_test.rb")
+        .assert_passes();
+}
+
 /// Not a NoMethodError: `read_attribute`/`write_attribute` are a model's `[]`/`[]=`, inside the model and on a record alike.
 #[test]
 fn read_and_write_attribute_reach_the_column() {

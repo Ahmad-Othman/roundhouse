@@ -905,6 +905,25 @@ pub(super) fn expand_enum_decl(
             },
             leading_blank_line: false,
         });
+        // `not_published`: Rails generates the negative scope beside each positive one.
+        let where_not = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    span,
+                    ExprNode::Send { recv: None, method: Symbol::from("where"), args: vec![], block: None, parenthesized: false },
+                )),
+                method: Symbol::from("not"),
+                args: vec![pair.clone()],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        items.push(ModelBodyItem::Scope {
+            scope: Scope { name: Symbol::from(format!("not_{base}")), params: Vec::new(), body: where_not },
+            leading_comments: Vec::new(),
+            leading_blank_line: false,
+        });
         items.push(method_def(
             format!("{base}?"),
             Expr::new(
