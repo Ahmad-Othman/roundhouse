@@ -154,6 +154,14 @@ const MODEL_METHODS: &str = r#"
   def discard_model_keywords(first, __fwd_kwargs, **)
     first - __fwd_kwargs
   end
+  def named_model(__fwd_args, *__fwd_kwargs, last, &__blk)
+    result = __fwd_args - last + __fwd_kwargs.length
+    __blk ? __blk.call(result) : result
+  end
+  def kwargs_model(*values, **__fwd_kwargs, &__fwd_blk)
+    result = values.length + __fwd_kwargs.length
+    __fwd_blk ? __fwd_blk.call(result) : result
+  end
 "#;
 
 const ASSERTIONS: &str = r#"
@@ -192,6 +200,8 @@ expect_value(23, Article.new.forwarded_model(11, 4, factor: 3) { |r| r + 2 })
 expect_value(23, Article.new.forwarded_concern(11, 4, factor: 3) { |r| r + 2 })
 expect_value(23, Article.forwarded_class(11, 4, factor: 3) { |r| r + 2 })
 expect_value(7, Article.new.discard_model_keywords(11, 4, factor: 3, extra: 9))
+expect_value(11, Article.new.named_model(11, 8, 10, 4) { |r| r + 2 })
+expect_value(6, Article.new.kwargs_model(11, 4, factor: 3, extra: 9) { |r| r + 2 })
 expect_value("rejected", Ordinary.new.call([11, 4], {factor: 3}) { |r| r + 2 })
 expect_value(43, CompiledEntry.call)
 expect_value(21, NamedNew.new.relay(11, 4, factor: 3))
@@ -755,6 +765,27 @@ fn anonymous_block_and_virtual_destination_losses_are_refused() {
             run.stderr
         );
     }
+}
+
+#[test]
+fn anonymous_model_block_destination_stays_refused_after_parameter_retention() {
+    let methods = "def self.leaf; yield; end; def self.target(&); __blk=7; leaf(&); end; def self.call(...); target(...); end";
+    let script = "puts Article.call {23}";
+    native_result(&format!("class Article; {methods}; end"), script, "23\n");
+    let run = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            &format!("class Article < ApplicationRecord\n{methods}\n"),
+        )
+        .run_ruby(script);
+    assert!(
+        run.errors.iter().any(|e| e.contains("anonymous block")),
+        "errors={:?}; actual={}; stderr={}",
+        run.errors,
+        run.stdout,
+        run.stderr
+    );
 }
 
 #[test]
