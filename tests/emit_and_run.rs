@@ -981,6 +981,58 @@ end
         .assert_passes();
 }
 
+/// Not only a string default: schema.rb's unquoted `default: true`, `default: 1.5` and `default: -3` reach a new record, and a value the caller passes still wins.
+#[test]
+fn a_schema_default_that_is_not_a_string_seeds_a_new_record() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.boolean \"visible\", default: true\n    t.boolean \"listed\", default: true, null: false\n    t.float \"score\", default: 1.5\n    t.integer \"rank\", default: 7\n    t.integer \"offset\", default: -3, null: false\n    t.integer \"state\", default: 1, null: false",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  enum :state, { draft: 0, published: 1 }",
+        )
+        .write(
+            "test/models/article_default_test.rb",
+            r#"require "test_helper"
+
+class ArticleDefaultTest < ActiveSupport::TestCase
+  test "an unset column takes its schema default" do
+    article = Article.new
+    assert_equal true, article.visible
+    assert_equal true, article.listed
+    assert_equal 1.5, article.score
+    assert_equal 7, article.rank
+    assert_equal(-3, article.offset)
+    assert article.published?
+  end
+
+  test "a created record keeps the default" do
+    article = Article.create!(title: "Defaults", body: "A body long enough to validate.")
+    reloaded = Article.find(article.id)
+    assert_equal true, reloaded.visible
+    assert_equal 7, reloaded.rank
+    assert reloaded.published?
+  end
+
+  test "a value the caller passes wins over the default" do
+    article = Article.new(visible: false, listed: false, rank: nil, score: nil, state: "draft")
+    assert_equal false, article.visible
+    assert_equal false, article.listed
+    assert_nil article.rank
+    assert_nil article.score
+    assert article.draft?
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_default_test.rb")
+        .assert_passes();
+}
+
 /// Not `"published".to_i`: an enum column assigned a label at run time stores the label's value, as Rails does.
 #[test]
 fn an_enum_label_assigned_at_run_time_stores_its_value() {

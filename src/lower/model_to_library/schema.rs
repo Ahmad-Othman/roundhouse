@@ -2120,6 +2120,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
                 },
                 super::ty_of_column_slot(col),
             );
+            let json_assign_is_none = json_assign.is_none();
             let value = if let Some(assign) = json_assign {
                 assign
             } else if nullable {
@@ -2197,6 +2198,9 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
                     parenthesized: false,
                 },
             ));
+            if overrides_schema_default(col) && json_assign_is_none {
+                stmts.push(given_value_assign(model, col, &attrs));
+            }
         }
     }
 
@@ -2915,6 +2919,53 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
 /// DIVERGENCE for lobsters' `default: true` and `default: 1`.
 /// Widening the ingest is its own change with its own measurement —
 /// it moves those columns' emitted constructors in a second app.
+// Not the `||` alone: `new(flag: false)` under `default: true` and `new(n: nil)` under `default: 7` would read back the default.
+fn overrides_schema_default(col: &Column) -> bool {
+    schema_default_literal(col).is_some()
+        && !is_temporal_col(col)
+        && (matches!(col.col_type, crate::schema::ColumnType::Boolean)
+            || matches!(super::ty_of_column_slot(col), Ty::Union { .. }))
+}
+
+// Not a new shape: the same `attrs.key?` guarded write `synth_update_hash` emits, which every target already compiles.
+fn given_value_assign(model: &Model, col: &Column, attrs: &Symbol) -> Expr {
+    let lookup = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(var_ref(attrs.clone())),
+            method: Symbol::from("[]"),
+            args: vec![lit_sym(col.name.clone())],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let slot_ty = super::ty_of_column_slot(col);
+    let value = enum_label_cast(model, col, lookup.clone()).unwrap_or_else(|| {
+        Expr::new(Span::synthetic(), ExprNode::Cast { value: lookup, target_ty: slot_ty })
+    });
+    let assign = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(self_ref()),
+            method: col_storage_setter(col),
+            args: vec![value],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let cond = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(var_ref(attrs.clone())),
+            method: Symbol::from("key?"),
+            args: vec![lit_sym(col.name.clone())],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    Expr::new(Span::synthetic(), ExprNode::If { cond, then_branch: assign, else_branch: nil_lit() })
+}
+
 fn schema_default_literal(col: &Column) -> Option<Expr> {
     use crate::schema::ColumnType;
     let raw = col.default.as_ref()?;
