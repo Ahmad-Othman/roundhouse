@@ -1066,8 +1066,52 @@ jobs:
         run: gem install websocket-driver --no-document
       - name: scripts/campfire-compare --spinel ${{ matrix.flag }}
         run: scripts/campfire-compare --reuse "$PWD/build/campfire-compare-spinel" --spinel ${{ matrix.flag }} /tmp/campfire
+
+  # A different app (the model-scenario overlay), so it needs its own
+  # build, not the comparison binary. Start after the toolchain is ready
+  # instead of serializing it behind the shared build and request walk.
+  campfire-db-differential-spinel:
+    needs: build-spinel
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    services:
+      redis:
+        image: redis
+        ports: ['6379:6379']
+    env:
+      BUNDLE_PATH: vendor/bundle
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      - uses: actions/download-artifact@v8
+        with:
+          name: spinel-dist
+          path: spinel-dist
+      - name: Stage spinel binaries
+        run: |
+          chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
+          echo "$PWD/spinel-dist" >> $GITHUB_PATH
+      - name: System libvips + libsqlite3-dev + libjemalloc-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libvips-dev libsqlite3-dev libjemalloc-dev sqlite3
+      - name: Fetch pinned once-campfire
+        run: |
+          curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
+          mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
+      - name: Cache the prepared oracle
+        id: oracle
+        uses: actions/cache@v4
+        with:
+          path: build/campfire-oracle
+          key: campfire-oracle-${{ env.CAMPFIRE_SHA }}-ruby34-v1
+      - name: Prepare the Rails oracle (cache miss)
+        if: steps.oracle.outputs.cache-hit != 'true'
+        run: scripts/campfire-oracle prepare --app /tmp/campfire
       - name: scripts/campfire-db-differential --spinel
-        if: matrix.gc == 'default'
         run: scripts/campfire-db-differential --spinel /tmp/campfire
 
   campfire-conformance:
