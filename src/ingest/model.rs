@@ -836,6 +836,8 @@ pub(super) fn expand_enum_decl(
         )
     };
     let mut items = Vec::new();
+    // Not the stored integer: the reader of an integer-mapped enum answers the label, as Rails' does.
+    let int_mapped = labels.iter().all(|(_, v)| matches!(v, Literal::Int { .. }));
     for (label, value) in labels.iter().cloned() {
         let base = format!("{prefix}{label}{suffix}");
         let pair = Expr::new(
@@ -898,7 +900,12 @@ pub(super) fn expand_enum_decl(
                 ExprNode::Send {
                     recv: Some(column_read()),
                     method: Symbol::from("=="),
-                    args: vec![Expr::new(span, ExprNode::Lit { value })],
+                    args: vec![Expr::new(
+                        span,
+                        ExprNode::Lit {
+                            value: if int_mapped { Literal::Str { value: label.clone() } } else { value },
+                        },
+                    )],
                     block: None,
                     parenthesized: false,
                 },

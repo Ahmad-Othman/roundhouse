@@ -49,7 +49,7 @@ pub(super) fn push_schema_methods(
     // text via `<col>_raw=` directly.
     let mut demanded: Option<std::collections::HashSet<Symbol>> = None;
     for col in &table.columns {
-        methods.push(synth_attr_reader(owner, col));
+        methods.push(synth_attr_reader(owner, col, model));
         if is_temporal_col(col) {
             methods.push(synth_raw_reader(owner, col));
             // Rails-parity Time-accepting writer (lobsters' ban flow:
@@ -303,7 +303,7 @@ pub(super) fn push_schema_methods(
     }
 
     // def attributes; { col: @col, ... } excluding id; end
-    methods.push(synth_attributes(owner, table));
+    methods.push(synth_attributes(owner, table, model));
 
     // def [](name); case name; when :col then @col; ...; end; end
     methods.push(synth_index_read(owner, table, model));
@@ -738,7 +738,7 @@ fn and_bool(left: Expr, right: Expr) -> Expr {
     )
 }
 
-fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
+fn synth_attr_reader(owner: &ClassId, col: &Column, model: &Model) -> MethodDef {
     // Temporal columns store ISO-8601 TEXT (`ty_of_column` → Str) but
     // read back as a real `Time`: the reader parses the stored text so
     // `record.created_at` is a native `Time` for callers / analyze /
@@ -747,7 +747,9 @@ fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
     // renders `parse_db_time` (a stored-text→Time intrinsic) natively; a
     // target that hasn't wired one yet surfaces the honest not-supported
     // gap on this reader's `Ty::Time` return type.
-    let (body, ret_ty) = if is_temporal_col(col) {
+    let (body, ret_ty) = if let Some(label) = enum_label_read(model, col) {
+        (label, Ty::Union { variants: vec![Ty::Str, Ty::Nil] })
+    } else if is_temporal_col(col) {
         // Nilable: a stored value can be absent (NULL / unset), so the
         // parse short-circuits to nil. `Time?` is the honest static type
         // and matches what a strict-null target infers from the nilable
@@ -2515,7 +2517,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
     }
 }
 
-fn synth_attributes(owner: &ClassId, table: &Table) -> MethodDef {
+fn synth_attributes(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
     // Keys are the PUBLIC column names as STRINGS, which is what Rails'
     // `record.attributes` answers — unambiguously, in every version.
     // Symbols here made the Rails idiom silently empty:
@@ -2537,7 +2539,8 @@ fn synth_attributes(owner: &ClassId, table: &Table) -> MethodDef {
         .filter(|c| c.name.as_str() != "id")
         .map(|c| {
             let col_ty = super::ty_of_column_slot(c);
-            (super::lit_str(c.name.as_str().to_string()), col_ivar(c, col_ty))
+            let value = enum_label_read(model, c).unwrap_or_else(|| col_ivar(c, col_ty));
+            (super::lit_str(c.name.as_str().to_string()), value)
         })
         .collect();
 
@@ -2592,7 +2595,9 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
             // the bare read it always had; wrapping those too cost
             // them the ivar-read `.clone()` rust adds, moving out of
             // `&self`.
-            body: crate::lower::has_json::column_hash_read(model, &c.name).unwrap_or_else(|| {
+            body: crate::lower::has_json::column_hash_read(model, &c.name)
+                .or_else(|| enum_label_read(model, c))
+                .unwrap_or_else(|| {
                 let read = Expr::new(
                     Span::synthetic(),
                     ExprNode::Ivar { name: col_storage_name(c) },
@@ -2692,6 +2697,57 @@ fn nil_guarded(col: &Column, raw: Expr, call: Expr) -> Expr {
         Expr::new(Span::synthetic(), ExprNode::If { cond: is_nil, then_branch: nil, else_branch: call }),
         super::ty_of_column_slot(col),
     )
+}
+
+/// `@status`'s label, the reader Rails generates for an integer-mapped enum: `"archived"` where the column stores 2.
+fn enum_label_read(model: &Model, col: &Column) -> Option<Expr> {
+    if !crate::dialect::enum_is_int_mapped(model, &col.name) {
+        return None;
+    }
+    let stored = with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Ivar { name: col_storage_name(col) }),
+        super::ty_of_column_slot(col),
+    );
+    let (labels, values) = enum_arrays(model, col)?;
+    let non_nil = with_ty(stored.clone(), Ty::Int);
+    let call = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActiveRecord")] })),
+                method: Symbol::from("enum_label"),
+                args: vec![non_nil, labels, values],
+                block: None,
+                parenthesized: true,
+            },
+        ),
+        Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+    );
+    Some(with_ty(nil_guarded(col, stored, call), Ty::Union { variants: vec![Ty::Str, Ty::Nil] }))
+}
+
+fn enum_arrays(model: &Model, col: &Column) -> Option<(Expr, Expr)> {
+    let mapping = model.enums.get(&col.name)?;
+    let mut labels = Vec::new();
+    let mut values = Vec::new();
+    for (label, stored) in mapping {
+        let Literal::Int { value } = stored else { return None };
+        labels.push(with_ty(
+            Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: label.clone() } }),
+            Ty::Str,
+        ));
+        values.push(with_ty(
+            Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Int { value: *value } }),
+            Ty::Int,
+        ));
+    }
+    let array = |elems: Vec<Expr>, of: Ty| {
+        with_ty(
+            Expr::new(Span::synthetic(), ExprNode::Array { elements: elems, style: Default::default() }),
+            Ty::Array { elem: Box::new(of) },
+        )
+    };
+    Some((array(labels, Ty::Str), array(values, Ty::Int)))
 }
 
 fn enum_int_call(model: &Model, col: &Column, text: Expr) -> Option<Expr> {

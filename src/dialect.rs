@@ -1584,3 +1584,10 @@ pub struct Fixture {
     /// whose path doesn't name it. `None` derives it from `path`.
     pub model_class: Option<Symbol>,
 }
+
+/// An enum whose every stored value is an integer: its reader answers the label.
+pub fn enum_is_int_mapped(model: &Model, column: &Symbol) -> bool {
+    model.enums.get(column).is_some_and(|m| {
+        !m.is_empty() && m.iter().all(|(_, v)| matches!(v, crate::expr::Literal::Int { .. }))
+    })
+}

@@ -1022,3 +1022,71 @@ end
         .run_test("test/models/article_enum_label_test.rb")
         .assert_passes();
 }
+
+/// Not the stored integer: an integer-mapped enum reads back its label, as Rails' reader, `[]` and `attributes` do.
+#[test]
+fn an_integer_enum_reads_back_its_label() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"state\", default: 0",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  enum :state, { draft: 0, published: 1 }\n\n  def state_label\n    state.humanize\n  end",
+        )
+        .write(
+            "test/models/article_enum_reader_test.rb",
+            r#"require "test_helper"
+
+class ArticleEnumReaderTest < ActiveSupport::TestCase
+  test "an integer enum reads back its label" do
+    article = articles(:one)
+    article.update(state: :published)
+    reloaded = Article.find(article.id)
+    assert_equal "published", reloaded.state
+    assert_equal "Published", reloaded.state_label
+    assert_equal "published", reloaded[:state]
+    assert_equal "published", reloaded.attributes["state"]
+    assert reloaded.published?
+    assert !reloaded.draft?
+    assert reloaded.state == "published"
+    assert_equal 1, Article.where(state: :published).where(id: article.id).count
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_enum_reader_test.rb")
+        .assert_passes();
+}
+
+/// Not left on the String: `humanize` and `titleize` are ActiveSupport reopens, answered here as ActiveSupport does.
+#[test]
+fn string_humanize_and_titleize_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def self.inflections_probe
+    ["employee_salary".humanize, "author_id".humanize, "hello-world".titleize, "SSLError".titleize, "raiders_of_the_lost_ark".titleize].join("|")
+  end"#,
+        )
+        .write(
+            "test/models/article_inflections_test.rb",
+            r#"require "test_helper"
+
+class ArticleInflectionsTest < ActiveSupport::TestCase
+  test "humanize and titleize answer as ActiveSupport does" do
+    assert_equal "Employee salary|Author|Hello World|Ssl Error|Raiders Of The Lost Ark", Article.inflections_probe
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_inflections_test.rb")
+        .assert_passes();
+}
