@@ -1586,8 +1586,15 @@ pub struct Fixture {
 }
 
 /// An enum whose every stored value is an integer: its reader answers the label.
-pub fn enum_is_int_mapped(model: &Model, column: &Symbol) -> bool {
-    model.enums.get(column).is_some_and(|m| {
-        !m.is_empty() && m.iter().all(|(_, v)| matches!(v, crate::expr::Literal::Int { .. }))
-    })
+pub fn enum_reads_label(model: &Model, column: &Symbol) -> bool {
+    model.enums.get(column).is_some_and(|m| enum_mapping_reads_label(m))
+}
+
+// Not every string mapping: one whose labels are its values (`%w[…].index_by(&:itself)`) reads the column as it is.
+pub fn enum_mapping_reads_label(m: &[(String, crate::expr::Literal)]) -> bool {
+    use crate::expr::Literal;
+    !m.is_empty()
+        && (m.iter().all(|(_, v)| matches!(v, Literal::Int { .. }))
+            || (m.iter().all(|(_, v)| matches!(v, Literal::Str { .. }))
+                && m.iter().any(|(l, v)| !matches!(v, Literal::Str { value } if value == l))))
 }

@@ -352,8 +352,8 @@ impl Analyzer {
             // (writer) all resolve.
             for (name, ty) in &model.attributes.fields {
                 let n = name.as_str();
-                // Not the column's integer: an integer-mapped enum's reader answers its label, or nil for a value no label names.
-                let reader_ty = if crate::dialect::enum_is_int_mapped(model, name) {
+                // Not the stored value: an enum's reader answers its label, or nil for a value no label names.
+                let reader_ty = if crate::dialect::enum_reads_label(model, name) {
                     Ty::Union { variants: vec![Ty::Str, Ty::Nil] }
                 } else {
                     ty.clone()

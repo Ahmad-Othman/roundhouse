@@ -2703,23 +2703,24 @@ fn nil_guarded(col: &Column, raw: Expr, call: Expr) -> Expr {
     )
 }
 
-/// `@status`'s label, the reader Rails generates for an integer-mapped enum: `"archived"` where the column stores 2.
+/// `@status`'s label, the reader Rails generates for an enum: `"archived"` where the column stores 2 (or `"a"`).
 fn enum_label_read(model: &Model, col: &Column) -> Option<Expr> {
-    if !crate::dialect::enum_is_int_mapped(model, &col.name) {
+    if !crate::dialect::enum_reads_label(model, &col.name) {
         return None;
     }
     let stored = with_ty(
         Expr::new(Span::synthetic(), ExprNode::Ivar { name: col_storage_name(col) }),
         super::ty_of_column_slot(col),
     );
-    let (labels, values) = enum_arrays(model, col)?;
-    let non_nil = with_ty(stored.clone(), Ty::Int);
+    let (labels, values, value_ty) = enum_arrays(model, col)?;
+    let method = if value_ty == Ty::Int { "enum_label" } else { "enum_label_str" };
+    let non_nil = with_ty(stored.clone(), value_ty);
     let call = with_ty(
         Expr::new(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActiveRecord")] })),
-                method: Symbol::from("enum_label"),
+                method: Symbol::from(method),
                 args: vec![non_nil, labels, values],
                 block: None,
                 parenthesized: true,
@@ -2730,20 +2731,26 @@ fn enum_label_read(model: &Model, col: &Column) -> Option<Expr> {
     Some(with_ty(nil_guarded(col, stored, call), Ty::Union { variants: vec![Ty::Str, Ty::Nil] }))
 }
 
-fn enum_arrays(model: &Model, col: &Column) -> Option<(Expr, Expr)> {
+/// The mapping as two parallel literal Arrays, and the stored values' type — `None` for a mapping that mixes kinds.
+fn enum_arrays(model: &Model, col: &Column) -> Option<(Expr, Expr, Ty)> {
     let mapping = model.enums.get(&col.name)?;
+    let value_ty = match mapping.first().map(|(_, v)| v) {
+        Some(Literal::Int { .. }) => Ty::Int,
+        Some(Literal::Str { .. }) => Ty::Str,
+        _ => return None,
+    };
     let mut labels = Vec::new();
     let mut values = Vec::new();
     for (label, stored) in mapping {
-        let Literal::Int { value } = stored else { return None };
+        let lit = match (stored, &value_ty) {
+            (Literal::Int { .. }, Ty::Int) | (Literal::Str { .. }, Ty::Str) => stored.clone(),
+            _ => return None,
+        };
         labels.push(with_ty(
             Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: label.clone() } }),
             Ty::Str,
         ));
-        values.push(with_ty(
-            Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Int { value: *value } }),
-            Ty::Int,
-        ));
+        values.push(with_ty(Expr::new(Span::synthetic(), ExprNode::Lit { value: lit }), value_ty.clone()));
     }
     let array = |elems: Vec<Expr>, of: Ty| {
         with_ty(
@@ -2751,58 +2758,51 @@ fn enum_arrays(model: &Model, col: &Column) -> Option<(Expr, Expr)> {
             Ty::Array { elem: Box::new(of) },
         )
     };
-    Some((array(labels, Ty::Str), array(values, Ty::Int)))
+    Some((array(labels, Ty::Str), array(values, value_ty.clone()), value_ty))
 }
 
 fn enum_int_call(model: &Model, col: &Column, text: Expr) -> Option<Expr> {
-    let mapping = model.enums.get(&col.name)?;
-    if mapping.is_empty() {
-        return None;
-    }
-    let mut labels = Vec::new();
-    let mut values = Vec::new();
-    for (label, stored) in mapping {
-        let Literal::Int { value } = stored else { return None };
-        labels.push(with_ty(
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::Lit { value: Literal::Str { value: label.clone() } },
-            ),
-            Ty::Str,
-        ));
-        values.push(with_ty(
-            Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Int { value: *value } }),
-            Ty::Int,
-        ));
-    }
-    let array = |elems: Vec<Expr>, of: Ty| {
-        with_ty(
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::Array { elements: elems, style: Default::default() },
-            ),
-            Ty::Array { elem: Box::new(of) },
-        )
+    let (labels, values, value_ty) = enum_arrays(model, col)?;
+    let nullable = matches!(super::ty_of_column_slot(col), Ty::Union { .. });
+    let method = match (&value_ty, nullable) {
+        (Ty::Int, false) => "enum_int",
+        (Ty::Int, true) => "enum_int_or_nil",
+        (_, false) => "enum_str",
+        (_, true) => "enum_str_or_nil",
     };
+    let attr = with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Str { value: col.name.as_str().to_string() } }),
+        Ty::Str,
+    );
+    let mut args = vec![text, labels, values.clone()];
+    if value_ty == Ty::Int {
+        let ExprNode::Array { elements, .. } = &*values.node else { return None };
+        let texts = elements
+            .iter()
+            .map(|e| match &*e.node {
+                ExprNode::Lit { value: Literal::Int { value } } => Some(lit_str(value.to_string())),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        args.push(with_ty(
+            Expr::new(Span::synthetic(), ExprNode::Array { elements: texts, style: Default::default() }),
+            Ty::Array { elem: Box::new(Ty::Str) },
+        ));
+    }
+    args.push(attr);
+    let ret = if nullable { Ty::Union { variants: vec![value_ty, Ty::Nil] } } else { value_ty };
     Some(with_ty(
         Expr::new(
             Span::synthetic(),
             ExprNode::Send {
-                recv: Some(Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Const { path: vec![Symbol::from("ActiveRecord")] },
-                )),
-                method: Symbol::from("enum_int"),
-                args: vec![
-                    text,
-                    array(labels, Ty::Str),
-                    array(values, Ty::Int),
-                ],
+                recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActiveRecord")] })),
+                method: Symbol::from(method),
+                args,
                 block: None,
                 parenthesized: true,
             },
         ),
-        Ty::Int,
+        ret,
     ))
 }
 

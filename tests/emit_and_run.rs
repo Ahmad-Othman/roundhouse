@@ -1033,6 +1033,59 @@ end
         .assert_passes();
 }
 
+/// Not stored as 0: a label no mapping names raises ArgumentError as Rails' enum type does, and a string-backed enum reads back its label.
+#[test]
+fn an_enum_rejects_a_label_it_does_not_name() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"state\", default: 0, null: false\n    t.integer \"priority\"\n    t.string \"tone\"",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  enum :state, { draft: 0, published: 1 }\n  enum :priority, { low: 0, high: 1 }\n  enum :tone, { quiet: \"q\", loud: \"l\" }",
+        )
+        .write(
+            "test/models/article_enum_reject_test.rb",
+            r#"require "test_helper"
+
+class ArticleEnumRejectTest < ActiveSupport::TestCase
+  test "a label the mapping does not name raises" do
+    labels = ["bogus", "Draft", "loud!"]
+    article = articles(:one)
+    assert_raises(ArgumentError) { article.state = labels[0] }
+    assert_raises(ArgumentError) { article.state = labels[1] }
+    assert_raises(ArgumentError) { article.update(state: labels[0]) }
+    assert_raises(ArgumentError) { article[:state] = labels[0] }
+    assert_raises(ArgumentError) { Article.new(state: labels[0]) }
+    assert_raises(ArgumentError) { article.tone = labels[2] }
+    assert_equal "draft", Article.find(article.id).state
+  end
+
+  test "a blank value clears a nullable enum" do
+    blank = ""
+    article = Article.new(priority: "high")
+    article.priority = blank
+    assert_nil article.priority
+  end
+
+  test "a string-backed enum stores its value and reads its label" do
+    article = Article.create!(title: "Tone", body: "A body long enough to validate.", tone: :loud)
+    reloaded = Article.find(article.id)
+    assert_equal "loud", reloaded.tone
+    assert reloaded.loud?
+    assert_equal 1, Article.loud.where(id: article.id).count
+    assert_equal({ "quiet" => "q", "loud" => "l" }, Article.tones)
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_enum_reject_test.rb")
+        .assert_passes();
+}
+
 /// Not `"published".to_i`: an enum column assigned a label at run time stores the label's value, as Rails does.
 #[test]
 fn an_enum_label_assigned_at_run_time_stores_its_value() {
