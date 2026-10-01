@@ -92,7 +92,9 @@ The binary and what it reads at run time are the whole deployment:
 `config/` for anything the app reads from there, and a writable
 `storage/` for the database and any uploaded files. The runtime
 libraries it needs are `libsqlite3`, `libjemalloc2`, `libvips42`
-if variants are in play, and `ffmpeg` for video previews.
+if variants are in play, and `ffmpeg` for video previews; and a CA
+store (`ca-certificates`) if the app makes https requests of its own
+(webhooks, link previews, Web Push).
 
 For a machine without Spinel, `spin pack` writes a directory that
 builds from C alone — the generated C, the Spinel runtime as source,
@@ -111,20 +113,38 @@ RUN make -C /src -j"$(nproc)" CC=clang
 
 FROM debian:trixie-slim
 RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y libsqlite3-0 libjemalloc2 libvips42 ffmpeg && \
+    apt-get install --no-install-recommends -y ca-certificates libsqlite3-0 libjemalloc2 libvips42 ffmpeg && \
     rm -rf /var/lib/apt/lists/*
+RUN groupadd --system --gid 1000 <app> && \
+    useradd <app> --uid 1000 --gid 1000 --no-create-home --shell /usr/sbin/nologin
 WORKDIR /app
 COPY app/ ./
 COPY --from=build /src/<app> ./<app>
-RUN mkdir -p storage
+RUN mkdir -p storage && chown 1000:1000 storage
 VOLUME /app/storage
+COPY --chmod=755 boot ./boot
 ENV PORT=3000
 EXPOSE 3000
-CMD ["./<app>"]
+CMD ["./boot"]
 ```
 
 where `pack/` is `spin pack <app> --out pack` and `app/` is the
-run-time file set above. The Campfire image built this way is about
+run-time file set above. The server runs as uid 1000, not root; `boot`
+starts as root only long enough to hand a volume an earlier image
+created as root to that user:
+
+```sh
+#!/bin/sh
+set -e
+if [ "$(id -u)" = 0 ]; then
+  chown -R 1000:1000 /app/storage
+  exec setpriv --reuid=1000 --regid=1000 --init-groups ./<app> "$@"
+fi
+exec ./<app> "$@"
+```
+
+A new deployment with no such volume can drop `boot` for `USER
+1000:1000` and `CMD ["./<app>"]`. The Campfire image built this way is about
 600 MB, nearly all of it libvips and ffmpeg (the binary is 11 MB), and
 runs the whole product — sign-in, rooms, uploads, search,
 live updates over the socket — from `docker run -p 3000:3000`.
