@@ -354,6 +354,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // Qualified enum arrays can live in a later file (e.g. a service
     // module). Collect literal inputs before expanding any model DSL.
     let mut enum_constants = super::model::EnumConstants::default();
+    let mut enum_input_files = std::collections::HashSet::new();
     // The same pre-pass answers a second question: which classes are
     // ActiveRecord bases. A model descending through the app's own
     // abstract base was classified a library class and lost its DSL,
@@ -372,6 +373,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 .extend(super::model::ingest_table_name_prefixes(&source, &entry.display().to_string()));
             model_bases.record(&source, &mut base_pairs);
             enum_constants.record(&source, &entry.display().to_string());
+            enum_input_files.insert(entry);
         }
     }
     // An abstract base can live outside `app/models` too — in a
@@ -393,6 +395,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             model_bases.record(&source, &mut base_pairs);
             if sub != "lib" || !ignored_lib_file(&entry) {
                 enum_constants.record(&source, &entry.display().to_string());
+                enum_input_files.insert(entry);
             }
         }
     }
@@ -1519,6 +1522,7 @@ end
     // actually clears the registry and becomes `app.sources` for
     // good — runs after all of them, below.
     app.sources = super::sources::snapshot();
+    enum_constants.validate_consumed_sources(&app, &enum_input_files)?;
     keep_initializer_defined(&mut app, dir, initializer_defined);
     // Carrier provenance must not depend on where a module lives:
     // models, services, helpers and lib all use the same splice.
