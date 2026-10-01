@@ -91,8 +91,8 @@ The binary and what it reads at run time are the whole deployment:
 `build/bin/<app>`, `static/`, `public/`, `db/` for the seed,
 `config/` for anything the app reads from there, and a writable
 `storage/` for the database and any uploaded files. The runtime
-libraries it needs are `libsqlite3`, `libjemalloc2`, and `libvips42`
-if variants are in play.
+libraries it needs are `libsqlite3`, `libjemalloc2`, `libvips42`
+if variants are in play, and `ffmpeg` for video previews.
 
 For a machine without Spinel, `spin pack` writes a directory that
 builds from C alone — the generated C, the Spinel runtime as source,
@@ -111,7 +111,7 @@ RUN make -C /src -j"$(nproc)" CC=clang
 
 FROM debian:trixie-slim
 RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y libsqlite3-0 libjemalloc2 libvips42 && \
+    apt-get install --no-install-recommends -y libsqlite3-0 libjemalloc2 libvips42 ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY app/ ./
@@ -125,7 +125,8 @@ CMD ["./<app>"]
 
 where `pack/` is `spin pack <app> --out pack` and `app/` is the
 run-time file set above. The Campfire image built this way is about
-160 MB and runs the whole product — sign-in, rooms, uploads, search,
+600 MB, nearly all of it libvips and ffmpeg (the binary is 11 MB), and
+runs the whole product — sign-in, rooms, uploads, search,
 live updates over the socket — from `docker run -p 3000:3000`.
 [rubys.github.io/roundhouse/campfire/docker.tgz](https://rubys.github.io/roundhouse/campfire/docker.tgz)
 is that archive, rebuilt on every push; it is the fastest way to see
