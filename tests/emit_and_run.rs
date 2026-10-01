@@ -1033,6 +1033,46 @@ end
         .assert_passes();
 }
 
+/// Not a NoMethodError: `read_attribute`/`write_attribute` are a model's `[]`/`[]=`, inside the model and on a record alike.
+#[test]
+fn read_and_write_attribute_reach_the_column() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"state\", default: 0, null: false",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  enum :state, { draft: 0, published: 1 }\n\n  def shout_title\n    write_attribute(:title, read_attribute(:title).upcase)\n  end",
+        )
+        .write(
+            "test/models/article_attribute_test.rb",
+            r#"require "test_helper"
+
+class ArticleAttributeTest < ActiveSupport::TestCase
+  test "read_attribute and write_attribute on a record" do
+    article = articles(:one)
+    article.write_attribute(:state, "published")
+    assert_equal "published", article.read_attribute(:state)
+    assert_equal "published", article.read_attribute("state")
+    article.save!
+    assert Article.find(article.id).published?
+  end
+
+  test "the bare forms inside the model" do
+    article = Article.new(title: "quiet")
+    article.shout_title
+    assert_equal "QUIET", article.title
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_attribute_test.rb")
+        .assert_passes();
+}
+
 /// Not the column default: `enum …, default:` is the value Rails gives an unset attribute, and a value the caller passes still wins.
 #[test]
 fn an_enum_default_option_seeds_a_new_record() {
