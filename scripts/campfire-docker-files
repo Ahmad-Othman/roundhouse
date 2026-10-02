@@ -195,8 +195,9 @@ delivery, subscribe again before retrying. Image uploads — attachments,
 avatars, the account logo — work, persist under \`/app/storage/files\`,
 and are served as the thumbnails Rails would serve (libvips, through the
 spinel-ruby-vips package). Link previews (pasting a URL into a message)
-fetch the page but then fail, answering 500, until a Spinel fix lands
-([matz/spinel#7051](https://github.com/matz/spinel/issues/7051)); the
-message itself posts normally. See the
+fetch the page but show no preview until a Spinel fix lands
+([matz/spinel#7091](https://github.com/matz/spinel/pull/7091)): the
+response's content type is read with its charset, so no real page
+passes the HTML check. The message itself posts normally. See the
 [project page](https://rubys.github.io/roundhouse/apps/campfire.html).
 README
