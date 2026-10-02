@@ -6,6 +6,7 @@ import io
 import json
 import os
 import subprocess
+import tarfile
 import tempfile
 import unittest
 import zipfile
@@ -432,6 +433,42 @@ class InputTests(unittest.TestCase):
             (self.root / "outputs").read_text(), "hit=false\neligible=false\n"
         )
 
+    def test_every_profile_executes_on_main_and_non_pr_events_without_preparation_or_lookup(
+        self,
+    ):
+        for event, ref in (
+            ("push", "refs/heads/main"),
+            ("workflow_dispatch", "refs/heads/main"),
+            ("push", "refs/heads/feature"),
+            ("workflow_dispatch", "refs/pull/321/merge"),
+            ("pull_request_target", "refs/heads/main"),
+            ("pull_request", "refs/heads/main"),
+        ):
+            for job in reuse.JOBS:
+                with self.subTest(event=event, ref=ref, job=job):
+                    outputs = self.root / "outputs"
+                    outputs.write_text("")
+                    with (
+                        patch.dict(
+                            os.environ,
+                            {
+                                "GITHUB_EVENT_NAME": event,
+                                "GITHUB_REF": ref,
+                                "GITHUB_OUTPUT": str(outputs),
+                                "GITHUB_STEP_SUMMARY": str(self.root / "summary"),
+                            },
+                            clear=True,
+                        ),
+                        patch.object(reuse, "GitHub") as api,
+                        patch.object(reuse, "prepare_archive") as prepare,
+                        patch.object(reuse, "state_dir") as state,
+                    ):
+                        reuse.probe(job, "must-not-read-old-or-current-inputs")
+                        api.assert_not_called()
+                        prepare.assert_not_called()
+                        state.assert_not_called()
+                    self.assertEqual(outputs.read_text(), "hit=false\neligible=false\n")
+
     def pr_env(self):
         event = self.root / "event.json"
         event.write_text(
@@ -533,6 +570,324 @@ class InputTests(unittest.TestCase):
             self.assertEqual(
                 (self.root / "outputs").read_text(), "hit=false\neligible=false\n"
             )
+
+    def consumer_setup(self):
+        project = self.root / "consumer"
+        project.mkdir()
+        (project / "src").mkdir()
+        (project / "src/lib.rs").write_text("fn current() {}")
+        (project / "Cargo.toml").write_text('[package]\nname="app"\nversion="0.1.0"\n')
+        (project / "Cargo.lock").write_text(
+            'version=4\n[[package]]\nname="app"\nversion="0.1.0"\n'
+        )
+        for base in (project, self.root / "tests/browser_smoke"):
+            modules = base / "node_modules"
+            modules.mkdir(parents=True)
+            (modules / "tool.js").write_text("actual tool")
+        browsers = self.root / "browsers"
+        browsers.mkdir()
+        (browsers / "chromium").write_text("actual browser binary")
+        env = {
+            "CI": "true",
+            "CARGO_HOME": str(self.root / "cargo-home"),
+            "PLAYWRIGHT_BROWSERS_PATH": str(browsers),
+        }
+        self.addCleanup(patch.stopall)
+        patch.dict(os.environ, env, clear=True).start()
+        patch.object(
+            reuse, "environment_inputs", side_effect=lambda: {"rustc": "actual rust"}
+        ).start()
+        patch.object(reuse, "repository_inputs", return_value="consumer policy").start()
+        patch.object(
+            reuse, "command", return_value=b"actual tool/package versions"
+        ).start()
+        return project
+
+    def test_consumer_policy_ignores_producer_edits_but_not_its_harness_or_workflow(
+        self,
+    ):
+        for name in (
+            "scripts/smoke",
+            "tests/framework_tests_rust.rs",
+            "tests/browser_smoke/tests/spec.ts",
+        ):
+            path = Path(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("consumer contract")
+        self.commit()
+        jobs = ("smoke-rust", "rust-inflector", "browser-smoke-typescript")
+        before = {job: reuse.repository_inputs(job) for job in jobs}
+        Path("src/analyze.rs").write_text("compiler edit with identical output")
+        self.commit()
+        for job in jobs:
+            self.assertEqual(reuse.repository_inputs(job), before[job])
+        Path("tests/framework_tests_rust.rs").write_text("changed inflector assertion")
+        self.commit()
+        self.assertNotEqual(
+            reuse.repository_inputs("rust-inflector"), before["rust-inflector"]
+        )
+        self.assertEqual(reuse.repository_inputs("smoke-rust"), before["smoke-rust"])
+        Path(".github/workflows/ci.yml").write_text("changed command/environment")
+        self.commit()
+        for job in jobs:
+            self.assertNotEqual(reuse.repository_inputs(job), before[job])
+        before = {job: reuse.repository_inputs(job) for job in jobs}
+        action = Path(".github/actions/setup-rust/action.yml")
+        action.parent.mkdir(parents=True)
+        action.write_text("changed local toolchain setup")
+        self.commit()
+        for job in jobs:
+            self.assertNotEqual(reuse.repository_inputs(job), before[job])
+
+    def test_matrix_evidence_is_scoped_to_the_actual_physical_job_and_required_step(
+        self,
+    ):
+        for logical, physical in (
+            ("smoke-rust", "smoke (rust)"),
+            ("rust-inflector", "compare (rust)"),
+        ):
+            job = {
+                "name": physical,
+                "status": "completed",
+                "conclusion": "success",
+                "steps": [
+                    {"name": reuse.JOBS[logical]["checks"][0], "conclusion": "success"}
+                ],
+            }
+            receipt = {"outcomes": ["success"]}
+            self.assertIs(reuse.successful_execution([job], receipt, logical), job)
+            job["name"] = physical.replace("rust", "swift")
+            self.assertIsNone(reuse.successful_execution([job], receipt, logical))
+            job["name"] = physical
+            job["steps"][0]["conclusion"] = "skipped"
+            self.assertIsNone(reuse.successful_execution([job], receipt, logical))
+
+    def test_browser_dist_locks_modules_binary_and_system_packages_invalidate(self):
+        project = self.consumer_setup()
+        (project / "dist").mkdir()
+        asset = project / "dist/worker.js"
+        asset.write_text("current compiled worker")
+        lock = project / "package-lock.json"
+        lock.write_text('{"resolved":"a"}')
+        before = reuse.consumer_inputs("browser-smoke-typescript", project)
+        for path in (
+            asset,
+            lock,
+            project / "node_modules/tool.js",
+            Path("tests/browser_smoke/node_modules/tool.js"),
+            self.root / "browsers/chromium",
+        ):
+            with self.subTest(path=path):
+                data = path.read_text()
+                path.write_text(data + " changed")
+                self.assertNotEqual(
+                    reuse.consumer_inputs("browser-smoke-typescript", project), before
+                )
+                path.write_text(data)
+        with patch.object(
+            reuse, "command", return_value=b"changed installed package revision"
+        ):
+            self.assertNotEqual(
+                reuse.consumer_inputs("browser-smoke-typescript", project), before
+            )
+        links = self.root / "browsers/.links"
+        links.mkdir()
+        (links / "install-location").write_text("different resolver scratch path")
+        self.assertEqual(
+            reuse.consumer_inputs("browser-smoke-typescript", project), before
+        )
+        # That exact metadata exception does not extend to generated source.
+        (project / ".links").write_text("consumed application input")
+        self.assertNotEqual(
+            reuse.consumer_inputs("browser-smoke-typescript", project), before
+        )
+
+    def test_tools_allow_only_internal_file_symlinks_and_hash_their_targets(self):
+        tools = self.root / "tools"
+        tools.mkdir()
+        (tools / "bin").mkdir()
+        target = tools / "cli.js"
+        target.write_text("actual cli")
+        link = tools / "bin/cli"
+        link.symlink_to("../cli.js")
+        before = reuse.tree_digest(tools, tool_links=True)
+        target.write_text("different cli")
+        self.assertNotEqual(reuse.tree_digest(tools, tool_links=True), before)
+        for destination in (
+            self.root / "unknown.file",
+            tools / "bin",
+            tools / "missing",
+        ):
+            link.unlink()
+            link.symlink_to(destination)
+            with self.assertRaises((ValueError, OSError)):
+                reuse.tree_digest(tools, tool_links=True)
+        with self.assertRaises(ValueError):
+            reuse.tree_digest(tools)
+        root_link = self.root / "root-link"
+        root_link.symlink_to(tools)
+        with self.assertRaises(ValueError):
+            reuse.tree_digest(root_link, tool_links=True)
+
+    def test_inflector_witness_includes_lock_and_source_but_not_owned_build_outputs(
+        self,
+    ):
+        project = self.consumer_setup()
+        before = reuse.consumer_inputs("rust-inflector", project)
+        (project / "target").mkdir()
+        (project / "target/binary").write_text("newly compiled output")
+        self.assertEqual(reuse.consumer_inputs("rust-inflector", project), before)
+        original_lock = (project / "Cargo.lock").read_text()
+        (project / "Cargo.lock").write_text(
+            original_lock
+            + '[[package]]\nname="registry-dep"\nversion="0.2.0"\n'
+            + 'source="registry+https://github.com/rust-lang/crates.io-index"\n'
+            + 'checksum="actual-resolved-checksum"\n'
+        )
+        self.assertNotEqual(reuse.consumer_inputs("rust-inflector", project), before)
+        (project / "Cargo.lock").write_text(original_lock)
+        (project / "src/lib.rs").write_text("fn changed() {}")
+        self.assertNotEqual(reuse.consumer_inputs("rust-inflector", project), before)
+
+    def test_cargo_contract_rejects_external_or_excluded_entrypoints_and_dependencies(
+        self,
+    ):
+        project = self.consumer_setup()
+        manifest = (project / "Cargo.toml").read_text()
+        for extra in (
+            '[target."cfg(unix)".dependencies]\nexternal={path="../elsewhere"}\n',
+            '[build-dependencies]\nexternal="1"\n',
+            '[lib]\npath="target/hidden.rs"\n',
+            '[lib]\npath="../external.rs"\n',
+            '[[bin]]\npath="target/hidden.rs"\n',
+            '[[bin]]\npath="../external.rs"\n',
+            '[dependencies]\nexternal={path="../elsewhere"}\n',
+        ):
+            with self.subTest(extra=extra):
+                (project / "Cargo.toml").write_text(manifest + extra)
+                with self.assertRaises(ValueError):
+                    reuse.consumer_inputs("rust-inflector", project)
+        (project / "Cargo.toml").write_text(manifest)
+        (project / "Cargo.lock").write_text(
+            'version=4\n[[package]]\nname="external-local"\nversion="0.1.0"\n'
+        )
+        with self.assertRaises(ValueError):
+            reuse.consumer_inputs("rust-inflector", project)
+
+    def test_consumer_overrides_and_external_cargo_sources_disable_reuse(self):
+        project = self.consumer_setup()
+        for flag in (
+            "E2E_SKIP",
+            "NODE_OPTIONS",
+            "SMOKE_MIN_TESTS",
+            "SKIP_EMIT",
+            "CARGO_REGISTRIES_PRIVATE_TOKEN",
+        ):
+            with (
+                patch.dict(os.environ, {flag: "unwitnessed-or-private"}),
+                self.assertRaises(ValueError),
+            ):
+                reuse.consumer_inputs("rust-inflector", project)
+        for flag in ("DATABASE_PATH", "PORT", "DATABASE_POOL_SIZE"):
+            for value in ("", "external"):
+                with (
+                    patch.dict(os.environ, {flag: value}),
+                    self.assertRaises(ValueError),
+                ):
+                    reuse.consumer_inputs("smoke-rust", "archive", project)
+        (project / "Cargo.toml").write_text(
+            '[dependencies]\nexternal={path="../elsewhere"}\n'
+        )
+        with self.assertRaises(ValueError):
+            reuse.consumer_inputs("rust-inflector", project)
+
+    def test_consumer_recording_refuses_witness_drift_and_reuse_chains(self):
+        project = self.consumer_setup()
+        env = {
+            "RUNNER_TEMP": str(self.root / "temp"),
+            "GITHUB_OUTPUT": str(self.root / "outputs"),
+        }
+        with patch.dict(os.environ, env):
+            root = reuse.state_dir("rust-inflector")
+            root.mkdir(parents=True)
+            state = {
+                "inputs": reuse.consumer_inputs("rust-inflector", project),
+                "reused": False,
+                "local": {"input": str(project)},
+            }
+            state_path = root / "state.json"
+            state_path.write_text(json.dumps(state))
+            (project / "src/lib.rs").write_text("changed during test")
+            with self.assertRaises(ValueError):
+                reuse.record("rust-inflector", ["success"])
+            self.assertFalse((root / "bundle").exists())
+            state.update(
+                inputs=reuse.consumer_inputs("rust-inflector", project), reused=True
+            )
+            state_path.write_text(json.dumps(state))
+            with self.assertRaises(ValueError):
+                reuse.record("rust-inflector", ["success"])
+            state["reused"] = False
+            state_path.write_text(json.dumps(state))
+            reuse.record("rust-inflector", ["success"])
+            self.assertNotIn(
+                "local", json.loads((root / "bundle/receipt.json").read_text())
+            )
+
+    def test_archive_resolution_never_prepares_the_validation_extraction_and_rejects_changed_readme(
+        self,
+    ):
+        source = self.root / "rust"
+        (source / "e2e").mkdir(parents=True)
+        readme = source / "README.md"
+        readme.write_text(
+            os.environ.get(
+                "ROUNDHOUSE_TEST_RUST_README",
+                "## Build\n```sh\ncargo build --release\n```\n## Setup\n```sh\nsqlite3 storage/development.sqlite3 < db/seed.sql\n```\n## Test\n```sh\ncargo test\n```\n## End-to-end\n```sh\ncd e2e\nnpm install\nnpx playwright install chromium\nnpx playwright test\n```\n",
+            )
+        )
+        (source / "e2e/package.json").write_text(
+            json.dumps(
+                {
+                    "scripts": {"test": "playwright test"},
+                    "devDependencies": {"@playwright/test": "1.59.0"},
+                }
+            )
+        )
+        archive = self.root / "rust.tgz"
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(source, arcname="rust")
+        validation = self.root / "validation"
+        validation.mkdir()
+        with tarfile.open(archive) as tar:
+            tar.extractall(validation, filter="data")
+
+        def resolve(*args, **kwargs):
+            if args[0] == "tar":
+                with tarfile.open(args[2]) as tar:
+                    tar.extractall(args[-1], filter="data")
+            return b""
+
+        with (
+            patch.object(reuse, "command", side_effect=resolve) as command,
+            patch.object(reuse.subprocess, "run") as run,
+        ):
+            resolved = reuse.prepare_archive(archive, self.root / "resolver")
+            self.assertEqual(resolved, self.root / "resolver/rust")
+            self.assertEqual(command.call_args.args[:2], ("cargo", "generate-lockfile"))
+            self.assertTrue(
+                all(
+                    call.kwargs["cwd"] == resolved / "e2e"
+                    for call in run.call_args_list
+                )
+            )
+            self.assertFalse((validation / "rust/Cargo.lock").exists())
+            self.assertFalse((validation / "rust/e2e/node_modules").exists())
+        readme.write_text(readme.read_text().replace("npm install\n", ""))
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(source, arcname="rust")
+        with self.assertRaises(ValueError):
+            reuse.prepare_archive(archive, self.root / "broken-resolver")
 
 
 if __name__ == "__main__":

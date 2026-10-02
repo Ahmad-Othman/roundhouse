@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PR-local receipts for two source-only checks; uncertainty always executes.
+"""PR-local execution receipts; uncertainty always executes.
 
 This is not a dependency cache or a general CI scheduler. The allowlist below
 owns the complete command contract. See docs/ci-reuse.md before expanding it.
@@ -13,6 +13,7 @@ import os
 import stat
 import subprocess
 import time
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -30,6 +31,23 @@ JOBS = {
         "checks": ["Build Roundhouse and run inventory", "Save complete check report"],
         "tests": ["tests/writebook.rs"],
         "reports": ["writebook-check.txt", "writebook-inventory-current.json"],
+    },
+    "smoke-rust": {
+        "name": "smoke (rust)",
+        "checks": ["scripts/smoke rust"],
+        "reports": [],
+        "consumer": ["scripts/smoke", "e2e/"],
+    },
+    "browser-smoke-typescript": {
+        "checks": ["Run SharedWorker browser smoke (emit → vite build → drive)"],
+        "reports": [],
+        "consumer": ["tests/browser_smoke/"],
+    },
+    "rust-inflector": {
+        "name": "compare (rust)",
+        "checks": ["cargo test --test framework_tests_rust (green subset)"],
+        "reports": [],
+        "consumer": ["tests/framework_tests_rust.rs"],
     },
 }
 MAX_RECEIPT = 64 * 1024
@@ -56,6 +74,27 @@ def repository_inputs(job):
             continue
         metadata, path = entry.split(b"\t", 1)
         path = path.decode()
+        if "consumer" in JOBS[job]:
+            # Producers still execute. Their consumed output is hashed below;
+            # producer source edits need not invalidate identical outputs.
+            inputs = [
+                "scripts/ci-reuse.py",
+                "scripts/ci-playwright-install",
+                "scripts/ci-apt-bound",
+                "scripts/ci-apt-install",
+                ".github/workflows/",
+                ".github/actions/",
+                ".cargo/",
+                "tests/support/",
+                *JOBS[job]["consumer"],
+            ]
+            if not any(
+                path == item or path.startswith(item) and item.endswith("/")
+                for item in inputs
+            ):
+                continue
+            entries.append([path, metadata.decode()])
+            continue
         if (
             path.startswith("tests/")
             and path.count("/") == 1
@@ -67,19 +106,44 @@ def repository_inputs(job):
     return digest(entries)
 
 
-def tree_digest(root, *, action_code=False):
+def file_digest(path):
+    with Path(path).open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def tree_digest(root, *, action_code=False, exclude=(), tool_links=False):
     # Hash actual consumed trees, not tar metadata or generator recipes. No
     # normalization of generated credentials, migration names or source text.
     root = Path(root)
-    if not root.is_dir():
+    if root.is_symlink() or not root.is_dir():
         raise ValueError("missing input directory")
     entries = []
     for path in sorted(root.rglob("*")):
         mode = path.lstat().st_mode
         name = path.relative_to(root).as_posix()
+        if any(name == item or name.startswith(item + "/") for item in exclude):
+            continue
         if stat.S_ISLNK(mode):
-            # Do not silently fingerprint only a link while ingest follows it.
-            raise ValueError("symlink in external input")
+            # npm's .bin links are tools, not source. Permit only contained
+            # file links, recording both the link and the target it executes.
+            if not tool_links:
+                raise ValueError("symlink in external input")
+            try:
+                target = path.resolve(strict=True)
+            except RuntimeError as error:
+                raise ValueError("cyclic tool link") from error
+            if not target.is_relative_to(root.resolve()) or not target.is_file():
+                raise ValueError("escaping or directory tool link")
+            entries.append(
+                [
+                    name,
+                    "link",
+                    os.readlink(path),
+                    stat.S_IMODE(target.stat().st_mode),
+                    file_digest(target),
+                ]
+            )
+            continue
         if stat.S_ISREG(mode):
             # The runner writes _actions/<owner>/<repo>/<ref>.completed with
             # the current download time. Only that adjacent, known marker is
@@ -95,7 +159,7 @@ def tree_digest(root, *, action_code=False):
                 [
                     name,
                     stat.S_IMODE(mode),
-                    hashlib.sha256(path.read_bytes()).hexdigest(),
+                    file_digest(path),
                 ]
             )
         elif stat.S_ISDIR(mode):
@@ -108,10 +172,8 @@ def tree_digest(root, *, action_code=False):
 
 
 def environment_inputs():
-    # These jobs install no apt/gem/npm packages and run no external Ruby or
-    # target toolchain. Cargo is locked. Observe the actual Rust toolchain and
-    # hosted image, not 'stable' or 'ubuntu-latest'. Hash downloaded action code
-    # too: a moving action tag must not silently retain an old receipt.
+    # Base toolchain witness. Browser consumers add their installed packages
+    # and payloads below. Observe actual tools/image, not moving tag names.
     image = {
         key: os.environ[key]
         for key in ("ImageOS", "ImageVersion", "RUNNER_OS", "RUNNER_ARCH")
@@ -153,6 +215,183 @@ def environment_inputs():
         "cc": command("cc", "--version").decode(),
         "flags": flags,
     }
+
+
+def consumer_inputs(job, input_path, resolved=None):
+    """Complete witnessed consumer inputs, also recomputed after execution."""
+    root = Path(resolved or input_path)
+    environment = environment_inputs()
+    # These workflows fix their consumer configuration. Unexpected selection
+    # or interpreter overrides disable reuse rather than persisting secrets.
+    for flag in (
+        "E2E_SKIP",
+        "SKIP_EMIT",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "SMOKE_MIN_TESTS",
+        "SELENIUM_REMOTE_URL",
+    ):
+        if os.environ.get(flag):
+            raise ValueError("unexpected consumer override")
+    environment["ci"] = os.environ["CI"]
+    if job == "smoke-rust" and any(
+        key in os.environ for key in ("DATABASE_PATH", "PORT", "DATABASE_POOL_SIZE")
+    ):
+        raise ValueError("unwitnessed server/database override")
+    environment["consumer_flags"] = {
+        key: os.environ[key]
+        for key in ("NODE_ENV", "TZ", "LANG", "LC_ALL")
+        if key in os.environ
+    }
+    # Cargo registry overrides/path sources are not covered by registry locks.
+    for flag in os.environ:
+        if flag.startswith(("CARGO_REGISTRIES_", "CARGO_SOURCE_")):
+            raise ValueError("external Cargo source configuration")
+    cargo_home = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
+    if any((cargo_home / name).exists() for name in ("config", "config.toml")):
+        raise ValueError("unwitnessed global Cargo configuration")
+    if job == "browser-smoke-typescript":
+        exclude = ("node_modules",)
+        modules = [root / "node_modules", Path("tests/browser_smoke/node_modules")]
+    else:
+        manifest = tomllib.loads((root / "Cargo.toml").read_text())
+        if (
+            set(manifest)
+            - {"package", "lib", "bin", "dependencies", "dev-dependencies"}
+            or "build" in manifest.get("package", {})
+            or (root / ".cargo").exists()
+            or manifest.get("lib", {}).get("path", "src/lib.rs") != "src/lib.rs"
+            or any(
+                binary.get("path", "src/main.rs") != "src/main.rs"
+                for binary in manifest.get("bin", [])
+            )
+        ):
+            raise ValueError("unaudited Cargo manifest/configuration contract")
+        for group in ("dependencies", "dev-dependencies"):
+            for dependency in manifest.get(group, {}).values():
+                if isinstance(dependency, dict) and any(
+                    key in dependency
+                    for key in ("git", "path", "registry", "workspace")
+                ):
+                    raise ValueError("unwitnessed Cargo dependency")
+        if (root / "build.rs").exists():
+            raise ValueError("unwitnessed Cargo build contract")
+        lock = tomllib.loads((root / "Cargo.lock").read_text())
+        for package in lock["package"]:
+            if "source" not in package and any(
+                package.get(key) != manifest["package"].get(key)
+                for key in ("name", "version")
+            ):
+                raise ValueError("unwitnessed local Cargo package")
+            if "source" in package and (
+                package["source"]
+                != "registry+https://github.com/rust-lang/crates.io-index"
+                or "checksum" not in package
+            ):
+                raise ValueError("unwitnessed Cargo package source")
+        exclude = ("target",)
+        modules = []
+        if job == "smoke-rust":
+            exclude += (
+                "e2e/node_modules",
+                "e2e/test-results",
+                "e2e/playwright-report",
+                "storage/development.sqlite3",
+                "storage/development.sqlite3-wal",
+                "storage/development.sqlite3-shm",
+            )
+            modules = [root / "e2e/node_modules"]
+    if modules:
+        environment.update(
+            node=command("node", "-p", "JSON.stringify(process.versions)").decode(),
+            npm=command("npm", "--version").decode(),
+            system_packages=hashlib.sha256(command("dpkg-query", "-W")).hexdigest(),
+            modules=[tree_digest(path, tool_links=True) for path in modules],
+        )
+        # A fixed, explicit root is shared with installation AND Playwright.
+        # .links tracks package paths for install-time browser garbage
+        # collection; it is not loaded when a prepared browser executes.
+        browsers = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
+        if not browsers.is_absolute():
+            raise ValueError("browser root must be explicit and absolute")
+        environment["browsers"] = tree_digest(
+            browsers, exclude=(".links",), tool_links=True
+        )
+        environment["sqlite3"] = command("sqlite3", "--version").decode()
+    result = {
+        "repository": repository_inputs(job),
+        "source": tree_digest(root, exclude=exclude),
+        "environment": environment,
+    }
+    if job == "smoke-rust":
+        result["archive"] = file_digest(input_path)
+    return result
+
+
+def prepare_archive(input_path, destination):
+    # A SEPARATE extraction resolves the inputs. Never copy its locks/modules
+    # into the pristine extraction that must prove the README actually works.
+    destination.mkdir(parents=True)
+    command("tar", "xzf", str(Path(input_path).resolve()), "-C", str(destination))
+    root = destination / "rust"
+    import re
+
+    blocks = []
+    section = ""
+    collecting = False
+    lines = []
+    for line in (root / "README.md").read_text().splitlines():
+        if line.startswith("## "):
+            section = line[3:]
+        if line == "```sh":
+            collecting = True
+            lines = []
+        elif line == "```":
+            if collecting and section not in ("Run", "Regenerate"):
+                blocks.append((section, "\n".join(lines).strip()))
+            collecting = False
+        elif collecting:
+            lines.append(line)
+    if blocks != [
+        ("Build", "cargo build --release"),
+        ("Setup", "sqlite3 storage/development.sqlite3 < db/seed.sql"),
+        ("Test", "cargo test"),
+        (
+            "End-to-end",
+            "cd e2e\nnpm install\nnpx playwright install chromium\nnpx playwright test",
+        ),
+    ]:
+        raise ValueError("unaudited archive README command contract")
+    npm = json.loads((root / "e2e/package.json").read_text())
+    if (
+        npm.get("scripts") != {"test": "playwright test"}
+        or set(npm["devDependencies"]) != {"@playwright/test"}
+        or not re.fullmatch(
+            r"\d+\.\d+\.\d+", npm["devDependencies"]["@playwright/test"]
+        )
+    ):
+        raise ValueError("unaudited archive npm contract")
+    command(
+        "cargo",
+        "generate-lockfile",
+        "--manifest-path",
+        str(root / "Cargo.toml"),
+        timeout=240,
+    )
+    # Inherit the same explicit browser root as the validation job.
+    subprocess.run(
+        ["npm", "install", "--no-audit", "--no-fund"],
+        cwd=root / "e2e",
+        check=True,
+        timeout=240,
+    )
+    subprocess.run(
+        ["npx", "playwright", "install", "chromium"],
+        cwd=root / "e2e",
+        check=True,
+        timeout=240,
+    )
+    return root
 
 
 class GitHub:
@@ -216,7 +455,8 @@ def read_bundle(data, job):
 
 
 def successful_execution(jobs, receipt, job):
-    matches = [candidate for candidate in jobs if candidate["name"] == job]
+    name = JOBS[job].get("name", job)
+    matches = [candidate for candidate in jobs if candidate["name"] == name]
     if len(matches) != 1:
         return None
     candidate = matches[0]
@@ -312,14 +552,31 @@ def state_dir(job):
 def probe(job, input_dir):
     output("hit", "false")
     output("eligible", "false")
-    if os.environ.get("GITHUB_EVENT_NAME") != "pull_request":
-        summary("CI reuse disabled: non-PR runs always execute.")
+    if (
+        os.environ.get("GITHUB_EVENT_NAME") != "pull_request"
+        or os.environ.get("GITHUB_REF") == "refs/heads/main"
+    ):
+        summary("CI reuse disabled: main and non-PR runs always execute.")
         return
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     pr = event["pull_request"]
     api = GitHub(os.environ["GITHUB_REPOSITORY"])
     run_id = int(os.environ["GITHUB_RUN_ID"])
     run = api.get(f"actions/runs/{run_id}")
+    root = state_dir(job)
+    root.mkdir(parents=True, exist_ok=True)
+    resolved = (
+        prepare_archive(input_dir, root / "resolver") if job == "smoke-rust" else None
+    )
+    inputs = (
+        consumer_inputs(job, input_dir, resolved)
+        if "consumer" in JOBS[job]
+        else {
+            "repository": repository_inputs(job),
+            "source": tree_digest(input_dir),
+            "environment": environment_inputs(),
+        }
+    )
     current = {
         "schema": SCHEMA,
         "repository": os.environ["GITHUB_REPOSITORY"],
@@ -331,21 +588,18 @@ def probe(job, input_dir):
         "run_id": run_id,
         "attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
         "merge_sha": command("git", "rev-parse", "HEAD").decode().strip(),
-        "inputs": {
-            "repository": repository_inputs(job),
-            "source": tree_digest(input_dir),
-            "environment": environment_inputs(),
-        },
+        "inputs": inputs,
+        "local": {"input": str(Path(input_dir).resolve())},
     }
     current["fingerprint"] = digest(current["inputs"])
-    root = state_dir(job)
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "state.json").write_text(json.dumps(current))
     output("eligible", "true")
     output("bundle", str(root / "bundle"))
     # A manual rerun is the escape hatch: it always executes and can produce
     # new execution evidence for that exact attempt.
+    api.deadline = time.monotonic() + 90
     found = find_execution(api, current, job) if current["attempt"] == 1 else None
+    current["reused"] = bool(found)
+    (root / "state.json").write_text(json.dumps(current))
     if found:
         url, reports = found
         for name, data in reports.items():
@@ -361,14 +615,23 @@ def probe(job, input_dir):
         )
 
 
-def record(job, outcomes):
+def record(job, outcomes, validation_dir=None):
     if outcomes != ["success"] * len(JOBS[job]["checks"]):
         raise ValueError("validation did not execute successfully")
     root = state_dir(job)
     receipt = json.loads((root / "state.json").read_text())
+    if receipt["reused"]:
+        raise ValueError("reused validation cannot mint execution evidence")
     # A locked build must not have changed source inputs since the probe.
     if receipt["inputs"]["repository"] != repository_inputs(job):
         raise ValueError("repository input changed during validation")
+    if "consumer" in JOBS[job]:
+        if job == "smoke-rust" and not validation_dir:
+            raise ValueError("missing pristine validation witness")
+        current = consumer_inputs(job, receipt["local"]["input"], validation_dir)
+        if current != receipt["inputs"]:
+            raise ValueError("consumer inputs changed during validation")
+    del receipt["local"]
     bundle = root / "bundle"
     bundle.mkdir()
     receipt.update(executed=True, outcomes=outcomes, reports={})
@@ -377,6 +640,7 @@ def record(job, outcomes):
         receipt["reports"][name] = hashlib.sha256(data).hexdigest()
         (bundle / name).write_bytes(data)
     (bundle / "receipt.json").write_text(json.dumps(receipt, sort_keys=True))
+    output("recorded", "true")
 
 
 def main():
@@ -384,13 +648,14 @@ def main():
     parser.add_argument("operation", choices=("probe", "record"))
     parser.add_argument("--job", required=True, choices=JOBS)
     parser.add_argument("--input")
+    parser.add_argument("--validation-dir")
     parser.add_argument("--outcome", action="append", default=[])
     args = parser.parse_args()
     try:
         if args.operation == "probe":
             probe(args.job, args.input)
         else:
-            record(args.job, args.outcome)
+            record(args.job, args.outcome, args.validation_dir)
     except (
         OSError,
         ValueError,

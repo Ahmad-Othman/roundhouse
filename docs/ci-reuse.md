@@ -1,13 +1,14 @@
 # Conservative PR-local CI reuse
 
-`scripts/ci-reuse.py` can reuse **executed, successful** `store-check` and
-`writebook-inventory` jobs from the same pull request. This initial allowlist is
-deliberately small. Unit tests, fixture generation, artifact builds, target
-toolchains, browser tests and all main-branch checks still run normally.
+`scripts/ci-reuse.py` can reuse **executed, successful** checks from the same
+pull request. The allowlist is `store-check`, `writebook-inventory`, Rust archive
+smoke, SharedWorker browser smoke, and the Rust inflector framework suite.
+Unit tests, fixture generation, artifact producers, DOM comparisons, other
+toolchain lanes and all main-branch checks still execute freshly.
 
 ## What must match
 
-The fingerprint combines:
+For the two source checks, the fingerprint combines:
 
 - The actual checkout's Git merge-tree entries: paths, modes and blob IDs. It
   includes compiler sources, every runtime, build configuration, lockfiles,
@@ -32,6 +33,65 @@ Any shared compiler change invalidates both jobs. A change only to an unrelated
 Rust integration test can reuse Writebook. Store reuse will often miss because
 fresh Rails generation changes its actual contents; that is intentional, not a
 reason to pretend identical generator scripts produced identical inputs.
+
+## Downstream consumers
+
+These checks use **fresh output identity**, not producer source identity. The
+producer always runs; a compiler edit can reuse a target's validation only if
+its actual consumed output is identical. Harness, workflow, Cargo configuration,
+shared test support and installation-policy changes still invalidate reuse.
+Python 3.11+ is required for parsing the generated Cargo manifests and locks.
+
+| Consumer | Preparation before lookup | Validation on a miss |
+|---|---|---|
+| `smoke (rust)` | Resolve Cargo and E2E npm dependencies in a **separate** archive extraction; install the README's Chromium payload | Extract the original archive again, execute its README blocks unchanged, and retain the existing test-count floors |
+| `browser-smoke-typescript` | Fresh emission, generated npm dependency resolution, Vite build, harness/browser installation | Existing `npm run test-only`, including fresh Vite preview and all browser tests |
+| Rust inflector in `compare (rust)` | Fresh framework ingestion/emission and `cargo generate-lockfile` | Inner `cargo test --locked`; require an actual successful emitted inflector test, not just hand-written runtime tests |
+
+Consumer fingerprints include emitted source/configuration, generated locks,
+and (for SharedWorker) **built `dist` bytes**. Rust archive identity also includes
+the original `.tgz` bytes. Browser consumers include applicable installed npm
+trees, actual Node/npm versions, installed OS package revisions, sqlite3,
+and the complete explicitly selected browser payload. Only root-level browser
+`.links` install/GC bookkeeping is excluded; browser executables, resources and
+installation markers remain inputs. Source symlinks still disable reuse;
+installed tools may contain only witnessed, internal file symlinks.
+
+Before issuing a consumer receipt, recompute its complete witness. Rust smoke
+compares the **pristine validation extraction's** resulting locks, modules and
+source against the resolver extraction, never copying prepared dependencies
+into validation. Resolution drift or unexpected source changes suppress the
+receipt, not the real test result. This preserves README coverage: a missing
+install command is not rescued by preparation. Like the existing smoke lane,
+this proves README execution with prepared system/browser prerequisites, not a
+completely cold browser install.
+
+Rust smoke accepts only the audited Build/Setup/Test/E2E command shape and
+pinned Playwright manifest. Unknown README commands, external/path Cargo
+sources, global Cargo configuration, external database/server overrides,
+browser/test-selection overrides or unsupported file types execute normally.
+Dependency preparation remains real work even on a hit; the saved work is
+compilation and validation, not fabricated freshness. This assumes ordinary
+trusted package-manager/CI behavior, not attestation against transient side
+effects or malicious workflow authors.
+
+Receipts are scoped to the exact physical matrix job as well as the logical
+consumer. Inflector reuse never suppresses the Rust DOM comparison or other
+framework suites. Its receipt is created only after **inner actual execution**;
+the outer harness returning success on a hit cannot create a new receipt.
+
+### Remaining downstream lanes — audited, not blanket-skipped
+
+| Family | Why it still executes / prerequisite for safe reuse |
+|---|---|
+| Other archive smoke targets (Crystal, Kotlin, Swift, C#, TypeScript, Go, Elixir, Python, Ruby/JRuby) | Each README resolves a different dependency closure during execution. Capture its fresh resolved closure and toolchain, preserve pristine README validation, and compare the validation witnesses before enabling each lane. |
+| DOM compare matrix, Ruby/JRuby compare | Also consumes the live Rails oracle, Bundler closure, generated assets and target dependency resolution. An unchanged transpiled archive alone is insufficient. |
+| Other framework/toolchain suites | Emit projects internally and resolve dependencies during testing. Need per-harness output boundaries and actual-execution floors, not a producer-source filter. |
+| IDE/WASM browser | WASM intentionally embeds the current commit SHA. Do not normalize away a changed consumer input to force a hit. |
+| Spinel framework/toolchain/archive lanes | Need fresh emitted source plus the actual unpinned Spinel binary, `spin` package closure, C toolchain and native-library identities. Advisory failures remain signals, never reusable success. |
+| Campfire CRuby/Spinel compare, model differential and conformance | Include pinned Campfire source, Rails/gem oracle closure, assets, Redis/DB scenarios, native packages, Spinel binary and GC mode as applicable. Current harnesses still resolve mutable external inputs. |
+| Campfire Docker smoke | Build the current Docker context and resolve its mutable base/apt closure before fingerprinting the actual runnable image. Archive identity alone cannot certify that image. |
+| Site/archive producers, assembly and publication | Must produce current-run outputs and provenance; site content also fetches live bench data. They are not reused validation results. |
 
 ## Evidence, not just a green run
 

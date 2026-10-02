@@ -25,6 +25,7 @@
 #                    Default: build the site into a temp dir via build-site.
 #   --tgz PATH       Use a specific archive tarball (overrides --site-dir).
 #   --keep           Don't delete the work dir on exit (debug).
+#   --work-dir DIR   Extract into a new named directory (CI witnesses).
 #
 # Environment overrides:
 #   SMOKE_MIN_TESTS  Override the § Test executed-count floor for this run.
@@ -40,6 +41,7 @@ TARGET=""
 SITE_DIR=""
 TGZ=""
 KEEP=0
+WORK_DIR=""
 EXPLAIN=""
 
 while [[ $# -gt 0 ]]; do
@@ -47,6 +49,7 @@ while [[ $# -gt 0 ]]; do
         --site-dir)     SITE_DIR="$2"; shift 2 ;;
         --tgz)          TGZ="$2";      shift 2 ;;
         --keep)         KEEP=1;        shift ;;
+        --work-dir)     WORK_DIR="$2"; shift 2 ;;
         --explain-count) EXPLAIN="$2"; shift 2 ;;
         -h|--help)  sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
         -*)         echo "unknown flag: $1" >&2; exit 2 ;;
@@ -157,7 +160,13 @@ fi
 
 [[ -z "$TARGET" ]] && { echo "usage: scripts/smoke [options] TARGET" >&2; exit 2; }
 
-WORK="$(mktemp -d -t roundhouse-smoke.XXXXXX)"
+if [[ -n "$WORK_DIR" ]]; then
+    # Never reuse a prepared extraction or silently delete somebody's files.
+    mkdir "$WORK_DIR"
+    WORK="$WORK_DIR"
+else
+    WORK="$(mktemp -d -t roundhouse-smoke.XXXXXX)"
+fi
 cleanup() {
     local code=$?
     if (( KEEP )); then
