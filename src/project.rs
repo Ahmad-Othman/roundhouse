@@ -808,6 +808,87 @@ fn reject_unsupported_dates(app: &App, target: BuildTarget) -> Result<(), String
     Ok(())
 }
 
+/// Arbitrary `&expr` operands need a real forwarding convention, not
+/// a lambda that returns the operand (or a dropped block). Keep the
+/// unsupported native paths out of emit, even in survey mode.
+fn reject_unsupported_forwarded_procs(app: &App, target: BuildTarget) -> Result<(), String> {
+    if !matches!(target, BuildTarget::Rust | BuildTarget::Crystal | BuildTarget::Go
+        | BuildTarget::Python | BuildTarget::Kotlin | BuildTarget::Swift | BuildTarget::Elixir) {
+        return Ok(());
+    }
+    fn visit(e: &crate::expr::Expr, target: &str, found: &mut bool) {
+        use crate::expr::ExprNode;
+        if let ExprNode::Send { block: Some(block), .. }
+            | ExprNode::Apply { block: Some(block), .. } = &*e.node
+        {
+            // These shapes predate the arbitrary-expression fallback;
+            // their existing target-specific paths remain unchanged.
+            if !matches!(&*block.node, ExprNode::Lambda { .. } | ExprNode::Var { .. }
+                | ExprNode::MethodRef { .. }) {
+                *found = true;
+                crate::emit::diagnostics::report_unsupported(
+                    block.span, target, "forwarded_proc",
+                    "arbitrary &expr forwarding is not implemented on this target; use Ruby instead",
+                );
+            }
+        }
+        e.node.for_each_child(&mut |child| visit(child, target, found));
+    }
+    fn visit_method(method: &crate::dialect::MethodDef, f: &mut impl FnMut(&crate::expr::Expr)) {
+        f(&method.body);
+        for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
+            f(default);
+        }
+    }
+    let mut found = false;
+    let mut f = |e: &crate::expr::Expr| visit(e, target.as_str(), &mut found);
+    crate::lower::for_each_hook_body_ref(app, &mut f);
+    for controller in &app.controllers {
+        for action in controller.actions() {
+            for default in action.kw_params.iter().filter_map(|(_, e)| e.as_ref()) {
+                f(default);
+            }
+        }
+    }
+    for view in &app.views {
+        f(&view.body);
+        for default in view.strict_locals.iter().flatten().filter_map(|p| p.default.as_ref()) {
+            f(default);
+        }
+    }
+    for tm in &app.test_modules {
+        if let Some(setup) = &tm.setup { f(setup); }
+        for test in &tm.tests { f(&test.body); }
+        for method in &tm.helpers { visit_method(method, &mut f); }
+        for class in &tm.inner_classes {
+            for method in &class.methods { visit_method(method, &mut f); }
+            for (_, value) in &class.constants { f(value); }
+            for call in &class.unknown_calls { f(call); }
+        }
+        for (_, value) in &tm.constants { f(value); }
+    }
+    for fixture in &app.fixtures {
+        for e in &fixture.preamble { f(e); }
+        for value in fixture.records.values().flat_map(|record| record.values()) {
+            if let crate::dialect::FixtureValue::Ruby(e) = value { f(e); }
+        }
+    }
+    for helper in &app.routes.direct_helpers { f(&helper.body); }
+    for function in &app.sql_functions {
+        match &function.kind {
+            crate::app::SqlFunctionKind::Scalar { method } => visit_method(method, &mut f),
+            crate::app::SqlFunctionKind::Aggregate { step, finalize } => {
+                visit_method(step, &mut f);
+                visit_method(finalize, &mut f);
+            }
+        }
+    }
+    if found {
+        return Err(format!("{}: arbitrary &expr Proc forwarding is not supported; use Ruby instead", target.as_str()));
+    }
+    Ok(())
+}
+
 /// A unique index whose `where:` SQLite can't be trusted to run as
 /// written — a Postgres dump's `((kind)::text = 'initial'::text)` or
 /// `= ANY (ARRAY[…])` — is unique over every row in the SQLite DDL, as
@@ -853,6 +934,7 @@ pub fn target_files(
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
     reject_unsupported_dates(app, target)?;
+    reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
     report_unsupported_bundled_constants(app, target);
     report_sqlite_index_predicates(app, target);
@@ -6701,6 +6783,22 @@ mod tests {
                     assert!(matches!(&diag.kind, crate::diagnostic::DiagnosticKind::Unsupported { construct, target: Some(name), .. }
                         if construct.as_str() == "bundled_constant" && name.as_str() == "kotlin"));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn forwarded_proc_boundary_preserves_existing_block_shapes() {
+        for source in ["[1, 2].map { |x| x + 1 }", "callback = ->(x) { x + 1 }; [1, 2].map(&callback)",
+            "[1, 2].map(&method(:normalize))"] {
+            let tree = [("db/seeds.rb", source)].into_iter()
+                .map(|(p, s)| (PathBuf::from(p), s.as_bytes().to_vec())).collect();
+            let app = crate::ingest::ingest_app_from_tree(tree).unwrap();
+            for &target in BuildTarget::ALL {
+                let (result, diagnostics) = crate::emit::diagnostics::scope(||
+                    reject_unsupported_forwarded_procs(&app, target));
+                assert!(result.is_ok(), "{target:?}: {source}: {result:?}");
+                assert!(diagnostics.is_empty(), "{target:?}: {source}: {diagnostics:?}");
             }
         }
     }

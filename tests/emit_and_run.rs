@@ -2279,6 +2279,99 @@ end
         .assert_passes();
 }
 
+#[test]
+fn safe_navigation_comparisons_execute_for_nil_and_string_values() {
+    emit_and_run::real_blog()
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", r#"class Article < ApplicationRecord
+  def title_long?
+    ((title && title.length) || 0) > 1
+  end
+  def title_short?
+    (title&.length || 0) < 1
+  end
+"#)
+        .run_ruby(r#"
+article = Article.new(title: "long")
+raise "truthy chain" unless article.title_long? && !article.title_short?
+article.title = nil
+raise "nil chain" unless !article.title_long? && article.title_short?
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn forwarded_proc_expressions_execute_once_in_an_emitted_app() {
+    emit_and_run::real_blog()
+        .write("app/services/block_forward_probe.rb", r#"class BlockForwardProbe
+  def initialize
+    @calls = 0
+    @callback = ->(x) { x * 2 }
+  end
+  def compute(n)
+    @calls += 1
+    ->(x) { x + n }
+  end
+  def run
+    doubled = [1, 2].map(&@callback)
+    added = [1, 2].map(&compute(3))
+    [doubled, added, @calls]
+  end
+end
+"#)
+        .run_ruby("raise 'forwarded expression' unless BlockForwardProbe.new.run == [[2, 4], [4, 5], 1]")
+        .assert_passes();
+}
+
+#[test]
+fn typed_instance_keywords_bind_values_and_keep_positional_hashes() {
+    emit_and_run::real_blog()
+        .write("app/services/keyword_fetcher.rb", r##"
+class KeywordFetcher
+  def fetch(url, ip: url.upcase)
+    "#{url}@#{ip}"
+  end
+
+  def merge(url, opts = {})
+    "#{url}#{opts}"
+  end
+end
+"##)
+        .write("app/services/keyword_locator.rb", r#"
+class KeywordLocator
+  def locate(url)
+    KeywordFetcher.new.fetch(url, ip: "192.0.2.1")
+  end
+
+  def merged(url)
+    KeywordFetcher.new.merge(url, opts: 1)
+  end
+end
+"#)
+        .run_ruby(r#"
+locator = KeywordLocator.new
+raise "keyword bound to hash" unless locator.locate("host") == "host@192.0.2.1"
+raise "positional hash rewritten" unless locator.merged("host") == 'host{opts: 1}'
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn multiple_erb_openers_execute_inside_an_output_block() {
+    on_the_index(emit_and_run::real_blog(), r#"<span class="multi-opener"><%= capture do %>
+<% [1, 2].each do |number|
+       unless number.nil? %><%= number %><% end %><% end %><% end %></span>"#,
+        "    assert_select \"span.multi-opener\", \"12\"\n")
+        .assert_passes();
+}
+
+#[test]
+fn trailing_erb_comments_execute_without_swallowing_output_terminators() {
+    on_the_index(emit_and_run::real_blog(), r#"<span class="commented-title"><%= capture do %>
+<% [1, 2].each do |number| %><%= "n: #{number}" #@label %><% end #$numbers %><% end #{capture} %></span>"#,
+        "    assert_select \"span.commented-title\", \"n: 1n: 2\"\n")
+        .assert_passes();
+}
+
 /// Not the scaffold blog's `app/views.rb`, whose requires name views this tree does not have: an app with no views boots and answers a request (#164).
 #[test]
 fn an_app_with_no_views_boots() {
