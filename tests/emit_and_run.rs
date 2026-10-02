@@ -9,6 +9,8 @@
 mod emit_and_run;
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
+#[path = "support/rails_root_join.rs"]
+mod rails_root_join;
 
 #[test]
 fn finite_concern_class_configuration_runs_without_replaying_rails() {
@@ -3183,4 +3185,15 @@ fn a_template_only_action_is_fed_by_its_before_action() {
         )
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
+}
+
+/// `Pathname#join` takes any number of parts, and an app writes
+/// `Rails.root.join("source", "posts")` as often as the one-part form.
+/// `check` is clean on the call, so the emitted `Rails::AppPath#join`
+/// must accept every part, or none, and join them like Pathname does.
+#[test]
+fn rails_root_join_takes_any_number_of_parts() {
+    let run = rails_root_join::overlay().run_ruby(rails_root_join::ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("Rails.root.join contract passed"));
 }
