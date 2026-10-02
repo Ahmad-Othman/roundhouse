@@ -3228,6 +3228,40 @@ mod tests {
         };
         assert_eq!(spines, 1, "hash spines must merge, got {via_nil_first:?}");
     }
+
+    #[test]
+    fn concrete_value_shapes_are_truthy_for_boolean_operators() {
+        let values = [
+            Ty::Date,
+            Ty::Tuple { elems: vec![Ty::Int] },
+            Ty::Record { row: Row::default() },
+            Ty::Fn {
+                params: Vec::new(), block: None, ret: Box::new(Ty::Str),
+                effects: crate::effect::EffectSet::pure(),
+            },
+        ];
+        for left in values {
+            assert!(never_falsy(&left), "{left:?} must short-circuit `||`");
+            assert_eq!(falsy_part(&left), None, "{left:?} must yield the right arm of `&&`");
+        }
+    }
+
+    #[test]
+    fn nil_arms_of_concrete_value_unions_remain_falsy() {
+        for truthy in [
+            Ty::Date,
+            Ty::Tuple { elems: vec![Ty::Int] },
+            Ty::Record { row: Row::default() },
+            Ty::Fn {
+                params: Vec::new(), block: None, ret: Box::new(Ty::Str),
+                effects: crate::effect::EffectSet::pure(),
+            },
+        ] {
+            let left = Ty::Union { variants: vec![truthy, Ty::Nil] };
+            assert!(!never_falsy(&left), "{left:?} must not always short-circuit `||`");
+            assert_eq!(falsy_part(&left), Some(Ty::Nil), "{left:?} must retain nil for `&&`");
+        }
+    }
 }
 
 /// The arms of `ty` a falsy value can come from -- `nil`, `false`, and
@@ -3263,11 +3297,15 @@ fn never_falsy(ty: &Ty) -> bool {
         | Ty::Float
         | Ty::Str
         | Ty::Sym
+        | Ty::Date
         | Ty::Time
         | Ty::Array { .. }
         | Ty::Hash { .. }
+        | Ty::Tuple { .. }
+        | Ty::Record { .. }
         | Ty::Relation { .. }
-        | Ty::Class { .. } => true,
+        | Ty::Class { .. }
+        | Ty::Fn { .. } => true,
         // `Bool` is the whole point of the exclusion — it is the one
         // scalar that carries `false`.
         Ty::Union { variants } => variants.iter().all(never_falsy),
