@@ -296,9 +296,18 @@ pub fn shake_tree(
     if std::env::var("ROUNDHOUSE_NO_TREESHAKE").as_deref() == Ok("1") {
         return;
     }
+    // Only candidate Ruby files and their RBS sidecars can change. Keep
+    // every RBS file in the rescanned group to avoid sidecar bookkeeping.
+    // File paths and indices stay fixed throughout this invocation.
+    let rescan: Vec<bool> = files.iter().map(|(path, _)| {
+        path.ends_with(".rbs")
+            || (path.ends_with(".rb")
+                && (is_framework_runtime(path) || path.starts_with("app/models/")))
+    }).collect();
+    let mut stable_usage: HashSet<String> = HashSet::new();
     let mut total_runtime = 0usize;
     let mut total_synth = 0usize;
-    for _pass in 0..10 {
+    for pass in 0..10 {
         // Usage universe: every token on every line of every file,
         // EXCEPT the name being introduced on a def/sig line itself.
         // Borrow tokens from the current files; the drop sets own their
@@ -306,19 +315,20 @@ pub fn shake_tree(
         // Only membership matters: occurrence counts and per-line
         // deduplication do not affect whether a method is unreachable.
         let mut usage = HashSet::new();
-        for (path, content) in files.iter() {
-            let is_rb = path.ends_with(".rb");
-            let is_rbs = path.ends_with(".rbs");
-            if !is_rb && !is_rbs {
+        let mut stable_tokens = HashSet::new();
+        for ((path, content), &rescan) in files.iter().zip(&rescan) {
+            if !rescan && (pass != 0 || !path.ends_with(".rb")) {
                 continue;
             }
+            let is_rb = path.ends_with(".rb");
+            let out = if rescan { &mut usage } else { &mut stable_tokens };
             for line in content.lines() {
                 let defined = if is_rb {
                     def_line_name(line)
                 } else {
                     sig_line_name(line)
                 };
-                tokens(line, &mut usage, defined);
+                tokens(line, out, defined);
             }
         }
 
@@ -342,7 +352,10 @@ pub fn shake_tree(
                     if model && !synth_shakeable.contains(name) {
                         continue;
                     }
-                    if !usage.contains(name) {
+                    if !usage.contains(name)
+                        && !stable_tokens.contains(name)
+                        && !stable_usage.contains(name)
+                    {
                         dead.insert(name.to_owned());
                     }
                 }
@@ -353,6 +366,11 @@ pub fn shake_tree(
         }
         if drops.is_empty() {
             break;
+        }
+        if pass == 0 {
+            // Own each distinct stable name only if rewrites require
+            // another pass. Nothing is cached across invocations.
+            stable_usage = stable_tokens.into_iter().map(str::to_owned).collect();
         }
 
         for (idx, dead, runtime) in drops {
@@ -449,5 +467,53 @@ mod tests {
             "module Probe\n  def live!: () -> Integer\n  def mentioned?: () -> Integer\n  def initialize: () -> Integer\nend\n"
         );
         assert_eq!(files[2], entry);
+    }
+
+    #[test]
+    fn stable_roots_exclude_definitions_and_are_recomputed_for_each_invocation() {
+        let mut files = vec![
+            ("runtime/active_record/probe.rb".into(),
+             "module Probe\n  def external!; 1; end\n  def unused?; 2; end\nend\n".into()),
+            ("app/models/probe.rb".into(),
+             "class Probe\n  def generated?; 3; end\n  def user_method; 4; end\nend\n".into()),
+            ("test/roots.rb".into(),
+             "# external! is a textual root\ndef generated?; false; end\n".into()),
+        ];
+        let roots = files[2].clone();
+        let synth = HashSet::from(["generated?".into()]);
+        shake_tree(&mut files, &synth, "test");
+        assert_eq!(files[0].1, "module Probe\n  def external!; 1; end\nend\n");
+        assert_eq!(files[1].1, "class Probe\n  def user_method; 4; end\nend\n");
+        assert_eq!(files[2], roots);
+
+        files[2].1 = "def generated?; false; end\n".into();
+        shake_tree(&mut files, &synth, "test");
+        assert_eq!(files[0].1, "module Probe\nend\n");
+        assert_eq!(files[1].1, "class Probe\n  def user_method; 4; end\nend\n");
+    }
+
+    #[test]
+    fn rewritten_sidecars_stop_rooting_orphans_on_later_passes() {
+        let mut files = vec![
+            ("runtime/active_record/probe.rb".into(),
+             "module Probe\n  def stale; 1; end\n  def orphan; leaf; end\n  def leaf; 5; end\nend\n".into()),
+            ("sig/runtime/active_record/probe.rbs".into(),
+             "module Probe\n  def stale: () -> Integer # orphan\n           | () -> String # leaf\n  def orphan: () -> Integer\n  def leaf: () -> Integer\nend\n".into()),
+        ];
+        shake_tree(&mut files, &HashSet::new(), "test");
+        assert_eq!(files[0].1, "module Probe\nend\n");
+        assert_eq!(files[1].1, "module Probe\nend\n");
+    }
+
+    #[test]
+    fn cascading_drops_preserve_the_ten_pass_snapshot_limit() {
+        let mut body = String::from("module Probe\n");
+        for step in 0..10 {
+            body.push_str(&format!("  def step{step}; step{}; end\n", step + 1));
+        }
+        body.push_str("  def step10; 7; end\nend\n");
+        let mut files = vec![("runtime/active_record/probe.rb".into(), body)];
+        shake_tree(&mut files, &HashSet::new(), "test");
+        assert_eq!(files[0].1, "module Probe\n  def step10; 7; end\nend\n");
     }
 }
