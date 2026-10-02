@@ -15,6 +15,8 @@ require 'optparse'
 require 'fileutils'
 require 'open3'
 require 'shellwords'
+require 'json'
+require 'etc'
 
 ROUNDHOUSE_ROOT = File.expand_path('..', __dir__)
 TARGETS = %w[spinel ruby jruby crystal csharp elixir go kotlin python rust swift typescript typescript-worker].freeze
@@ -24,6 +26,7 @@ def main(argv)
   cmd = argv.shift
   case cmd
   when 'doctor'    then cmd_doctor(argv)
+  when 'verify'    then cmd_verify(argv)
   when 'fetch'     then cmd_fetch(argv)
   when 'fixture'   then cmd_fixture(argv)
   when 'transpile' then cmd_transpile(argv)
@@ -65,6 +68,7 @@ def print_usage
       test <target>       Transpile, then run target's native tests (ruby only for now).
       run <target>        Transpile, then run main (ruby only for now).
       compare [<target>]  End-to-end Rails-vs-target HTTP compare (wraps scripts/compare).
+      verify             Sequential local checks; --plan previews without execution.
       bench [<target>...] HTTP throughput + RSS benchmark (wraps scripts/bench).
       site                Build the full GitHub Pages site (all targets).
 
@@ -228,6 +232,123 @@ def install_hint(key)
   when :rails  then 'gem install rails'
   when :wrk    then 'macOS: brew install wrk; Debian/Ubuntu: apt install wrk'
   end
+end
+
+# ---------------------------------------------------------------------
+# Subcommand: verify — a foreground local check, not an Actions emulator.
+
+def verify_capture(*command, input: '')
+  out, err, status = Open3.capture3(*command, stdin_data: input, chdir: ROUNDHOUSE_ROOT)
+  raise ArgumentError, "#{command.first}: #{err.strip}" unless status.success?
+  out
+end
+
+def cmd_verify(argv)
+  tests = []
+  toolchains = []
+  plan_only = json = false
+  base = 'HEAD'
+  jobs = ENV.fetch('CARGO_BUILD_JOBS', [Etc.nprocessors, 4].min.to_s)
+  OptionParser.new do |o|
+    o.banner = 'Usage: bin/rh verify [--plan] [--base REF] [--test NAME] [--toolchain TARGET] [--json]'
+    o.separator 'Build test programs, run library tests, then explicit integration/toolchain suites.'
+    o.separator 'This is partial local verification, not the hosted CI floor or merge approval.'
+    o.on('--plan', 'Read-only preview; no Cargo, installs, or test execution') { plan_only = true }
+    o.on('--base REF', 'Compare the working tree with REF (default: HEAD)') { |v| base = v }
+    o.on('--test NAME', 'Integration test stem; repeatable') { |v| tests << v }
+    o.on('--toolchain TARGET', 'Run TARGET_toolchain with --ignored; repeatable') { |v| toolchains << v }
+    o.on('--jobs N', 'Cargo workers (default: CARGO_BUILD_JOBS or min(CPUs, 4))') { |v| jobs = v }
+    o.on('--json', 'JSON report on stdout; child output on stderr') { json = true }
+  end.parse!(argv)
+  raise ArgumentError, "unexpected arguments: #{argv.join(' ')}" unless argv.empty?
+  raise ArgumentError, 'jobs must be a positive integer' unless jobs.match?(/\A[1-9]\d*\z/)
+  suites = tests.map { |name| [name, false] } + toolchains.map { |name| ["#{name}_toolchain", true] }
+  suites.uniq.each do |name, _ignored|
+    unless name.match?(/\A[A-Za-z0-9_-]+\z/) && File.file?(File.join(ROUNDHOUSE_ROOT, 'tests', "#{name}.rs"))
+      raise ArgumentError, "unknown test suite: #{name.inspect}"
+    end
+  end
+
+  head = verify_capture('git', 'rev-parse', 'HEAD').strip
+  base_sha = verify_capture('git', 'rev-parse', '--verify', '--end-of-options', "#{base}^{commit}").strip
+  unless verify_capture('git', 'diff', '--name-only', '--diff-filter=U', '-z').empty?
+    raise ArgumentError, 'resolve unmerged paths before verification'
+  end
+  changes = (verify_capture('git', 'diff', '--name-only', '--no-renames', '-z', base_sha, '--').split("\0") +
+    verify_capture('git', 'ls-files', '--others', '--exclude-standard', '-z').split("\0")).uniq.sort
+  # Import the repository's policy directly: no duplicated owner routing and
+  # no GitHub event, API lookup, reuse receipt, or bytecode-cache side effects.
+  policy = <<~PYTHON
+    import json, runpy, sys
+    policy = runpy.run_path(sys.argv[1])
+    print(json.dumps(policy['select'](json.load(sys.stdin))))
+  PYTHON
+  hosted = JSON.parse(verify_capture('python3', '-B', '-c', policy,
+    File.join(ROUNDHOUSE_ROOT, 'scripts', 'ci-plan.py'), input: JSON.generate(changes)))
+  commands = [['cargo', 'build', '--locked', '--tests'], ['cargo', 'test', '--locked', '--lib', '--', '--test-threads=1']]
+  suites.uniq.each do |name, ignored|
+    command = ['cargo', 'test', '--locked', '--test', name, '--']
+    command << '--ignored' if ignored
+    commands << command + ['--test-threads=1']
+  end
+  build_env = {
+    'CARGO_BUILD_JOBS' => jobs,
+    'CARGO_INCREMENTAL' => ENV.fetch('CARGO_INCREMENTAL', '0'),
+    'CARGO_PROFILE_DEV_DEBUG' => ENV.fetch('CARGO_PROFILE_DEV_DEBUG', '0'),
+    'CARGO_PROFILE_TEST_DEBUG' => ENV.fetch('CARGO_PROFILE_TEST_DEBUG', '0')
+  }
+  missing = %w[real-blog store].reject { |name| File.directory?(File.join(ROUNDHOUSE_ROOT, 'fixtures', name)) }
+  report = {
+    scope: 'partial local verification; hosted coverage is informational, not executed',
+    head: head, base: base_sha, changes: changes, build_environment: build_env,
+    prerequisites: ['Pinned Rust via rust-toolchain.toml, Ruby and test gems; selected toolchains must be installed'],
+    missing_fixtures: missing, hosted_coverage: hosted,
+    checks: commands.map { |command| { command: command, status: 'not-run' } },
+    status: plan_only ? 'planned' : 'blocked'
+  }
+  unless json
+    puts "Local verification at #{head} (working tree included); not hosted CI."
+    puts "Hosted selection (not executed): #{hosted.fetch('jobs').join(', ')}"
+    puts "Missing fixtures: #{missing.join(', ')} — see bin/rh fixture and scripts/create-store" unless missing.empty?
+    commands.each { |command| puts "  #{command.shelljoin}" }
+  end
+  rc = 0
+  unless plan_only
+    if missing.empty?
+      lock_path = verify_capture('git', 'rev-parse', '--git-path', 'rh-verify.lock').strip
+      File.open(File.expand_path(lock_path, ROUNDHOUSE_ROOT), File::RDWR | File::CREAT, 0o600) do |lock|
+        unless lock.flock(File::LOCK_EX | File::LOCK_NB)
+          raise ArgumentError, 'another verify run owns this worktree; wait for it to finish'
+        end
+        report[:status] = 'passed'
+        report[:checks].each do |check|
+          started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          begin
+            system(build_env, *check[:command], chdir: ROUNDHOUSE_ROOT, out: $stderr, err: $stderr)
+            status = $?
+            rc = status.exitstatus || 128 + status.termsig
+          rescue Errno::ENOENT => e
+            warn e.message
+            rc = 127
+          end
+          check[:seconds] = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round(3)
+          check[:exit] = rc
+          check[:status] = rc.zero? ? 'passed' : 'failed'
+          unless rc.zero?
+            report[:status] = 'failed'
+            break
+          end
+        end
+      end
+    else
+      rc = 2
+    end
+  end
+  puts(json ? JSON.pretty_generate(report) : "Local checks: #{report[:status]}; unexecuted hosted gates remain unverified.")
+  rc
+rescue OptionParser::ParseError, ArgumentError, SystemCallError, JSON::ParserError => e
+  warn "rh verify: #{e.message}"
+  2
 end
 
 # ---------------------------------------------------------------------

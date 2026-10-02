@@ -70,6 +70,50 @@ Build (requires Rust):
 - `bin/rh bench [<target>...]` — HTTP throughput + RSS benchmark across targets.
 - `bin/rh site` — build the full multi-target Pages site.
 
+### Focused local verification
+
+`bin/rh verify` is a foreground, fail-fast developer/agent loop, **not full
+CI or merge approval**. It builds all Rust test programs, runs library tests,
+then runs only the integration and ignored toolchain suites you explicitly
+select. The normal full-suite guidance above still applies at milestones.
+
+```sh
+bin/rh verify --plan --base main --test ingest
+bin/rh verify --test ingest --test real_blog
+bin/rh verify --toolchain ruby --json > verification.json
+```
+
+It needs Git, Python 3 (stdlib only), repository-pinned Rust, Ruby/test gems,
+both generated fixtures, and any selected target toolchain. Fixtures and
+dependencies must already be prepared; it never installs them. `--plan`
+only reads Git and the existing `scripts/ci-plan.py` policy; it does not call
+Cargo, create a lock, generate Python bytecode, or execute tests.
+
+`--base REF` compares the **current working tree** with that exact commit
+(default `HEAD`), including tracked edits, deletions and untracked non-ignored
+files. It does not fetch, find a merge base, or simulate GitHub's PR merge
+tree. The hosted coverage selection is informational: those jobs are not
+executed locally, and the planner cannot infer draft/label/full-call context.
+Choose integration tests from the behavior you changed, not just file names.
+
+Commands run sequentially with one Rust test thread. Cargo defaults to at
+most four workers, non-incremental builds and no dev/test debug symbols;
+explicit Cargo environment settings are preserved, and `--jobs N` overrides
+the worker count. No optimization or debug-assertion setting is changed.
+Debug bench emissions and browser/DOM/corpus gates are not part of this loop.
+The tool performs no cleanup, autofixes, publishing or Git writes beyond its
+worktree-local verification lock. Do not run other builds/tests concurrently
+in the same checkout: the lock coordinates `verify` callers, not arbitrary
+Cargo commands. Check disk space with your platform tools before large runs.
+
+`--json` sends a report to stdout and child output to stderr. The report names
+HEAD, changed paths, base, build settings, each command, its exit code/time and
+`passed`, `failed` or `not-run` status. It includes the working tree but is not
+a content fingerprint or reusable execution receipt; do not reuse it merely
+because HEAD matches. A preview is `planned`, missing fixtures block execution
+with exit 2, and a failed child stops subsequent checks and preserves its exit
+code. Invalid arguments/prerequisites are reported on stderr with exit 2.
+
 Cleanup: `bin/rh clean <target | fixture>`.
 
 The working demo in two commands — a transpiled blog with articles,

@@ -115,6 +115,14 @@ defect even if the build is green.
   `cargo test --all-targets` at milestones. Real-toolchain tests are
   `#[ignore]`-gated (`cargo test --test <target>_toolchain -- --ignored`); CI
   runs each in its own job.
+- **Focused local loop:** `bin/rh verify --plan --test <suite>` previews;
+  `bin/rh verify --test <suite>` builds tests, runs library tests and that
+  suite sequentially. Repeat `--test`; opt into native checks with
+  `--toolchain <target>`. Prepare both fixtures and dependencies first.
+  The JSON report (`--json`) separates executed local checks from unexecuted
+  hosted coverage; neither a preview nor a passing subset proves full CI.
+  Do not run another build/test in that checkout concurrently. See
+  DEVELOPMENT.md § "Focused local verification" for scope and prerequisites.
 - **CI is deliberately not uniformly gating.** The core `cargo test` job is
   non-advisory. Jobs marked `continue-on-error: true` track current Spinel
   master and other moving toolchains on purpose — **red is a signal, not a
