@@ -415,6 +415,40 @@ fn flattened_and_unknown_contracts_remain_errors_through_lowering() {
 }
 
 #[test]
+fn keyword_target_gates_distinguish_ordinary_super_from_full_forwarding() {
+    use roundhouse::diagnostic::DiagnosticKind;
+    use roundhouse::project::{BuildTarget, target_files};
+
+    for (source, expected) in [
+        ("class Probe < StandardError; def initialize; options={}; super(**options); end; end",
+         "keyword splat in ordinary super"),
+        ("class Probe; def self.call(...); 11; end; def self.run; options={}; call(**options); end; end",
+         "keyword splat into full argument forwarding"),
+    ] {
+        let app = analyzed(source);
+        for target in [BuildTarget::Rust, BuildTarget::Typescript, BuildTarget::Spinel, BuildTarget::Roda] {
+            let (_, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
+                target_files(&app, roundhouse::fixtures::real_blog(), target)
+            });
+            let gates: Vec<_> = diagnostics.iter().filter(|d| {
+                matches!(&d.kind, DiagnosticKind::Unsupported { construct, .. }
+                    if construct.as_str() == "keyword splat in ordinary super"
+                        || construct.as_str() == "keyword splat into full argument forwarding")
+            }).collect();
+            assert_eq!(gates.len(), 1, "{target:?}: {source}: {diagnostics:?}");
+            let gate = gates[0];
+            assert_eq!(gate.severity, Severity::Error);
+            assert!(!gate.span.is_synthetic());
+            assert!(matches!(&gate.kind, DiagnosticKind::Unsupported { construct, target: Some(name), .. }
+                if construct.as_str() == expected && name.as_str() == target.as_str()), "{gate:?}");
+            if expected == "keyword splat in ordinary super" {
+                assert!(gate.message.contains("argument ABI"), "{gate:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn declaration_only_forwarders_are_gated_on_unverified_targets() {
     use roundhouse::project::{BuildTarget, target_files};
     let app = analyzed("class Probe\n def call(...)\n 11\n end\nend");

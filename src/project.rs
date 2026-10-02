@@ -943,9 +943,15 @@ pub fn target_files(
     if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
         for (span, policy) in crate::analyze::forwarding::keyword_calls(app) {
             if policy != crate::analyze::forwarding::KeywordPolicy::Legacy {
+                let (construct, detail) = if policy == crate::analyze::forwarding::KeywordPolicy::RefuseOrdinarySuper {
+                    ("keyword splat in ordinary super",
+                     "super destination's native or lowered argument ABI cannot be verified")
+                } else {
+                    ("keyword splat into full argument forwarding",
+                     "native Ruby keyword provenance has no verified carrier on this target")
+                };
                 crate::emit::diagnostics::report_unsupported(span, target.as_str(),
-                    "keyword splat into full argument forwarding",
-                    "native Ruby keyword provenance has no verified carrier on this target");
+                    construct, detail);
             }
         }
     }
