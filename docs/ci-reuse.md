@@ -34,6 +34,7 @@ helper, without additional Python packages.
 | `runtime/ruby/`, native `runtime/spinel/`, or a focused Spinel test | Advisory native core plus the relevant focused Spinel framework suite |
 | Interpreter-only `db_jruby` / `markly_jruby` or `scaffold/ruby_overlay` | Interpreted Ruby/JRuby owners, not native fanout |
 | Spinel scaffold packaging | Advisory native core plus the native archive smoke |
+| Shared emitter helpers (`src/emit/shared/`) | Full validation across target languages |
 | Shared analyzer or lowerer | Compact floor; no mandatory Spinel lane on an ordinary PR; reviewers can request `ci:full` for broad/risky changes |
 | `wasm/` | WASM build and IDE/playground/studio browser verification |
 | Site/guide sources | Site/archive build and WASM verification, without publishing |

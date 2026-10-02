@@ -24,6 +24,25 @@ class Routing(unittest.TestCase):
         self.assertEqual(plan["jobs"], ci.BASE)
         self.assertEqual(plan["archives"], [])
 
+    def test_shared_emitters_select_cross_target_full_coverage(self):
+        for path in [
+            "src/emit/shared/schema_sql.rs",
+            "src/emit/shared/ops.rs",
+            "src/emit/shared/mod.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertEqual(
+                    plan["extra_compare"],
+                    ["crystal", "kotlin", "swift", "csharp", "go", "elixir", "python"],
+                )
+                self.assertEqual(plan["smoke"], ci.TARGETS)
+                self.assertTrue(plan["site"])
+                self.assertTrue(plan["wasm"])
+                self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+                self.assertIn("writebook-inventory", plan["required"])
+                self.assertIn("archive-results", plan["required"])
+
     def test_native_only_test_selects_core_without_archives_or_campfire(self):
         plan = ci.select(["tests/spinel_toolchain.rs"])
         self.assertEqual(self.extras(plan), set(ci.CORE))
@@ -177,6 +196,7 @@ class Routing(unittest.TestCase):
             "Cargo.toml",
             "scripts/ci-reuse.py",
             "tests/ci_archive_evidence_test.py",
+            "tests/ci_policy_workflow.rs",
         ]:
             with self.subTest(path=path):
                 self.assertEqual(ci.select([path])["smoke"], ci.TARGETS)

@@ -182,6 +182,7 @@ def select(paths, *, draft=False, full=False, publish=False):
             "tests/ci_plan_test.py",
             "tests/ci_archive_evidence_test.py",
             "tests/workflow_yaml_parses.rs",
+            "tests/ci_policy_workflow.rs",
             "src/project.rs",
             "src/bin/roundhouse.rs",
             "Cargo.toml",
@@ -234,12 +235,14 @@ def select(paths, *, draft=False, full=False, publish=False):
             spinel |= "spinel" in owners
             if owners:
                 reasons.append(f"{path}: {', '.join(sorted(owners))}")
+        elif target == "shared":
+            full = True
+            reasons.append(f"{path}: shared code generation")
         elif target and target not in {
             "ruby",
             "ruby_family",
             "roda",
             "mod",
-            "shared",
             "rails",
         }:
             full = True
