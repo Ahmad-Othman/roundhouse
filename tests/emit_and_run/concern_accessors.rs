@@ -80,6 +80,46 @@ end
         .assert_passes();
 }
 
+/// Intermediate abstract bases still emit the methods their concrete
+/// children inherit; admission eligibility must not suppress synthesis.
+#[test]
+fn abstract_base_accessors_and_typed_attributes_are_inherited() {
+    let base = "class ArticleAccessorBase < ApplicationRecord\n  self.abstract_class = true\n  attr_accessor :draft\n  attribute :reviewed, :boolean\nend\n";
+    let values = r#"
+first = Article.new
+second = Article.new
+raise "inherited accessor not initially nil" unless first.draft.nil?
+first.draft = 'draft'
+raise "inherited reader lost value" unless first.draft == 'draft'
+raise "records share inherited storage" unless second.draft.nil?
+first.reviewed = '0'
+second.reviewed = '1'
+raise "inherited boolean writer lost false cast" unless first.reviewed == false
+raise "inherited boolean writer lost true cast" unless second.reviewed == true
+puts 'inherited draft=draft reviewed=false second_reviewed=true'
+"#;
+    let native = std::process::Command::new("ruby")
+        .args(["-e", &format!(r#"
+require 'active_record'
+ActiveRecord::Base.establish_connection(adapter: 'sqlite3', database: ':memory:')
+ActiveRecord::Schema.define {{ create_table(:articles) {{ |t| t.string :title }} }}
+class ApplicationRecord < ActiveRecord::Base; self.abstract_class = true; end
+{base}
+class Article < ArticleAccessorBase; end
+{values}
+"#)])
+        .output()
+        .unwrap();
+    assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+    assert!(String::from_utf8_lossy(&native.stdout).contains("inherited draft=draft reviewed=false second_reviewed=true"));
+    let run = emit_and_run::real_blog()
+        .write("app/models/article_accessor_base.rb", base)
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ArticleAccessorBase\n")
+        .run_ruby(values);
+    run.assert_passes();
+    assert!(run.stdout.contains("inherited draft=draft reviewed=false second_reviewed=true"));
+}
+
 /// Direct model declarations already use ordinary per-record ivars.
 #[test]
 fn direct_model_virtual_accessors_run() {

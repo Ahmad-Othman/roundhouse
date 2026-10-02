@@ -245,29 +245,19 @@ pub(super) fn push_dom_record_key_method(methods: &mut Vec<MethodDef>, model: &M
     });
 }
 
-/// Literal abstract declarations, in source order. Per-model
+/// True when the model body declares `primary_abstract_class` (Rails'
+/// way of marking ApplicationRecord-shaped abstract bases). Per-model
 /// synthesizers that emit instance-shaped methods skip these classes
 /// since they're never instantiated.
-pub(super) fn is_abstract_class(model: &Model) -> bool {
-    let mut abstract_class = false;
-    for item in &model.body {
+fn is_abstract_class(model: &Model) -> bool {
+    model.body.iter().any(|item| {
         if let ModelBodyItem::Unknown { expr, .. } = item {
             if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
-                if args.is_empty() && method.as_str() == "primary_abstract_class" {
-                    abstract_class = true;
-                }
-            } else if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node {
-                if matches!(&*recv.node, ExprNode::SelfRef) && method.as_str() == "abstract_class=" {
-                    if let [arg] = args.as_slice() {
-                        if let ExprNode::Lit { value: Literal::Bool { value } } = &*arg.node {
-                            abstract_class = *value;
-                        }
-                    }
-                }
+                return args.is_empty() && method.as_str() == "primary_abstract_class";
             }
         }
-    }
-    abstract_class
+        false
+    })
 }
 
 /// `attr_accessor :vote` / `attr_reader :x` / `attr_writer :y` on a model
