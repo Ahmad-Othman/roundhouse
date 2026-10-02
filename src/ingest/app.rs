@@ -1628,7 +1628,7 @@ end
     // Admission needs complete controller permit demand and model DSL,
     // including declarations contributed by either kind of Concern,
     // and reuses the prepared resolver rather than rebuilding it.
-    super::concern_accessors::validate(&mut app)?;
+    super::concern_accessors::validate(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
 
     collect_binary_assets(vfs, dir, &mut app);
 

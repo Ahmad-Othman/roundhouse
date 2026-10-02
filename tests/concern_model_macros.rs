@@ -480,6 +480,9 @@ fn non_model_and_indirect_accessor_activations_are_errors() {
             ("app/models/support.rb", "Support", "module Wrapper; extend ActiveSupport::Concern; include DraftState; end\nclass Support; include Wrapper; end"),
             ("app/models/support.rb", "Indirect", "module Wrapper; extend ActiveSupport::Concern; include DraftState; end\nclass Indirect < ApplicationRecord; include Wrapper; end"),
             ("app/models/support.rb", "Support", "module Left; extend ActiveSupport::Concern; include DraftState; end\nmodule Right; extend ActiveSupport::Concern; include DraftState; end\nclass Support; include Left, Right; end"),
+            ("app/models/support.rb", "Scope::Wrapper", "module Scope; module ActiveSupport; module Concern; end; end; module Wrapper; extend ActiveSupport::Concern; include ::DraftState; end; end"),
+            ("app/models/support.rb", "Wrapper", "module Bindings; module ActiveSupport; module Concern; end; end; end; module Wrapper; include Bindings; extend ActiveSupport::Concern; include DraftState; end"),
+            ("app/models/support.rb", "Wrapper", "module Wrapper; include DraftState; extend ActiveSupport::Concern; end"),
         ] {
             let files = tree(&[
                 ("db/schema.rb", "ActiveRecord::Schema.define { create_table(:messages) { |t| t.string :body } }"),
@@ -502,8 +505,31 @@ fn non_model_and_indirect_accessor_activations_are_errors() {
             assert_eq!(model.validations().count(), 1);
             let lowered = roundhouse::lower::lower_model_to_library_class(model, &app.schema);
             assert!(lowered.methods.iter().any(|m| m.name.as_str() == "kept="));
+            if let Some(model) = app.models.iter().find(|m| m.name.0.as_str() == owner) {
+                let lowered = roundhouse::lower::lower_model_to_library_class(model, &app.schema);
+                assert!(!lowered.methods.iter().any(|m| ["scratch", "scratch="].contains(&m.name.as_str())), "{source}");
+            }
         }
     }
+}
+
+#[test]
+fn shadowed_framework_does_not_supply_model_accessors() {
+    let files = tree(&[
+        ("db/schema.rb", "ActiveRecord::Schema.define { create_table(:messages) { |t| t.string :body } }"),
+        ("app/models/concerns/virtual.rb", "module Scope; module ActiveSupport; module Concern; def included(base = nil, &block); nil; end; end; end; module Virtual; extend ActiveSupport::Concern; included { attr_accessor :scratch }; end; end"),
+        ("app/models/message.rb", "class Message < ApplicationRecord; include Scope::Virtual; end"),
+    ]);
+    let error = ingest_app_from_tree(files.clone()).unwrap_err().to_string();
+    assert!(error.contains("on Message") && error.contains("verified Concern"), "{error}");
+    roundhouse::ingest::survey::activate();
+    let result = ingest_app_from_tree(files);
+    let gaps = roundhouse::ingest::survey::drain();
+    let app = result.unwrap();
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert_eq!(gaps[0].to_string(), error);
+    let lowered = roundhouse::lower::lower_model_to_library_class(&app.models[0], &app.schema);
+    assert!(!lowered.methods.iter().any(|m| ["scratch", "scratch="].contains(&m.name.as_str())));
 }
 
 #[test]

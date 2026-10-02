@@ -152,7 +152,12 @@ fn unconsumed_included_hook(model: &crate::dialect::Model, app: &App) -> Option<
 /// The model splice supplies only direct inclusions. Refuse other activated
 /// candidates instead of emitting a clean program without their accessors.
 /// Concern-to-Concern dependencies defer execution; plain modules do not.
-fn validate_activation(app: &mut App, spans: &HashSet<crate::span::Span>) -> IngestResult<()> {
+fn validate_activation(
+    app: &mut App,
+    spans: &HashSet<crate::span::Span>,
+    carriers: &[super::library_class::ConcernClassMethodSpans],
+    framework_shadows: &HashSet<crate::ClassId>,
+) -> IngestResult<()> {
     use std::collections::BTreeMap;
     use super::util::{class_name_path, constant_id_str, constant_path_of,
         constant_path_is_rooted,
@@ -165,7 +170,6 @@ fn validate_activation(app: &mut App, spans: &HashSet<crate::span::Span>) -> Ing
     }
     let resolver = app.const_resolver.for_sources(&app.sources);
     let mut includes = BTreeMap::<crate::ClassId, Vec<crate::ClassId>>::new();
-    let mut deferred = HashSet::new();
     let mut modules = HashSet::new();
     let retained: HashSet<_> = app.library_classes.iter().map(|c| &c.name)
         .chain(app.models.iter().map(|m| &m.name))
@@ -201,36 +205,37 @@ fn validate_activation(app: &mut App, spans: &HashSet<crate::span::Span>) -> Ing
                 }
                 let name = call.name();
                 let name = constant_id_str(&name);
-                if !matches!(name, "include" | "extend") {
+                if name != "include" {
                     continue;
                 }
                 let Some(args) = call.arguments() else { continue };
                 for arg in args.arguments().iter() {
                     let Some(path) = constant_path_of(&arg) else { continue };
-                    if name == "extend" {
-                        if is_module && path == ["ActiveSupport", "Concern"] {
-                            deferred.insert(owner.clone());
-                        }
-                    } else {
-                        let span = Span {
-                            file: FileId((index + 1) as u32),
-                            start: arg.location().start_offset() as u32,
-                            end: arg.location().end_offset() as u32,
-                        };
-                        let path: Vec<_> = path.into_iter().map(Symbol::from).collect();
-                        if arg.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p)) {
-                            // An explicit root names the exact namespace. Rubydex
-                            // does not retain a name-only reference for `::X`.
-                            edges.push(crate::ClassId(Symbol::from(path.iter()
-                                .map(Symbol::as_str).collect::<Vec<_>>().join("::"))));
-                        } else if let Some(id) = resolver.namespace(span, &path) {
-                            edges.push(id.clone());
-                        }
+                    let span = Span {
+                        file: FileId((index + 1) as u32),
+                        start: arg.location().start_offset() as u32,
+                        end: arg.location().end_offset() as u32,
+                    };
+                    let path: Vec<_> = path.into_iter().map(Symbol::from).collect();
+                    if arg.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p)) {
+                        // An explicit root names the exact namespace. Rubydex
+                        // does not retain a name-only reference for `::X`.
+                        edges.push(crate::ClassId(Symbol::from(path.iter()
+                            .map(Symbol::as_str).collect::<Vec<_>>().join("::"))));
+                    } else if let Some(id) = resolver.namespace(span, &path) {
+                        edges.push(id.clone());
                     }
                 }
             }
         }
     }
+    // Spelling alone does not prove deferral: use the same source identity,
+    // binding barriers and extension ordering as finite configuration.
+    let deferred = super::class_configuration::verified_framework_concerns(
+        carriers,
+        &includes.iter().map(|(id, edges)| (id.clone(), edges.clone())).collect(),
+        framework_shadows,
+    );
     for (owner, direct) in &includes {
         // A survey source refusal already diagnosed an omitted class.
         if deferred.contains(owner) || (!retained.contains(owner) && !modules.contains(owner)) {
@@ -241,13 +246,13 @@ fn validate_activation(app: &mut App, spans: &HashSet<crate::span::Span>) -> Ing
             for item in &mut model.body {
                 let ModelBodyItem::Unknown { expr, .. } = item else { continue };
                 if spans.contains(&expr.span) && !direct.iter().any(|id| {
-                    app.concern_model_items.get(id).is_some_and(|items| items.iter().any(|item| {
+                    deferred.contains(id) && app.concern_model_items.get(id).is_some_and(|items| items.iter().any(|item| {
                         matches!(item, ModelBodyItem::Unknown { expr: original, .. } if original.span == expr.span)
                     }))
                 }) {
-                    // The legacy splice can select an unqualified namesake.
-                    // Do not turn that mismatch into a new accessor contract.
-                    decline(item, "is not supplied by a source-resolved direct include");
+                    // Neither a namesake nor a user-defined framework spelling
+                    // establishes the block's accessor contract.
+                    decline(item, "is not supplied by a source-resolved, verified Concern include");
                 }
             }
         }
@@ -282,7 +287,11 @@ fn validate_activation(app: &mut App, spans: &HashSet<crate::span::Span>) -> Ing
 
 /// Ask the canonical synthesizers about occupied methods/storage,
 /// rather than maintaining another DSL collision list.
-pub(super) fn validate(app: &mut App) -> IngestResult<()> {
+pub(super) fn validate(
+    app: &mut App,
+    carriers: &[super::library_class::ConcernClassMethodSpans],
+    framework_shadows: &HashSet<crate::ClassId>,
+) -> IngestResult<()> {
     // Include splicing retains the original declaration's file/range,
     // just as ConcernClassMethodSpans identifies consumed carriers.
     // This join is confined to ingest, before source-shaped IR returns;
@@ -302,7 +311,7 @@ pub(super) fn validate(app: &mut App) -> IngestResult<()> {
             Some(expr.span)
         })
         .collect();
-    validate_activation(app, &spans)?;
+    validate_activation(app, &spans, carriers, framework_shadows)?;
     let candidates: HashSet<_> = app
         .models
         .iter()
