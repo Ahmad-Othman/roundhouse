@@ -1619,6 +1619,8 @@ end
     );
     drop(sources);
     splice_concerns_into_controllers(&mut app);
+    // After the splice: an action a concern provides is not implicit.
+    synthesize_template_only_actions(&mut app);
     // After the splice: a macro has to resolve against the concern's
     // class-side methods, and its expansion joins the same filter chain.
     super::class_configuration::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
@@ -2032,6 +2034,96 @@ fn splice_concern_class_methods_into_includers(
 /// emits) and the reference becomes `IntervalHelper::TIME_INTERVALS`,
 /// which is what Ruby's lexical lookup means and what every strict
 /// target can resolve.
+/// A routed action with a template and no method behind it gets the
+/// empty method Rails behaves as if it had.
+///
+/// `before_action :set_api_token, only: %i[show edit]` with only `edit`
+/// written out still serves `api_tokens/show.html.erb`: the router
+/// dispatches `show`, the filters run, and the implicit render finds the
+/// template. Nothing downstream keys on a template, though — the view's
+/// ivar seed, the filter chain and every emitter's dispatch table are
+/// built from the controller's actions — so the template was fed by
+/// nothing (`@api_token has no known type` at each read) and the emitted
+/// app had no `show` to route to. Writing the method here answers all of
+/// them at once, the same way an author adding `def show; end` would.
+///
+/// All three must hold: a route names `controller#action`, a template
+/// exists for it, and neither the controller nor an ancestor defines it.
+/// A template no route reaches stays the unreachable file it is.
+fn synthesize_template_only_actions(app: &mut App) {
+    use crate::dialect::{Action, ControllerBodyItem, RenderTarget};
+    use std::collections::{BTreeSet, HashSet};
+
+    let view_names: HashSet<&str> = app.views.iter().map(|v| v.name.as_str()).collect();
+    let has_template = |prefix: &str, action: &str| {
+        let name = format!("{prefix}/{action}");
+        let variant = format!("{name}.");
+        view_names.iter().any(|v| *v == name || v.starts_with(&variant))
+    };
+    let defines = |controller: &crate::dialect::Controller, action: &Symbol| {
+        // The controller itself, then its ancestors within the app.
+        let mut current = Some(controller);
+        let mut depth = 0;
+        while let Some(c) = current {
+            if c.actions().any(|a| &a.name == action) {
+                return true;
+            }
+            depth += 1;
+            if depth > 32 {
+                break;
+            }
+            current = c.parent.as_ref().and_then(|p| app.controllers.iter().find(|o| &o.name == p));
+        }
+        false
+    };
+
+    let mut missing: BTreeSet<(crate::ident::ClassId, Symbol)> = BTreeSet::new();
+    for route in crate::lower::routes::flatten_routes(app) {
+        let Some(controller) = app.controllers.iter().find(|c| c.name == route.controller) else {
+            continue;
+        };
+        let prefix = crate::analyze::controller_view_prefix(&controller.name);
+        if has_template(&prefix, route.action.as_str()) && !defines(controller, &route.action) {
+            missing.insert((route.controller.clone(), route.action.clone()));
+        }
+    }
+
+    for (controller, action) in missing {
+        let Ok(mut methods) =
+            crate::runtime_src::parse_methods(&format!("def {}\nend\n", action.as_str()))
+        else {
+            continue;
+        };
+        let Some(method) = methods.pop() else { continue };
+        let Some(controller) = app.controllers.iter_mut().find(|c| c.name == controller) else {
+            continue;
+        };
+        let item = ControllerBodyItem::Action {
+            action: Action {
+                name: action,
+                params: crate::ty::Row::default(),
+                opt_params: Vec::new(),
+                kw_params: Vec::new(),
+                kwrest_param: None,
+                block_param: None,
+                name_span: crate::span::Span::synthetic(),
+                body: method.body,
+                renders: RenderTarget::Inferred,
+                effects: crate::effect::EffectSet::pure(),
+            },
+            leading_comments: Vec::new(),
+            leading_blank_line: true,
+        };
+        // Ahead of `private`: an action the router can reach is public.
+        let at = controller
+            .body
+            .iter()
+            .position(|item| matches!(item, ControllerBodyItem::PrivateMarker { .. }))
+            .unwrap_or(controller.body.len());
+        controller.body.insert(at, item);
+    }
+}
+
 fn splice_concerns_into_controllers(app: &mut App) {
     use crate::dialect::{Action, ControllerBodyItem, MethodReceiver, RenderTarget};
     use crate::ty::{Row, Ty};
