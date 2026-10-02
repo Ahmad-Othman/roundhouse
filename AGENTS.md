@@ -87,11 +87,13 @@ defect even if the build is green.
   you changed. End commit messages with the standard `Co-Authored-By`
   trailer.
 - **Outside contributors: fork, and open a pull request against `main`.**
-  CI runs a compact floor plus targeted lanes; add `ci:full` for the
-  complete PR matrix. Full main validation/publication is scheduled every
-  four hours and executes freshly every cycle. `CI summary` reports
-  selected checks, not a mandatory merge gate; maintainers decide when
-  to merge. See [CI coverage](docs/ci-reuse.md).
+  CI runs a compact floor plus targeted lanes. For broad/risky changes,
+  ask a maintainer to apply `ci:full` for the complete PR matrix.
+  This expands validation only; PR runs never publish. Drafts retain
+  fixture + unit coverage even with the label. Full main validation and
+  publication are scheduled every four hours and execute freshly every cycle.
+  `CI summary` reports selected checks, not a mandatory merge gate;
+  maintainers decide when to merge. See [CI coverage](docs/ci-reuse.md).
   You do not need every toolchain locally; CI covers the missing lanes.
   Before opening one: `bin/rh fixture` (the test fixtures are generated,
   not checked in — see below), `cargo test --lib` plus the targeted
@@ -113,9 +115,9 @@ defect even if the build is green.
   `cargo test --all-targets` at milestones. Real-toolchain tests are
   `#[ignore]`-gated (`cargo test --test <target>_toolchain -- --ignored`); CI
   runs each in its own job.
-- **CI is deliberately not uniformly gating.** The core `cargo test` job gates.
-  The ~5 `continue-on-error: true` jobs track current Spinel master and other
-  moving toolchains on purpose — **red there is a signal to read, not a
+- **CI is deliberately not uniformly gating.** The core `cargo test` job is
+  non-advisory. Jobs marked `continue-on-error: true` track current Spinel
+  master and other moving toolchains on purpose — **red is a signal, not a
   regression to shim away.** A Spinel red can come from Roundhouse runtime, RBS
   or packaging, or from upstream; it is not by itself proof of an upstream
   fault. Don't add workarounds just to make an advisory job green.

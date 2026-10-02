@@ -5,8 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    # Drafts run fixture + unit only. Leaving draft starts the full run;
-    # returning to draft cancels the superseded full run via concurrency.
+    # Drafts run fixture + unit only. Ready PRs use selected coverage.
+    # Label/draft/head transitions cancel superseded PR runs via concurrency.
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
   workflow_call:
     inputs:
@@ -1044,9 +1044,9 @@ jobs:
   # long-lived process holding connection registries and a rendered
   # room page is that shape — lobsters is request-shaped, LangArena the
   # opposite. All legs consume the SAME comparison binary artifact of the
-  # SAME run, so a red `minor-gc` beside a green `default` is the
-  # collector alone. That is the report he wants most: reduce it, file
-  # it upstream, and say minor-GC-only in the title. Only the served
+  # SAME run. A red `minor-gc` beside a green `default` is a mode-specific
+  # signal, not proof of an upstream collector defect: reduce the case
+  # and establish its cause before filing upstream. Only the served
   # binary sees the variable — scripts/campfire-compare exports it
   # explicitly, 0 or 1, on the launch line and nowhere else.
   #
@@ -3049,13 +3049,10 @@ jobs:
   # Finish Pages assembly without keeping blog smoke jobs behind Campfire.
   assemble-site:
     # campfire-conformance is here for ORDERING ONLY — its summary.json is
-    # this job's input. The `if:` deliberately does not require it to have
-    # SUCCEEDED: that job is blocking (pinned input, so a red floor is a
-    # real regression and must fail the run), but the page it feeds is the
-    # thing that says WHAT regressed, and suppressing the page on the run
-    # where it is most useful would be exactly backwards. A missing
-    # artifact degrades to a skipped render and a warning, not a broken
-    # site build.
+    # this job's input. Assembly can render a failed conformance report
+    # for triage, but a failed compact floor still prevents Pages deploy.
+    # A missing summary degrades to a skipped render and warning here;
+    # assembly does not override the separate publication guards.
     needs: [build-site, campfire-conformance, build-campfire-archive, archive-results, plan]
     if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.build-site.result == 'success' && needs.archive-results.result == 'success' }}
     outputs:
@@ -3080,20 +3077,18 @@ jobs:
           path: _site/ci
 
       # The campfire archive, built by the parallel build-campfire-archive
-      # job. It lands AFTER `--site` because build_site() removes and
-      # recreates the output directory, which would take _site/campfire
-      # with it.
+      # job, is attached after restoring this run's site-base artifact.
+      # Assembly never re-emits archives or rebuilds from a newer main.
       #
       # The bytes go live at rubys.github.io/roundhouse/campfire/spinel.tgz
       # (source; needs a spinel checkout) and campfire/docker.tgz (the
       # `spin pack` output with a Dockerfile; needs Docker and nothing
-      # else). Both are linked from site/apps/campfire.html.
+      # else), if publication guards pass. Both are linked from
+      # site/apps/campfire.html.
       #
-      # Tolerant of a missing artifact ON PURPOSE, and for the same reason
-      # this job does not require campfire-conformance to have SUCCEEDED:
-      # per matz/spinel#314 the published archives are an extraction
-      # surface for upstream bug repros, so a broken campfire emit must not
-      # stall publication of the eleven blog archives beside it.
+      # Missing or failed archive outputs remain honest repro evidence,
+      # not successful validation. Same-run hashes and download availability
+      # are verified separately; compact-floor failure still blocks deploy.
       - uses: actions/download-artifact@v8
         continue-on-error: true
         with:

@@ -170,16 +170,16 @@ its predecessors; [`WHY.md`](WHY.md) is why do it at all.
 
 Issues and pull requests are both welcome, and a PR does not need a
 conversation first: CI runs a compact correctness/runtime floor plus
-targeted checks. Add `ci:full` for full PR validation; the complete
-matrix also runs freshly every four hours. See
-[CI coverage](docs/ci-reuse.md). The
-`CI summary` status reports selected checks without imposing a merge
-requirement; maintainers decide when to merge. The Spinel
-and Campfire jobs marked `continue-on-error` track current Spinel
-master, and red there is a signal to investigate Roundhouse runtime,
-RBS or packaging as well as possible upstream drift—not proof of an
-upstream fault. Setup,
-the test cycle, and what a PR should carry are in
+targeted checks. Ask a maintainer to apply `ci:full` for full PR validation;
+the label expands tests, never publication. The complete matrix also runs
+freshly every four hours. See [CI coverage](docs/ci-reuse.md) for requesting
+full/fresh validation and the separate publication controls.
+`CI summary` reports selected checks without imposing a merge requirement;
+maintainers decide when to merge. Spinel and Campfire jobs marked
+`continue-on-error` track current Spinel master, and red there is a signal
+to investigate Roundhouse runtime, RBS or packaging as well as possible
+upstream drift—not proof of an upstream fault. Setup, the test cycle,
+and what a PR should carry are in
 [`DEVELOPMENT.md`](DEVELOPMENT.md); the invariants not to break are in
 [`AGENTS.md`](AGENTS.md).
 

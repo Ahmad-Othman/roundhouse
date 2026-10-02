@@ -41,13 +41,49 @@ helper, without additional Python packages.
 | Shared compare, framework, archive, or E2E harness | The checks owned by that harness |
 | Cross-target packaging, CI policy/workflows/planner, Cargo/build/toolchain policy, unknown new target | Full validation |
 
-Add **`ci:full`** to a non-draft PR to request the full matrix for its current
-merge tree. Removing the label restores automatic routing. Label/draft/head
-transitions cancel superseded PR runs. A manual **Full validation** dispatch
-validates the chosen ref freshly; a branch-head dispatch is not a replacement
-for the PR merge-tree check. Publication is opt-in for dispatch and is accepted
-only on canonical `rubys/roundhouse` main. No deployment privileges are granted
-to the shared validator or PR jobs.
+### Requesting broader or fresh validation
+
+For broad/risky changes, or when targeted coverage is insufficient, request
+**`ci:full`**. Applying labels requires upstream repository triage access or
+higher; fork contributors and their agents without that access should ask a
+maintainer to apply the label. A request in a PR comment alone does not trigger
+CI. The label must exist in the upstream repository before it can be applied.
+
+- The PR must be **ready for review**: drafts retain fixture + unit only,
+  even with `ci:full`.
+- Applying the label starts a new full-matrix run of the current **PR merge
+  tree**, without a new commit. Superseded PR runs are cancelled.
+- Further pushes retain full coverage while the label remains set.
+- Removing it starts a run with automatic coverage selection. Policy/shared
+  emitter changes can still select full coverage without the label.
+- Full **coverage** does not disable conservative PR execution-receipt reuse.
+  For fresh execution, ask a maintainer to select **Re-run all jobs** on the
+  full-matrix run. A rerun retains that run's original SHA and event coverage;
+  rerunning an older compact run does not expand coverage or test a newer head.
+
+A manual **Actions → Full validation → Run workflow** dispatch validates the
+chosen ref freshly. A branch-head dispatch is not a replacement for the PR
+merge-tree check. Leave **publish** unchecked for validation only.
+
+### Validation is not publication
+
+`full` selects coverage; `publish` separately authorizes publication work.
+Applying `ci:full` never enables `publish`.
+
+| Trigger | Publication behavior |
+|---|---|
+| PR, including `ci:full`, or ordinary main push | Validation/artifacts only; no deploy |
+| Manual Full validation, `publish=false` (default) | Fresh validation only; no deploy |
+| Manual Full validation, `publish=true` | Accepted only on canonical `rubys/roundhouse` main; guarded publication |
+| Four-hour schedule on canonical main | Fresh full validation plus guarded publication |
+
+The shared validator and PR jobs have no Pages/OIDC deployment privileges and
+no deploy job. Only the separate full-workflow deploy job receives those
+permissions. Publication requests outside canonical main and schedule/manual
+events are rejected. Publication still requires the compact floor, verified
+assembly and a live-main SHA check; the detailed archive contract follows below.
+
+### Current-run artifacts and the full cycle
 
 Targeted archive smokes use `roundhouse --archives rust,go` (selected
 `browse/<target>.{json,tgz,zip}` outputs) and do not build WASM, demos, website
@@ -234,17 +270,18 @@ native-library ABI, current-commit provenance, and proof at each consumer.
 
 Matrix `fail-fast: false` still preserves cross-target diagnostic coverage;
 advisory lanes remain signals rather than reasons to cancel independent checks.
-Existing `needs` gates and normal step failure handling are unchanged. The
-Campfire Docker recipe no longer downloads a separate Dockerfile frontend:
+Receipt reuse does not bypass selected checks' dependency or failure handling.
+The Campfire Docker recipe no longer downloads a separate Dockerfile frontend:
 its ordinary multi-stage instructions use the bundled frontend and COPY
 preserves the archive's executable boot mode. Base images and apt packages
 still resolve freshly, and the real Docker smoke remains enabled.
 
 ## Forcing a fresh check and extending the allowlist
 
-GitHub's **Re-run jobs** always executes these checks freshly, even if a matching
-receipt exists. The fresh attempt may produce new evidence. Existing draft,
-`needs` and main-branch behavior is unchanged.
+Rerun checks bypass matching receipts. Choose **Re-run all jobs** to execute
+the entire selected graph freshly, rather than only failed or individual jobs.
+The rerun keeps the original SHA, ref and coverage; the fresh attempt may
+produce new evidence. Draft, `needs` and main-branch behavior is unchanged.
 
 Before adding another job, audit its complete input contract, including
 generated artifacts, framework tests, executable README blocks and the actual
@@ -256,3 +293,6 @@ unless current-run outputs and their provenance can be preserved honestly.
 Run `PYTHONDONTWRITEBYTECODE=1 python3 tests/ci_reuse_test.py -v` and
 `cargo test --test workflow_yaml_parses` when changing this policy. The Rust
 workflow tests execute the Python adversarial suite, so normal unit CI gates it.
+For coverage routing, archive evidence or full-workflow changes, also run
+`cargo test --test ci_policy_workflow`; it executes the planner and archive
+evidence suites and checks the publication boundaries.
