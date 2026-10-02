@@ -1605,3 +1605,11 @@ fn multiple_erb_openers_execute_inside_an_output_block() {
         "    assert_select \"span.multi-opener\", \"12\"\n")
         .assert_passes();
 }
+
+#[test]
+fn trailing_erb_comments_execute_without_swallowing_output_terminators() {
+    on_the_index(emit_and_run::real_blog(), r#"<span class="commented-title"><%= capture do %>
+<% [1, 2].each do |number| %><%= "n: #{number}" # label %><% end # numbers %><% end # capture %></span>"#,
+        "    assert_select \"span.commented-title\", \"n: 1n: 2\"\n")
+        .assert_passes();
+}
