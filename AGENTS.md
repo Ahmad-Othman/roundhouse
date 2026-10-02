@@ -89,7 +89,7 @@ defect even if the build is green.
 - **Outside contributors: fork, and open a pull request against `main`.**
   CI runs a compact floor plus targeted lanes; add `ci:full` for the
   complete PR matrix. Full main validation/publication is scheduled every
-  four hours, with changed-input checks and a daily refresh. `ci-required`
+  four hours and executes freshly every cycle. `ci-required`
   gates selected blocking coverage; see [CI coverage](docs/ci-reuse.md).
   You do not need every toolchain locally; CI covers the missing lanes.
   Before opening one: `bin/rh fixture` (the test fixtures are generated,
@@ -113,9 +113,11 @@ defect even if the build is green.
   `#[ignore]`-gated (`cargo test --test <target>_toolchain -- --ignored`); CI
   runs each in its own job.
 - **CI is deliberately not uniformly gating.** The core `cargo test` job gates.
-  The ~5 `continue-on-error: true` jobs track upstream Spinel and other moving
-  toolchains on purpose — **red there is a signal to read, not a regression to
-  shim away.** Don't add workarounds just to make an advisory job green.
+  The ~5 `continue-on-error: true` jobs track current Spinel master and other
+  moving toolchains on purpose — **red there is a signal to read, not a
+  regression to shim away.** A Spinel red can come from Roundhouse runtime, RBS
+  or packaging, or from upstream; it is not by itself proof of an upstream
+  fault. Don't add workarounds just to make an advisory job green.
 
 ## The actual goal
 

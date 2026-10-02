@@ -26,12 +26,15 @@ status instead of being left pending by workflow-level path filters.
 | Changed inputs | Additional coverage |
 |---|---|
 | Target emitter file **or directory**, target runtime, toolchain/framework test | Owning comparison and archive smoke; existing embedded framework/toolchain suites stay intact |
-| Ruby emitter or Spinel adapters | Ruby/JRuby/Spinel family, since interpreted targets also consume Spinel-tree files |
-| Shared analyzer, lowerer, `runtime/ruby/` | Compact floor; reviewers request full validation for broad/risky changes |
+| Ruby emitter | Ruby/JRuby owners plus advisory native Spinel core (`build-spinel`, `toolchain-spinel`, `compare-spinel`) |
+| `runtime/ruby/`, native `runtime/spinel/`, or a focused Spinel test | Advisory native core plus the relevant focused Spinel framework suite |
+| Interpreter-only `db_jruby` / `markly_jruby` or `scaffold/ruby_overlay` | Interpreted Ruby/JRuby owners, not native fanout |
+| Spinel scaffold packaging | Advisory native core plus the native archive smoke |
+| Shared analyzer or lowerer | Compact floor; no mandatory Spinel lane on an ordinary PR; reviewers can request `ci:full` for broad/risky changes |
 | `wasm/` | WASM build and IDE/playground/studio browser verification |
 | Site/guide sources | Site/archive build and WASM verification, without publishing |
-| Shared compare or archive/E2E harness | Its owning comparisons or archive smokes |
-| CI policy, cross-target packaging, unknown new target | Full validation |
+| Shared compare, framework, archive, or E2E harness | The checks owned by that harness |
+| Cross-target packaging, CI policy/workflows/planner, Cargo/build/toolchain policy, unknown new target | Full validation |
 
 Add **`ci:full`** to a non-draft PR to request the full matrix for its current
 merge tree. Removing the label restores automatic routing. Label/draft/head
@@ -49,20 +52,33 @@ the same producer bytes, without later re-emission.
 
 `.github/workflows/full-ci.yml` checks canonical main at **00:17, 04:17,
 08:17, 12:17, 16:17 and 20:17 UTC**, bundling full validation and publication.
-Its exact completion key includes main SHA, observed Spinel master SHA and UTC
-day. Spinel is resolved once and built at that revision. The daily refresh
-exercises floating Rails/SDK/runner inputs even without repository changes.
-Only an exact successful lookup can skip a scheduled first attempt; lookup
-uncertainty, dispatches and reruns execute. Failed/unavailable advisory work,
-failed required coverage or failed publication prevents saving the marker, so
-the next interval retries. This can mean all six runs execute during upstream
-failure; it does not pretend that failure was validated successfully.
+Every cycle executes freshly; validation results are not cached. Spinel master
+is resolved once per run, and evidence records the compiler revision actually
+used. Its lanes remain advisory. Ordinary build caches and the conservative PR
+execution receipts described below are unchanged.
+
+Archive producers upload with `always()`, preserving any files already produced
+if a later producer step fails. The outcome report names the source SHA, run and
+attempt, actual byte size/hash, and applicable Spinel provenance, and classifies
+each archive `passed`, `reused`, `failed`, `unverified`, or `not-selected`.
+Validation is byte-specific: a TGZ smoke does not certify sibling ZIP or JSON
+bytes. A Spinel source archive contains source, not a built compiler; its native
+smoke witness therefore records the compiler revision separately. Likewise a
+Docker producer's compiler revision is distinct provenance from a native
+archive consumer's compiler revision.
 
 Publication requires the **compact** floor and assembled site, not passing all
-extra-target or advisory lanes: broken-emit archives are also upstream repros.
-The deployment lock rechecks that canonical main still equals the validated
-SHA; lookup failure or a superseded snapshot prevents publication. A new main
-commit racing the final check cannot be made atomic with Pages deployment.
+extra-target or advisory lanes: failed or unverified archives can still be
+useful repros, but are not described as validated. Assembly waits for the same
+run's outcome report, copies only that run's archives, and verifies the actual
+copied bytes against the report hashes. It never rebuilds from a newer main.
+The published sidecar at `ci/archive-results.json` separately records whether
+each archive is present for download. Older-attempt witnesses remain visible
+but are conservatively `unverified` on a rerun, not evidence that it passed.
+Deployment guards are unchanged: the deployment lock rechecks that canonical
+main still equals the validated SHA; lookup failure or a superseded snapshot
+prevents publication. A new main commit racing the final check cannot be made
+atomic with Pages deployment.
 Started background runs finish; only the newest pending request is retained.
 Extra comparison/smoke matrices use `max-parallel: 2`, GC uses 1. These bound
 fanouts, **not** total repository concurrency or a guaranteed PR runner priority.
@@ -205,14 +221,11 @@ Stage-aware cancellation needs a separate controller to inspect the previous
 run; GitHub's concurrency expression cannot inspect that run's job progress.
 This PR does not add privileged cancellation machinery.
 
-The next substantial opportunity is sharing **current-run** native compiler
-builds, not declaring more outputs unchanged without a dependency witness.
-In [run 36998514579](https://github.com/rubys/roundhouse/actions/runs/36998514579),
-the unit Cargo step took 309 seconds and the two TypeScript toolchain/framework
-steps took 210 seconds together. Those are whole-step timings, not measurements
-of compiler cost alone. A shared build needs consistent profiles/toolchains,
-native-library ABI, current commit provenance and coverage of each consumer's
-actual build flags. It should be measured and proved separately.
+A separate measured follow-up may evaluate sharing the `unit` job's Debug
+binary with Campfire conformance/compare. This change does not copy Cargo target
+directories, share images, introduce Bazel, or claim a measured queue-time
+improvement. Any sharing proposal still needs compatible toolchains/build flags,
+native-library ABI, current-commit provenance, and proof at each consumer.
 
 Matrix `fail-fast: false` still preserves cross-target diagnostic coverage;
 advisory lanes remain signals rather than reasons to cancel independent checks.

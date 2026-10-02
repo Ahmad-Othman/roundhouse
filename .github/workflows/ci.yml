@@ -61,6 +61,7 @@ jobs:
       site: ${{ steps.plan.outputs.site }}
       publish: ${{ steps.plan.outputs.publish }}
       spinel-revision: ${{ steps.plan.outputs.spinel-revision }}
+      spinel-tests: ${{ steps.plan.outputs.spinel-tests }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -773,8 +774,8 @@ jobs:
   # rewiring of the test_helper.
   framework-tests-spinel:
     # Re-enabled 2026-06-17 (5/5 green on matz/spinel master). Advisory.
-    needs: build-spinel
-    if: ${{ !cancelled() && needs.build-spinel.outputs.artifact-id != '' }}
+    needs: [build-spinel, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'framework-tests-spinel') && needs.build-spinel.outputs.artifact-id != '' }}
     outputs: &advisory-outputs
       execution: ${{ steps.result.outputs.status }}
     runs-on: ubuntu-latest
@@ -792,33 +793,18 @@ jobs:
         run: |
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
-      - name: cargo test --test framework_tests_spinel -- --ignored
-        run: cargo test --test framework_tests_spinel -- --ignored --nocapture
-      # The web-push gem's crypto ported onto spinel's openssl package
-      # (runtime/spinel/web_push_crypto.rb), pinned against the gem's
-      # own bytes. Same staged spinel; the package links the runner's
-      # system libssl.
-      - name: cargo test --test spinel_web_push_crypto -- --ignored
-        if: always()
-        run: cargo test --test spinel_web_push_crypto -- --ignored --nocapture
-      # A request that raises gives its connection back
-      # (runtime/spinel/db.rb `with_connection`); a leaked lease used to
-      # wedge a pool shard for good after four 500s.
-      - name: cargo test --test spinel_db_lease -- --ignored
-        if: always()
-        run: cargo test --test spinel_db_lease -- --ignored --nocapture
-      # Rails' request-params builder, ported for the spinel dispatcher
-      # (runtime/spinel/param_builder.rb), held to Rails' answers for
-      # 2,755 query strings. The CRuby half runs in the core job.
-      - name: cargo test --test spinel_param_builder -- --ignored
-        if: always()
-        run: cargo test --test spinel_param_builder -- --ignored --nocapture
-      # Rails' signed-value vectors on the spinel-compiled verifier (the
-      # CRuby half runs in the core job), plus secrets whose derived keys
-      # hold a zero byte — the binary used to cut those keys short.
-      - name: cargo test --test rails_compat_vectors_spinel -- --ignored
-        if: always()
-        run: cargo test --test rails_compat_vectors_spinel -- --ignored --nocapture
+      # Full runs select all five suites; targeted runs select their owners.
+      # Continue after a failing suite without losing its failure status.
+      - name: Run selected native framework checks
+        env:
+          TESTS: ${{ join(fromJSON(needs.plan.outputs.spinel-tests), ' ') }}
+        run: |
+          test -n "$TESTS"
+          status=0
+          for suite in $TESTS; do
+            cargo test --test "$suite" -- --ignored --nocapture || status=1
+          done
+          exit "$status"
       - *advisory-result
 
   # Campfire conformance — ONCE Campfire's OWN test suite, run against a
@@ -950,8 +936,8 @@ jobs:
   # its executable bit in a tarball. The DB differential builds its own
   # scenario overlay and must not reuse this binary.
   build-campfire-compare-spinel:
-    needs: build-spinel
-    if: ${{ !cancelled() && needs.build-spinel.outputs.artifact-id != '' }}
+    needs: [build-spinel, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'build-campfire-compare-spinel') && needs.build-spinel.outputs.artifact-id != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
@@ -1082,10 +1068,10 @@ jobs:
   # nothing.
   campfire-compare-spinel:
     name: campfire-compare-spinel (${{ matrix.gc }})
-    needs: build-campfire-compare-spinel
+    needs: [build-campfire-compare-spinel, plan]
     # An advisory producer failure must not become three artifact-download
     # failures. Only the upload's artifact ID proves the binary is available.
-    if: ${{ !cancelled() && needs.build-campfire-compare-spinel.outputs.artifact-id != '' }}
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-compare-spinel') && needs.build-campfire-compare-spinel.outputs.artifact-id != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
@@ -1168,8 +1154,8 @@ jobs:
   # build, not the comparison binary. Start after the toolchain is ready
   # instead of serializing it behind the shared build and request walk.
   campfire-db-differential-spinel:
-    needs: build-spinel
-    if: ${{ !cancelled() && needs.build-spinel.outputs.artifact-id != '' }}
+    needs: [build-spinel, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'campfire-db-differential-spinel') && needs.build-spinel.outputs.artifact-id != '' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -1662,8 +1648,8 @@ jobs:
     # via continue-on-error — like every spinel job it tracks matz/spinel
     # master UNPINNED, so it surfaces regressions without gating unrelated
     # work; if master churns red, the signal is visible but non-blocking.
-    needs: [generate-fixture, build-spinel]
-    if: ${{ !cancelled() && needs.generate-fixture.result == 'success' && needs.build-spinel.outputs.artifact-id != '' }}
+    needs: [generate-fixture, build-spinel, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'toolchain-spinel') && needs.generate-fixture.result == 'success' && needs.build-spinel.outputs.artifact-id != '' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -2019,8 +2005,8 @@ jobs:
   # drop it once the upstream cadence settles.
   compare-spinel:
     # Re-enabled 2026-06-17 (7/7 paths match Rails on matz/spinel master). Advisory.
-    needs: [generate-fixture, build-spinel]
-    if: ${{ !cancelled() && needs.generate-fixture.result == 'success' && needs.build-spinel.outputs.artifact-id != '' }}
+    needs: [generate-fixture, build-spinel, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'compare-spinel') && needs.generate-fixture.result == 'success' && needs.build-spinel.outputs.artifact-id != '' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -2225,6 +2211,25 @@ jobs:
           name: ci-executed-smoke-rust-${{ github.run_attempt }}
           path: ${{ steps.reuse.outputs.bundle }}
           retention-days: 7
+      - name: Record byte-specific archive validation
+        if: always()
+        env:
+          ARCHIVE_PATH: browse/${{ matrix.target }}.tgz
+          CHECK: smoke-${{ matrix.target }}
+          OUTCOME: ${{ steps.smoke.outcome }}
+          REUSED: ${{ matrix.target == 'rust' && steps.reuse.outcome == 'success' && steps.reuse.outputs.hit == 'true' }}
+        run: &archive-validation |
+          if [ "${REUSED:-false}" = true ]; then OUTCOME=reused; fi
+          python3 scripts/ci-archive-evidence.py validation \
+            --archive "$ARCHIVE_PATH" --path "$ARCHIVE_PATH" --check "$CHECK" \
+            --outcome "$OUTCOME" --spinel-revision-file spinel-dist/revision.txt \
+            --out "ci-evidence/validation-$CHECK-$GITHUB_RUN_ATTEMPT.json"
+      - name: Save archive validation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-archive-validation-${{ matrix.target }}-${{ github.run_attempt }}
+          path: ci-evidence/*.json
 
   # spinel: the archive's README § Build AOT-compiles main.rb → build/blog
   # with the spinel toolchain (build-spinel artifact); § Test runs the
@@ -2237,8 +2242,8 @@ jobs:
   # spinel job — it tracks matz/spinel master UNPINNED. needs build-spinel
   # for the compiler and build-site for the published spinel.tgz.
   smoke-spinel:
-    needs: [build-site, build-spinel]
-    if: ${{ !cancelled() && needs.build-site.result == 'success' && needs.build-spinel.outputs.artifact-id != '' }}
+    needs: [build-site, build-spinel, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'smoke-spinel') && needs.build-site.result == 'success' && needs.build-spinel.outputs.artifact-id != '' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -2269,7 +2274,21 @@ jobs:
           npm install --no-audit --no-fund
           "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
       - name: scripts/smoke spinel
+        id: smoke
         run: scripts/smoke --tgz browse/spinel.tgz spinel
+      - name: Record byte-specific archive validation
+        if: always()
+        env:
+          ARCHIVE_PATH: browse/spinel.tgz
+          CHECK: smoke-spinel
+          OUTCOME: ${{ steps.smoke.outcome }}
+        run: *archive-validation
+      - name: Save archive validation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-archive-validation-spinel-${{ github.run_attempt }}
+          path: ci-evidence/*.json
       - *advisory-result
 
   # -------------------------------------------------------------------
@@ -2341,7 +2360,24 @@ jobs:
           tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
       - name: Build campfire/spinel.tgz + campfire/docker.tgz
         run: scripts/build-campfire-archive --out _site /tmp/campfire
+      - name: Record archive producer evidence
+        if: always()
+        env:
+          GROUP: campfire
+          OUTCOME: ${{ job.status }}
+        run: &archive-inventory |
+          python3 scripts/ci-archive-evidence.py inventory \
+            --group "$GROUP" --root _site --outcome "$OUTCOME" \
+            --spinel-revision-file spinel-dist/revision.txt \
+            --out "ci-evidence/inventory-$GROUP-$GITHUB_RUN_ATTEMPT.json"
+      - name: Save archive producer evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-archive-inventory-campfire-${{ github.run_attempt }}
+          path: ci-evidence/*.json
       - uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: campfire-archive
           path: _site/campfire/*.tgz
@@ -2354,17 +2390,20 @@ jobs:
   # read the sign-in page triggers -- is found. Advisory like every
   # spinel job.
   smoke-campfire-docker:
-    needs: [build-campfire-archive]
+    needs: [build-campfire-archive, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'smoke-campfire-docker') && needs.build-campfire-archive.result == 'success' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
     timeout-minutes: 30
     continue-on-error: true
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v8
         with:
           name: campfire-archive
           path: campfire
       - name: Build and run the image
+        id: smoke
         run: |
           set -euo pipefail
           if [ ! -f campfire/docker.tgz ]; then
@@ -2388,6 +2427,19 @@ jobs:
           docker logs campfire
           docker rm -f campfire >/dev/null
           [ "$root" = 302 ] && [ "$first" = 200 ] && [ "$logo" = 200 ]
+      - name: Record byte-specific archive validation
+        if: always()
+        env:
+          ARCHIVE_PATH: campfire/docker.tgz
+          CHECK: smoke-campfire-docker
+          OUTCOME: ${{ steps.smoke.outcome }}
+        run: *archive-validation
+      - name: Save archive validation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-archive-validation-campfire-docker-${{ github.run_attempt }}
+          path: ci-evidence/*.json
       - *advisory-result
 
   # smoke-campfire: the campfire archive runs its own README, exactly as
@@ -2407,8 +2459,8 @@ jobs:
   # rather than our regression. Read it job-by-job; a green RUN does not
   # mean this passed.
   smoke-campfire:
-    needs: [build-campfire-archive, build-spinel]
-    if: ${{ !cancelled() && needs.build-campfire-archive.result == 'success' && needs.build-spinel.outputs.artifact-id != '' }}
+    needs: [build-campfire-archive, build-spinel, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'smoke-campfire') && needs.build-campfire-archive.result == 'success' && needs.build-spinel.outputs.artifact-id != '' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -2441,7 +2493,21 @@ jobs:
           npm ci --no-audit --no-fund
           "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
       - name: scripts/smoke campfire
+        id: smoke
         run: scripts/smoke --tgz campfire/spinel.tgz campfire
+      - name: Record byte-specific archive validation
+        if: always()
+        env:
+          ARCHIVE_PATH: campfire/spinel.tgz
+          CHECK: smoke-campfire
+          OUTCOME: ${{ steps.smoke.outcome }}
+        run: *archive-validation
+      - name: Save archive validation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-archive-validation-campfire-${{ github.run_attempt }}
+          path: ci-evidence/*.json
       - *advisory-result
 
   # -------------------------------------------------------------------
@@ -2926,7 +2992,20 @@ jobs:
 
       # The per-target archives, for the e2e-<target> jobs to download and
       # boot — the exact bytes published to rubys.github.io/roundhouse.
+      - name: Record archive producer evidence
+        if: always()
+        env:
+          GROUP: browse
+          OUTCOME: ${{ job.status }}
+        run: *archive-inventory
+      - name: Save archive producer evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-archive-inventory-browse-${{ github.run_attempt }}
+          path: ci-evidence/*.json
       - name: Upload browse archives
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: browse-archives
@@ -2939,6 +3018,33 @@ jobs:
           name: site-base
           path: _site
 
+  # Report actual per-archive outcomes, including failed/unavailable advisory
+  # consumers. A report is not a passing validation or an execution receipt.
+  archive-results:
+    needs: [plan, build-site, build-campfire-archive, smoke, smoke-spinel, smoke-campfire, smoke-campfire-docker]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && contains(fromJSON(needs.plan.outputs.jobs), 'archive-results') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Collect this run's archive evidence
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ci-archive-*
+          path: ci-evidence
+      - name: Describe tested bytes without certifying missing evidence
+        env:
+          CI_PLAN: ${{ needs.plan.outputs.plan }}
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci-archive-evidence.py report --evidence-dir ci-evidence --out archive-report/archive-results.json
+      - name: Save archive outcome report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: archive-results
+          path: archive-report/archive-results.json
+
   # Publication only: PR smoke jobs consume browse-archives, not Pages.
   # Finish Pages assembly without keeping blog smoke jobs behind Campfire.
   assemble-site:
@@ -2950,8 +3056,8 @@ jobs:
     # where it is most useful would be exactly backwards. A missing
     # artifact degrades to a skipped render and a warning, not a broken
     # site build.
-    needs: [build-site, campfire-conformance, build-campfire-archive, plan]
-    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.build-site.result == 'success' }}
+    needs: [build-site, campfire-conformance, build-campfire-archive, archive-results, plan]
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.build-site.result == 'success' && needs.archive-results.result == 'success' }}
     outputs:
       ready: ${{ steps.ready.outputs.ready }}
     runs-on: ubuntu-latest
@@ -2967,6 +3073,11 @@ jobs:
           path: site-base
       - name: Restore the site
         run: mkdir -p _site && tar -xf site-base/artifact.tar -C _site
+      - name: Attach archive outcomes alongside the immutable downloads
+        uses: actions/download-artifact@v8
+        with:
+          name: archive-results
+          path: _site/ci
 
       # The campfire archive, built by the parallel build-campfire-archive
       # job. It lands AFTER `--site` because build_site() removes and
@@ -3028,6 +3139,10 @@ jobs:
             rmdir _site/bench 2>/dev/null || true
           fi
 
+      - name: Verify published archive bytes
+        # Verify the copied download bytes against their producer/test report.
+        # Failed validations may publish as repros; mismatched bytes may not.
+        run: python3 scripts/ci-archive-evidence.py verify --root _site --report _site/ci/archive-results.json
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
@@ -3055,7 +3170,7 @@ jobs:
           echo 'passed=true' >> "$GITHUB_OUTPUT"
 
   ci-required:
-    needs: [plan, generate-fixture, unit, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, writebook-inventory, build-spinel, framework-tests-spinel, build-campfire-compare-spinel, campfire-compare-spinel, campfire-db-differential-spinel, toolchain-spinel, compare-spinel, smoke-spinel, build-campfire-archive, smoke-campfire, smoke-campfire-docker, assemble-site]
+    needs: [plan, generate-fixture, unit, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, writebook-inventory, build-spinel, framework-tests-spinel, build-campfire-compare-spinel, campfire-compare-spinel, campfire-db-differential-spinel, toolchain-spinel, compare-spinel, smoke-spinel, build-campfire-archive, smoke-campfire, smoke-campfire-docker, archive-results, assemble-site]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

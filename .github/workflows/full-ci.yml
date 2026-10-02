@@ -25,10 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      run: ${{ github.event_name != 'schedule' || github.run_attempt != 1 || steps.lookup.outcome != 'success' || steps.lookup.outputs.cache-hit != 'true' }}
-      key: ${{ steps.inputs.outputs.key }}
       spinel: ${{ steps.inputs.outputs.spinel }}
-      known: ${{ steps.inputs.outputs.known }}
       publish: ${{ steps.inputs.outputs.publish }}
     steps:
       - name: Resolve the immutable inputs and publication boundary
@@ -44,35 +41,18 @@ jobs:
             test "$GITHUB_REF" = refs/heads/main
             publish=true
           fi
-          known=false
           spinel=$(gh api repos/matz/spinel/commits/master --jq .sha) || spinel=master
-          if [[ "$spinel" =~ ^[0-9a-f]{40}$ ]]; then known=true; else spinel=master; fi
+          if ! [[ "$spinel" =~ ^[0-9a-f]{40}$ ]]; then spinel=master; fi
           echo "spinel=$spinel" >> "$GITHUB_OUTPUT"
-          echo "known=$known" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
-          # Daily refresh also exercises floating Rails/SDK/runner inputs.
-          echo "key=full-ci-v1-$GITHUB_SHA-$spinel-$(date -u +%F)" >> "$GITHUB_OUTPUT"
-      - name: Look up a fully executed and published snapshot
-        id: lookup
-        if: github.event_name == 'schedule' && github.run_attempt == 1 && steps.inputs.outputs.known == 'true'
-        continue-on-error: true
-        uses: actions/cache/restore@v4
-        with:
-          path: .ci-full-completed
-          key: ${{ steps.inputs.outputs.key }}
-          lookup-only: true
-      - name: Report the scheduling decision
+      - name: Report fresh validation inputs
         env:
-          HIT: ${{ steps.lookup.outputs.cache-hit }}
-          LOOKUP: ${{ steps.lookup.outcome }}
           SPINEL: ${{ steps.inputs.outputs.spinel }}
-          EVENT: ${{ github.event_name }}
         run: |
-          printf 'Main/ref snapshot: `%s`\n\nSpinel: `%s`\n\nExact completion marker: `%s` (lookup `%s`). Only scheduled first attempts may skip; dispatches and reruns execute freshly.\n' "$GITHUB_SHA" "$SPINEL" "$HIT" "$LOOKUP" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Source snapshot: `%s`\n\nRequested Spinel: `%s`\n\nEvery cycle executes validation freshly, including floating Rails/package/system inputs. Actual Spinel revisions are recorded in the toolchain and archive evidence.\n' "$GITHUB_SHA" "$SPINEL" >> "$GITHUB_STEP_SUMMARY"
 
   validation:
     needs: preflight
-    if: needs.preflight.outputs.run == 'true'
     permissions:
       contents: read
       actions: read
@@ -108,20 +88,3 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
-
-  checkpoint:
-    needs: [preflight, validation, deploy]
-    if: ${{ !cancelled() && github.repository == 'rubys/roundhouse' && github.ref == 'refs/heads/main' && needs.preflight.outputs.known == 'true' && needs.preflight.outputs.publish == 'true' && needs.validation.result == 'success' && needs.validation.outputs.complete == 'true' && needs.deploy.result == 'success' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Mark only actual complete execution and successful publication
-        env:
-          KEY: ${{ needs.preflight.outputs.key }}
-        run: |
-          mkdir .ci-full-completed
-          printf '%s\n' "$KEY" > .ci-full-completed/inputs
-      - uses: actions/cache/save@v4
-        with:
-          path: .ci-full-completed
-          key: ${{ needs.preflight.outputs.key }}

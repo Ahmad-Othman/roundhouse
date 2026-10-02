@@ -31,7 +31,15 @@ BASE = [
     "campfire-conformance",
     "campfire-compare",
 ]
-SPINEL = [
+CORE = ["build-spinel", "toolchain-spinel", "compare-spinel"]
+SPINEL_TESTS = [
+    "framework_tests_spinel",
+    "spinel_web_push_crypto",
+    "spinel_db_lease",
+    "spinel_param_builder",
+    "rails_compat_vectors_spinel",
+]
+SPINEL11 = [
     "build-spinel",
     "framework-tests-spinel",
     "build-campfire-compare-spinel",
@@ -44,25 +52,41 @@ SPINEL = [
     "smoke-campfire",
     "smoke-campfire-docker",
 ]
-ADVISORY = set(SPINEL) - {"build-campfire-archive"}
+ADVISORY = set(SPINEL11) - {"build-campfire-archive"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 
 
 def select(paths, *, draft=False, full=False, publish=False):
     if draft:
         return finish(
-            BASE[:2], [], [], False, False, False, ["draft: fixture and unit only"]
+            BASE[:2],
+            [],
+            [],
+            False,
+            False,
+            False,
+            ["draft: fixture and unit only"],
+            spinel_tests=[],
         )
     targets, smoke = set(), set()
+    jobs_selected, spinel_tests = set(), set()
     wasm = site = spinel = writebook = False
     reasons = []
     for path in paths:
-        if path.startswith(".github/") or path in {
+        if path.startswith((".github/", ".cargo/")) or path in {
             "scripts/ci-plan.py",
+            "scripts/ci-reuse.py",
+            "scripts/ci-archive-evidence.py",
             "tests/ci_plan_test.py",
+            "tests/ci_archive_evidence_test.py",
             "tests/workflow_yaml_parses.rs",
             "src/project.rs",
             "src/bin/roundhouse.rs",
+            "Cargo.toml",
+            "Cargo.lock",
+            "build.rs",
+            "rust-toolchain.toml",
+            ".cargo/config.toml",
         }:
             full = True
             reasons.append(f"{path}: validation/packaging policy")
@@ -78,16 +102,45 @@ def select(paths, *, draft=False, full=False, publish=False):
             if test
             else None
         )
+        interpreter_only = path.startswith(
+            "runtime/spinel/scaffold/ruby_overlay/"
+        ) or path in {
+            "runtime/spinel/db_jruby.rb",
+            "runtime/spinel/markly_jruby.rb",
+            "runtime/spinel/db_cruby.rb",
+            "runtime/spinel/message_digest_cruby.rb",
+            "runtime/spinel/module_delegate.rb",
+        }
+        native_path = (
+            path.startswith(("runtime/ruby/", "runtime/spinel/", "src/emit/ruby/"))
+            or path == "src/emit/ruby.rs"
+        )
+        native_path |= path.startswith("tests/spinel") and path.endswith((".rs", ".rb"))
+        native_path |= path in {f"tests/{name}.rs" for name in SPINEL_TESTS}
+        if native_path and not interpreter_only:
+            spinel = True
+            jobs_selected.update(CORE)
+            reasons.append(f"{path}: native Spinel core")
+        if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):
+            spinel_tests.add("framework_tests_spinel")
         if target in TARGETS or target == "spinel":
             owners = (
                 {"ruby", "jruby", "spinel"}
                 if target in {"ruby", "spinel"} and not path.startswith("runtime/ruby/")
                 else {target}
             )
-            if path.startswith("runtime/ruby/"):
+            if (
+                path.startswith(("runtime/ruby/", "runtime/spinel/"))
+                or (path.startswith("tests/spinel") and path.endswith(".rs"))
+                or path in {f"tests/{name}.rs" for name in SPINEL_TESTS}
+            ):
+                owners = set()  # Native framework coverage; no interpreted archives.
+            if interpreter_only:
                 owners = (
-                    set()
-                )  # Shared runtime: the chosen compact floor, not all targets.
+                    {"jruby"}
+                    if path.endswith(("db_jruby.rb", "markly_jruby.rb"))
+                    else {"ruby", "jruby"}
+                )
             targets.update(owners - {"spinel"})
             smoke.update(owners - {"spinel"})
             spinel |= "spinel" in owners
@@ -108,7 +161,9 @@ def select(paths, *, draft=False, full=False, publish=False):
             reasons.append(f"{path}: WASM/browser compiler")
         if path.startswith(("site/", "docs/guide/")):
             site = wasm = True
-        if path.startswith("e2e/") or path in {
+        if (
+            path.startswith("e2e/") and not path.startswith("e2e/campfire/")
+        ) or path in {
             "scripts/smoke",
             "scripts/ci-playwright-install",
             "scripts/create-blog",
@@ -123,12 +178,121 @@ def select(paths, *, draft=False, full=False, publish=False):
         ):
             targets.update(TARGETS)
             spinel = True
-        if "spinel" in path and path.startswith(("tests/", "scripts/")):
+            jobs_selected.update(CORE)
+            if path.startswith("tests/framework_test_support"):
+                spinel_tests.add("framework_tests_spinel")
+        focused = re.fullmatch(
+            r"tests/(framework_tests_spinel|spinel_web_push_crypto|spinel_db_lease|spinel_param_builder|rails_compat_vectors_spinel)\.(?:rs|rb)",
+            path,
+        )
+        if focused:
             spinel = True
-        if path.startswith(
-            ("scripts/campfire-", "scripts/build-campfire", "e2e/campfire/")
+            jobs_selected.update(CORE)
+            spinel_tests.add(focused[1])
+        if (
+            path.startswith(("runtime/spinel/", "runtime/ruby/"))
+            and not interpreter_only
+        ):
+            name = path.rsplit("/", 1)[-1]
+            owned_tests = set()
+            if any(word in name for word in ("web_push", "base64")):
+                owned_tests.add("spinel_web_push_crypto")
+            if any(
+                word in name
+                for word in (
+                    "signed_cookie",
+                    "message_verifier",
+                    "signed_id",
+                    "message_digest",
+                    "base64",
+                )
+            ) or path.startswith("runtime/spinel/tep/url."):
+                owned_tests.add("rails_compat_vectors_spinel")
+            if any(
+                word in path
+                for word in ("/db", "sqlite", "active_support_time_parsing")
+            ):
+                owned_tests.add("spinel_db_lease")
+            if any(word in name for word in ("param", "multipart", "request")):
+                owned_tests.add("spinel_param_builder")
+            if (
+                path.startswith("runtime/spinel/")
+                and not path.startswith("runtime/spinel/scaffold/")
+                and not owned_tests
+            ):
+                owned_tests.add("framework_tests_spinel")
+            spinel_tests.update(owned_tests)
+        if (
+            path.startswith(("tests/rails_compat/", "tests/params_vectors/"))
+            or path == "tests/rails_compat_vectors.rb"
         ):
             spinel = True
+            jobs_selected.update(CORE)
+            spinel_tests.add(
+                "spinel_param_builder"
+                if path.startswith("tests/params_vectors/")
+                else "rails_compat_vectors_spinel"
+            )
+        if path.startswith("runtime/spinel/scaffold/") and not interpreter_only:
+            spinel = True
+            jobs_selected.update((*CORE, "smoke-spinel", "build-site"))
+        if path.startswith(
+            ("scripts/campfire-compare", "scripts/build-campfire-compare")
+        ):
+            spinel = True
+            jobs_selected.update(
+                (
+                    "build-spinel",
+                    "build-campfire-compare-spinel",
+                    "campfire-compare-spinel",
+                )
+            )
+        if path.startswith("scripts/campfire-db-differential"):
+            spinel = True
+            jobs_selected.update(("build-spinel", "campfire-db-differential-spinel"))
+        if (
+            path.startswith(
+                ("scripts/build-campfire-archive", "scripts/campfire-archive")
+            )
+            or path == "scripts/campfire-docker-files"
+        ):
+            spinel = True
+            jobs_selected.update(
+                (
+                    "build-spinel",
+                    "build-campfire-archive",
+                    "smoke-campfire",
+                    "smoke-campfire-docker",
+                )
+            )
+        if path.startswith("e2e/campfire/"):
+            spinel = True
+            jobs_selected.update(
+                (
+                    "build-spinel",
+                    "build-campfire-archive",
+                    "smoke-campfire",
+                    "smoke-campfire-docker",
+                )
+            )
+        if path in {"scripts/smoke", "scripts/ci-playwright-install"}:
+            jobs_selected.update(
+                (
+                    "smoke-spinel",
+                    "build-campfire-archive",
+                    "smoke-campfire",
+                    "smoke-campfire-docker",
+                )
+            )
+        if path.startswith("e2e/") and not path.startswith("e2e/campfire/"):
+            jobs_selected.update(
+                (
+                    "smoke-spinel",
+                    "build-campfire-archive",
+                    "smoke-campfire",
+                    "smoke-campfire-docker",
+                )
+            )
         if path in {"tests/writebook.rs", "tests/fixtures/writebook-inventory.json"}:
             writebook = True
     if full:
@@ -136,8 +300,10 @@ def select(paths, *, draft=False, full=False, publish=False):
         smoke.update(TARGETS)
         wasm = site = spinel = writebook = True
         reasons.append("full validation requested")
-    if site or spinel:
-        smoke.add("spinel") if spinel else None
+        jobs_selected.update(SPINEL11)
+        spinel_tests.update(SPINEL_TESTS)
+    if spinel:
+        jobs_selected.add("build-spinel")
     jobs = list(BASE)
     extra = [
         t
@@ -154,8 +320,15 @@ def select(paths, *, draft=False, full=False, publish=False):
         jobs.append("build-site")
     if smoke - {"spinel"}:
         jobs.append("smoke")
-    if spinel:
-        jobs.extend(SPINEL)
+    if spinel_tests:
+        jobs_selected.add("framework-tests-spinel")
+    if "smoke-spinel" in jobs_selected:
+        jobs_selected.add("build-site")
+    if "build-site" in jobs_selected and "build-site" not in jobs:
+        jobs.append("build-site")
+    if "build-site" in jobs or {"build-site", "build-campfire-archive"} & jobs_selected:
+        jobs_selected.add("archive-results")
+    jobs.extend(j for j in [*SPINEL11, "archive-results"] if j in jobs_selected)
     if writebook:
         jobs.append("writebook-inventory")
     if publish:
@@ -171,14 +344,17 @@ def select(paths, *, draft=False, full=False, publish=False):
         spinel,
         reasons,
         publish,
+        [t for t in SPINEL_TESTS if t in spinel_tests],
     )
 
 
-def finish(jobs, extra, smoke, wasm, site, spinel, reasons, publish=False):
+def finish(
+    jobs, extra, smoke, wasm, site, spinel, reasons, publish=False, spinel_tests=None
+):
     archives = (
         ["blog", "spinel", *TARGETS, "typescript-worker"]
         if site
-        else [*smoke, *(["spinel"] if spinel else [])]
+        else [*smoke, *(["spinel"] if "smoke-spinel" in jobs else [])]
     )
     return {
         "jobs": jobs,
@@ -189,6 +365,7 @@ def finish(jobs, extra, smoke, wasm, site, spinel, reasons, publish=False):
         "wasm": wasm,
         "site": site,
         "spinel": spinel,
+        "spinel_tests": spinel_tests or [],
         "publish": publish,
         "reasons": reasons,
     }
@@ -240,8 +417,7 @@ def check_results(plan, needs, *, compact=False):
         failures.append("plan: no successful routing decision")
     if not compact and needs.get("compact-required", {}).get("result") != "success":
         failures.append("compact-required: no successful baseline gate")
-    # Advisory work never blocks the gate, but failed/unavailable work is not
-    # a successful full-execution checkpoint for the next scheduled interval.
+    # Advisory work never blocks the gate, but incomplete work is not complete.
     complete = not failures and all(
         needs.get(j, {}).get("result") == "success"
         and (
@@ -322,7 +498,7 @@ def main():
         except subprocess.CalledProcessError:
             spinel = "master"
             plan["reasons"].append(
-                "Spinel lookup unavailable: fresh master build, no scheduler checkpoint"
+                "Spinel lookup unavailable: fresh master build; actual revision recorded by producer"
             )
     if spinel and spinel != "master" and not SHA.fullmatch(spinel):
         raise ValueError("invalid Spinel revision")
@@ -331,6 +507,7 @@ def main():
             "plan": plan,
             "jobs": plan["jobs"],
             "extra-compare": plan["extra_compare"],
+            "spinel-tests": plan["spinel_tests"],
             "smoke": plan["smoke"],
             "archives": ",".join(plan["archives"]),
             "wasm": plan["wasm"],
