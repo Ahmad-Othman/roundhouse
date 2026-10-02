@@ -1596,3 +1596,12 @@ end
         .run_test("test/models/article_nested_class_test.rb")
         .assert_passes();
 }
+
+#[test]
+fn multiple_erb_openers_execute_inside_an_output_block() {
+    on_the_index(emit_and_run::real_blog(), r#"<span class="multi-opener"><%= capture do %>
+<% [1, 2].each do |number|
+       unless number.nil? %><%= number %><% end %><% end %><% end %></span>"#,
+        "    assert_select \"span.multi-opener\", \"12\"\n")
+        .assert_passes();
+}
