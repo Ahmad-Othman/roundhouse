@@ -41,12 +41,14 @@ Roundhouse reads every `.rb` file recursively from these folders by default:
 - `test/helpers`
 - `test/channels`
 - `test/lib`
+- `test/unit`
+- `test/utils`
 
 The app root can contain a `roundhouse.yml` file that adds folders:
 
 ```yaml
 test_paths:
-  - test/unit
+  - test/custom
   - quality/specs
 ```
 
