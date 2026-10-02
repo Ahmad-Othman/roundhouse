@@ -29,8 +29,37 @@ plus anything `config/application.rb` adds to `config.autoload_paths`
 or `config.eager_load_paths`. `config.autoload_lib(ignore: %w[assets
 tasks])` is honored: a directory the app takes off its own load path
 is off the walk as well, which is where a RuboCop cop or a test-support
-tree under `app/` goes if you do not want it analyzed. Packwerk's
-`packs/*/app/*` layout is not walked yet.
+tree under `app/` goes if you do not want it analyzed.
+
+A Packwerk app (`packwerk.yml` or `packs.yml` at the root) contributes
+each selected package's `app/` and `lib/` trees.
+Roundhouse expands brace alternatives in `package_paths`, such as
+`"{,components,components/*/,components/*/*/}"`.
+
+Roundhouse also reads `PATH` entries from `Gemfile.lock`.
+These entries come from `path:` declarations in the Gemfile:
+
+```ruby
+gem "billing", path: "components/billing"
+```
+
+Each in-repository path gem contributes its `lib/` tree, even without
+an `app/` directory or a `Rails::Engine` subclass.
+An engine also contributes its `app/` tree when its `lib/` declares
+a `Rails::Engine` subclass.
+Roundhouse identifies that superclass from the Ruby syntax tree.
+It does not require a folder named `components`, `packs`, or `lib`.
+
+Roundhouse rejects paths outside the application and paths with parent-directory references.
+It accepts absolute paths inside the application.
+It excludes symbolic links throughout selected path gem trees.
+These rules also prevent linked engine declarations and directory cycles.
+
+When an app has multiple `app/` roots, `check` prints those roots.
+Roundhouse does not read an engine's own `config/routes.rb` yet.
+The host's `mount` of the engine remains a dropped route.
+When the host and an engine have the same view path, Roundhouse reads both views.
+The host does not yet replace the engine's view.
 
 One thing the walk carries that no emitted tree can: a class extending
 a Rails base the runtime does not port. `ApplicationMailbox <
