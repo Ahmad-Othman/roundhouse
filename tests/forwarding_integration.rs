@@ -353,6 +353,137 @@ fn synthesized_model_method_does_not_silently_replace_a_full_source_contract() {
 }
 
 #[test]
+fn inherited_full_model_contract_cannot_be_replaced_by_subclass_synthesis() {
+    for (name, partial_index, refused) in [
+        ("_conflict_predicate", false, false),
+        ("_conflict_predicate", true, true),
+        // The generated instance reader must not shadow a class contract.
+        ("title", true, false),
+    ] {
+        let method = format!("def self.{name}(...); 11; end");
+        let probe =
+            format!("class Probe; def self.run; kw={{factor:3}}; Article.{name}(7,**kw); end; end");
+        let native = Command::new("ruby").args(["-e", &format!(
+            "class ForwardingRecord; {method}; end; class Article < ForwardingRecord; end; {probe}; puts Probe.run"
+        )]).output().unwrap();
+        assert!(native.status.success());
+        assert_eq!(String::from_utf8_lossy(&native.stdout), "11\n");
+        let mut overlay = emit_and_run::real_blog()
+            .write("app/models/forwarding_record.rb", &format!("class ForwardingRecord < ApplicationRecord; self.abstract_class = true; {method}; end"))
+            .edit("app/models/article.rb", "class Article < ApplicationRecord", "class Article < ForwardingRecord")
+            .write("app/lib/probe.rb", &probe);
+        if partial_index {
+            overlay = overlay.edit(
+                "db/schema.rb",
+                "    t.string \"title\"",
+                "    t.string \"title\"\n    t.index [\"title\"], name: \"index_articles_live_title\", unique: true, where: \"(id > 0)\"",
+            );
+        }
+        let run = overlay.run_ruby("puts Probe.run");
+        if refused {
+            assert!(
+                run.errors
+                    .iter()
+                    .any(|e| e.contains("model method synthesis")),
+                "{:?}; {}",
+                run.errors,
+                run.stderr
+            );
+        } else {
+            run.assert_passes();
+            assert_eq!(run.stdout, "11\n");
+        }
+    }
+}
+
+#[test]
+fn full_mixin_forwarder_refuses_an_ordinary_destination_shadowed_by_model_synthesis() {
+    for (name, refused) in [("custom_title", false), ("title", true)] {
+        let api = format!(
+            "module TitleAPI; def relay(...); {name}(...); end; def {name}(a,b); 11; end; end"
+        );
+        let native = Command::new("ruby")
+            .args([
+                "-e",
+                &format!(
+                    "{api}; class Article; include TitleAPI; end; puts Article.new.relay(7,3)"
+                ),
+            ])
+            .output()
+            .unwrap();
+        assert!(native.status.success());
+        assert_eq!(String::from_utf8_lossy(&native.stdout), "11\n");
+        let run = emit_and_run::real_blog()
+            .write("app/lib/title_api.rb", &api)
+            .edit(
+                "app/models/article.rb",
+                "class Article < ApplicationRecord\n",
+                "class Article < ApplicationRecord\n include TitleAPI\n",
+            )
+            .write(
+                "app/lib/probe.rb",
+                "class Probe; def self.run; Article.new.relay(7,3); end; end",
+            )
+            .run_ruby("puts Probe.run");
+        if refused {
+            assert!(
+                run.errors
+                    .iter()
+                    .any(|e| e.contains("model method synthesis")
+                        || e.contains("unpreserved subclass contract")),
+                "{:?}; {}",
+                run.errors,
+                run.stderr
+            );
+        } else {
+            run.assert_passes();
+            assert_eq!(run.stdout, "11\n");
+        }
+    }
+}
+
+#[test]
+fn effective_ordinary_override_is_not_mistaken_for_an_inherited_full_collision() {
+    let parent = "class ForwardingRecord < ApplicationRecord; self.abstract_class = true; def self.title(...); 11; end; end";
+    let run = emit_and_run::real_blog()
+        .write("app/models/forwarding_record.rb", parent)
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ForwardingRecord\n def self.title(n); n+10; end\n",
+        )
+        .write(
+            "app/lib/probe.rb",
+            "class Probe; def self.run; Article.title(7); end; end",
+        )
+        .run_ruby("puts Probe.run");
+    run.assert_passes();
+    assert_eq!(run.stdout, "17\n");
+}
+
+#[test]
+fn inherited_ordinary_collisions_do_not_add_errors_without_packet_forwarding() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/lib/title_api.rb",
+            "module TitleAPI; def title(a,b); 11; end; end",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n include TitleAPI\n",
+        )
+        // Activate the survey, but do not forward to the ordinary collision.
+        .write(
+            "app/lib/probe.rb",
+            "class Probe; def self.unrelated(...); 41; end; end",
+        )
+        .run_ruby("puts 'loaded'");
+    run.assert_passes();
+    assert_eq!(run.stdout, "loaded\n");
+}
+
+#[test]
 fn check_surveys_effective_model_declarations_without_lowering_or_diagnostic_leaks() {
     use roundhouse::analyze::{diagnose, Analyzer};
     use roundhouse::diagnostic::{Diagnostic, Severity};

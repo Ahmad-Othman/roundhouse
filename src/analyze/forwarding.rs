@@ -16,7 +16,6 @@ use crate::ty::Ty;
 pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let contracts = SourceContractIndex::new(app);
-    let unretained = crate::lower::model_to_library::unretained_full_model_methods(app);
     let scoped = if app
         .models
         .iter()
@@ -56,7 +55,7 @@ pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
                         .any(|d| &d.model == owner && d.method == method.name))
             {
                 Some("full forwarding cannot use the relation-threading argument ABI")
-            } else if unretained.contains(&(owner.clone(), method.name_span)) {
+            } else if contracts.unretained.contains(&method.name_span) {
                 Some("model method synthesis does not preserve this source declaration")
             } else {
                 None
@@ -266,6 +265,9 @@ fn contract_error(
     if let Some(error) = declaration_error(resolved) {
         return Some(error);
     }
+    if contracts.unretained.contains(&resolved.0.name_span) {
+        return Some("model method synthesis does not preserve this source declaration");
+    }
     // A self-send in a base method dispatches on the actual subclass.
     // Verify reachable overrides too, not merely the lexical base's method.
     let candidates = match virtual_destinations(contracts, context, call) {
@@ -273,7 +275,9 @@ fn contract_error(
         Err(reason) => return Some(reason),
     };
     for candidate in candidates {
-        if declaration_error(candidate).is_some() {
+        if declaration_error(candidate).is_some()
+            || contracts.unretained.contains(&candidate.0.name_span)
+        {
             return Some("forwarding self-dispatch may reach an unpreserved subclass contract");
         }
     }
@@ -553,6 +557,7 @@ struct SourceContractIndex<'a> {
     class: HashMap<(ClassId, Symbol), (&'a MethodDef, bool)>,
     virtual_owners: Vec<&'a ClassId>,
     full_selectors: HashSet<Symbol>,
+    unretained: HashSet<Span>,
 }
 
 impl<'a> SourceContractIndex<'a> {
@@ -565,6 +570,7 @@ impl<'a> SourceContractIndex<'a> {
             class: HashMap::new(),
             virtual_owners: Vec::new(),
             full_selectors: HashSet::new(),
+            unretained: HashSet::new(),
         };
         let mut class_owners = HashSet::new();
         for class in classes(app) {
@@ -607,6 +613,23 @@ impl<'a> SourceContractIndex<'a> {
                 .filter(|(_, method)| method.params.iter().any(|p| p.forwarding))
                 .map(|(_, method)| method.name.clone()),
         );
+        if !index.full_selectors.is_empty() {
+            let names: HashSet<_> = index.instance.keys().chain(index.class.keys())
+                .map(|(_, name)| name.clone()).collect();
+            index.unretained = crate::lower::model_to_library::unretained_model_contracts(app, |model| {
+                let mut inherited = Vec::new();
+                for name in &names {
+                    for receiver in [MethodReceiver::Instance, MethodReceiver::Class] {
+                        if let Some((method, _)) = index.declaration(
+                            &model.name, name, receiver, &mut HashSet::new(),
+                        ) && !model.methods().any(|own| std::ptr::eq(own, method)) {
+                            inherited.push(method);
+                        }
+                    }
+                }
+                inherited
+            });
+        }
         index
     }
 
