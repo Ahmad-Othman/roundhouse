@@ -208,16 +208,25 @@ pub(super) fn class_name_path(class: &ruby_prism::ClassNode<'_>) -> Option<Vec<S
 pub(super) fn find_all_modules_with_scope<'pr>(
     node: &Node<'pr>,
 ) -> Vec<(Vec<String>, ruby_prism::ModuleNode<'pr>)> {
+    find_all_module_declarations_with_scope(node)
+        .into_iter()
+        .filter(|(_, module)| module_has_direct_def(module))
+        .collect()
+}
+
+/// Every source module declaration, including effect-only reopenings that
+/// do not produce library IR but can change a Concern's framework identity.
+pub(super) fn find_all_module_declarations_with_scope<'pr>(
+    node: &Node<'pr>,
+) -> Vec<(Vec<String>, ruby_prism::ModuleNode<'pr>)> {
     let mut out = Vec::new();
     collect_modules(node, &[], &mut |scope, m| {
-        if module_has_direct_def(&m) {
-            out.push((scope.to_vec(), m));
-        }
+        out.push((scope.to_vec(), m));
     });
     out
 }
 
-pub(super) fn collect_modules<'pr, F: FnMut(&[String], ruby_prism::ModuleNode<'pr>)>(
+fn collect_modules<'pr, F: FnMut(&[String], ruby_prism::ModuleNode<'pr>)>(
     node: &Node<'pr>,
     scope: &[String],
     out: &mut F,

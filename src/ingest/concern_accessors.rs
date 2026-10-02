@@ -156,7 +156,7 @@ fn validate_activation(app: &mut App, spans: &HashSet<crate::span::Span>) -> Ing
     use std::collections::BTreeMap;
     use super::util::{class_name_path, constant_id_str, constant_path_of,
         constant_path_is_rooted,
-        collect_modules, find_all_classes_with_scope, flatten_statements,
+        find_all_module_declarations_with_scope, find_all_classes_with_scope, flatten_statements,
         module_name_path};
     use crate::span::{FileId, Span};
 
@@ -181,16 +181,12 @@ fn validate_activation(app: &mut App, spans: &HashSet<crate::span::Span>) -> Ing
     for (index, source) in app.sources.iter().enumerate().filter(|(_, s)| s.path.ends_with(".rb")) {
         let parsed = ruby_prism::parse(source.text.as_bytes());
         let root = parsed.node();
-        let mut bodies: Vec<_> = find_all_classes_with_scope(&root).into_iter()
+        let bodies = find_all_classes_with_scope(&root).into_iter()
             .filter_map(|(scope, class)| Some((scope, class_name_path(&class)?, class.body()?, false)))
-            .collect();
+            .chain(find_all_module_declarations_with_scope(&root).into_iter()
+                .filter_map(|(scope, module)| Some((scope, module_name_path(&module)?, module.body()?, true))));
         // Even include-only wrappers omitted from emission carry dependency
         // edges. Keep the existing LibraryClass classification unchanged.
-        collect_modules(&root, &[], &mut |scope, module| {
-            if let (Some(name), Some(body)) = (module_name_path(&module), module.body()) {
-                bodies.push((scope.to_vec(), name, body, true));
-            }
-        });
         for (mut scope, name, body, is_module) in bodies {
             scope.extend(name);
             let owner = crate::ClassId(Symbol::from(scope.join("::")));

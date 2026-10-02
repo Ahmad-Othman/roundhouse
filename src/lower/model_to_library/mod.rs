@@ -513,6 +513,7 @@ fn model_class(model: &Model, methods: Vec<MethodDef>, table: Option<&Table>) ->
         origin: None,
         constants: collect_model_constants(model),
         unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
     }
 }
 
