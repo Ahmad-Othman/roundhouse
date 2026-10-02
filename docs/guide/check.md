@@ -56,11 +56,19 @@ It excludes symbolic links throughout selected path gem trees.
 These rules also prevent linked engine declarations and directory cycles.
 
 When an app has multiple `app/` roots, `check` prints those roots.
-The roots are view paths in that order, the app's own first: a template
-the app has under the same name and format as an engine's shadows it,
-as it does in Rails.
+The app's own templates shadow engine or package templates with the
+same name and format, as in Rails. Other roots are sorted by path;
+their relative precedence is a deterministic approximation, not Rails'
+engine load order. Collisions between non-host roots therefore need
+manual checking.
 Roundhouse does not read an engine's own `config/routes.rb` yet.
 The host's `mount` of the engine remains a dropped route.
+
+Routed templates without an explicit controller method participate in
+the shared callback dispatcher. The separate Rails-to-Roda converter
+does not implement that dispatcher: template-only routes on a
+callback-bearing controller or ancestor remain fail-closed with a 501
+and a `ROUNDHOUSE-TODO`, even if callbacks are scoped or skipped.
 
 One thing the walk carries that no emitted tree can: a class extending
 a Rails base the runtime does not port. `ApplicationMailbox <

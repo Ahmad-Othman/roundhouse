@@ -79,7 +79,10 @@ pub fn ingest_app(dir: &Path) -> IngestResult<App> {
             format!("{} is not a directory", dir.display()),
         )));
     }
-    ingest_app_with_vfs(&FsVfs::new(), dir)
+    // Absolute lockfile remotes must resolve identically whether the CLI
+    // names this app by a relative path or an absolute one.
+    let dir = dir.canonicalize()?;
+    ingest_app_with_vfs(&FsVfs::new(), &dir)
 }
 
 /// Ingest a Rails app from an in-memory `path → bytes` tree. Path keys
@@ -1197,8 +1200,9 @@ end
         }
     }
 
-    // The roots are Rails' view paths, the app's own first. A template
-    // an earlier root has under the same name and format shadows a later
+    // Host templates take precedence, as in Rails. Other roots are
+    // sorted by path; their relative order is not Rails engine load order.
+    // A template an earlier root has under the same name and format shadows a later
     // root's: `app/views/layouts/application.html.erb` is what renders,
     // and an engine's copy of it never does. Keyed on name and format,
     // not the file, so an `.erb` override shadows a `.haml` original;
@@ -2018,40 +2022,6 @@ fn splice_concern_class_methods_into_includers(
     app.concern_spliced_class_methods = spliced;
 }
 
-/// Splice a controller concern's surface into every controller that
-/// includes it: the `included do` filters join the filter chain, and the
-/// module's instance methods become private methods of the controller.
-///
-/// Rails does this with `include` at class-definition time. Nothing in
-/// the emitted trees can: the ruby-family targets would need Ruby's own
-/// mixin semantics (which strict targets have no equivalent for), and
-/// the filter chain is built at LOWERING time from `Controller::filters`
-/// — a concern's filters were invisible to it. campfire's
-/// ApplicationController is nothing BUT
-/// `include AllowBrowser, Authentication, …`, so it emitted as an empty
-/// class: no `before_action :require_authentication`, no
-/// `restore_authentication` to call, every action running
-/// unauthenticated.
-///
-/// Splicing (rather than emitting `include`) is the same choice the
-/// model side already made, and for the same reason: it lands once, in
-/// the IR, for all thirteen targets.
-///
-/// Closes transitively — `Authentication` includes `SessionLookup`, and
-/// `find_session_by_cookie` has to arrive with it. A name the controller
-/// (or an earlier concern) already defines wins, matching Ruby's
-/// ancestor order.
-///
-/// A copied body carries its module's lexical scope with it, so a bare
-/// constant reference is qualified on the way in: lobsters'
-/// `IntervalHelper#time_interval` reads `TIME_INTERVALS`, which under
-/// Ruby resolves against the module the `def` was written in and, once
-/// spliced, resolves against the CONTROLLER — `uninitialized constant
-/// HomeController::TIME_INTERVALS`, ten of the twenty-six benchmark
-/// routes. The constant stays where it was defined (the module still
-/// emits) and the reference becomes `IntervalHelper::TIME_INTERVALS`,
-/// which is what Ruby's lexical lookup means and what every strict
-/// target can resolve.
 /// A routed action with a template and no method behind it gets the
 /// empty method Rails behaves as if it had.
 ///
@@ -2142,6 +2112,40 @@ fn synthesize_template_only_actions(app: &mut App) {
     }
 }
 
+/// Splice a controller concern's surface into every controller that
+/// includes it: the `included do` filters join the filter chain, and the
+/// module's instance methods become private methods of the controller.
+///
+/// Rails does this with `include` at class-definition time. Nothing in
+/// the emitted trees can: the ruby-family targets would need Ruby's own
+/// mixin semantics (which strict targets have no equivalent for), and
+/// the filter chain is built at LOWERING time from `Controller::filters`
+/// — a concern's filters were invisible to it. campfire's
+/// ApplicationController is nothing BUT
+/// `include AllowBrowser, Authentication, …`, so it emitted as an empty
+/// class: no `before_action :require_authentication`, no
+/// `restore_authentication` to call, every action running
+/// unauthenticated.
+///
+/// Splicing (rather than emitting `include`) is the same choice the
+/// model side already made, and for the same reason: it lands once, in
+/// the IR, for all thirteen targets.
+///
+/// Closes transitively — `Authentication` includes `SessionLookup`, and
+/// `find_session_by_cookie` has to arrive with it. A name the controller
+/// (or an earlier concern) already defines wins, matching Ruby's
+/// ancestor order.
+///
+/// A copied body carries its module's lexical scope with it, so a bare
+/// constant reference is qualified on the way in: lobsters'
+/// `IntervalHelper#time_interval` reads `TIME_INTERVALS`, which under
+/// Ruby resolves against the module the `def` was written in and, once
+/// spliced, resolves against the CONTROLLER — `uninitialized constant
+/// HomeController::TIME_INTERVALS`, ten of the twenty-six benchmark
+/// routes. The constant stays where it was defined (the module still
+/// emits) and the reference becomes `IntervalHelper::TIME_INTERVALS`,
+/// which is what Ruby's lexical lookup means and what every strict
+/// target can resolve.
 fn splice_concerns_into_controllers(app: &mut App) {
     use crate::dialect::{Action, ControllerBodyItem, MethodReceiver, RenderTarget};
     use crate::ty::{Row, Ty};

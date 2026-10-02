@@ -106,3 +106,72 @@ fn an_action_a_parent_controller_defines_is_not_written_again() {
     assert!(found.is_empty(), "{found:#?}");
     assert!(actions_of(&app, "Admin::NotesController").is_empty());
 }
+
+fn template_only_roda_app(callback: &str) -> roundhouse::App {
+    let parent = format!(
+        "class ApplicationController < ActionController::Base\n  {callback}\n  private\n  def require_login\n    head :unauthorized\n  end\nend\n"
+    );
+    let extra = [
+        ("app/controllers/application_controller.rb", parent.as_str()),
+        ("app/controllers/notes_controller.rb", "class NotesController < ApplicationController\nend\n"),
+        ("app/controllers/public_controller.rb", "class PublicController < ActionController::Base\nend\n"),
+        ("app/views/notes/show.html.erb", "<p>PRIVATE CONTENT</p>\n"),
+        ("app/views/public/show.html.erb", "<p>PUBLIC CONTENT</p>\n"),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get '/notes/:id', to: 'notes#show'\n  get '/public/:id', to: 'public#show'\nend\n"),
+    ];
+    let tree = BASE.iter().chain(&extra)
+        .map(|(p, c)| (PathBuf::from(*p), c.as_bytes().to_vec()))
+        .collect();
+    ingest_app_from_tree(tree).expect("ingest template-only Roda app")
+}
+
+#[test]
+fn roda_template_only_actions_do_not_silently_drop_inherited_callbacks() {
+    for callback in [
+        "before_action :require_login, only: :show",
+        "before_action { head :unauthorized }",
+        "around_action :require_login",
+        "around_action { head :unauthorized }",
+        "after_action :require_login",
+        "skip_before_action :require_login",
+        "skip_around_action :require_login",
+        "skip_after_action :require_login",
+    ] {
+        let app = template_only_roda_app(callback);
+        let files = roundhouse::emit::roda::emit(&app);
+        let source = &files.iter().find(|f| f.path == PathBuf::from("app.rb")).unwrap().content;
+        assert!(source.contains("template-only action callbacks are not converted"), "{callback}: {source}");
+    }
+    let files = roundhouse::emit::roda::emit(&template_only_roda_app(""));
+    let source = &files.iter().find(|f| f.path == PathBuf::from("app.rb")).unwrap().content;
+    assert!(!source.contains("template-only action callbacks are not converted"), "{source}");
+}
+
+#[test]
+#[ignore = "requires the real Roda, Sequel, sqlite3 and render gems"]
+fn roda_template_only_protected_request_fails_closed() {
+    let app = template_only_roda_app("before_action :require_login, only: :show");
+    let scratch = std::env::temp_dir().join(format!("roundhouse-template-only-roda-{}", std::process::id()));
+    for file in roundhouse::emit::roda::emit(&app) {
+        let path = scratch.join(file.path);
+        std::fs::create_dir_all(path.parent().unwrap()).expect("create output parent");
+        std::fs::write(path, file.content).expect("write Roda output");
+    }
+    let output = std::process::Command::new("ruby")
+        .args(["-e", r#"require './app'
+require 'rack/mock'
+requests = Rack::MockRequest.new(App.freeze.app)
+protected = requests.get('/notes/1')
+raise "protected route answered #{protected.status}" unless protected.status == 501
+raise 'private content leaked' if protected.body.include?('PRIVATE CONTENT')
+public_page = requests.get('/public/1')
+raise "public control answered #{public_page.status}" unless public_page.status == 200
+raise 'public control did not render' unless public_page.body.include?('PUBLIC CONTENT')
+puts 'protected=501, private content absent; public control=200'
+"#])
+        .current_dir(&scratch)
+        .output()
+        .expect("execute emitted Roda app");
+    std::fs::remove_dir_all(&scratch).expect("remove Roda output");
+    assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}

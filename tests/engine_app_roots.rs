@@ -346,4 +346,36 @@ mod on_disk {
         assert!(app.controllers.iter().any(|c| c.name.0.as_str() == "InvoicesController"));
         std::fs::remove_dir_all(root).expect("remove temp app");
     }
+
+    #[test]
+    fn absolute_remote_is_independent_of_the_app_argument_spelling() {
+        let root = PathBuf::from("target").join(format!(
+            "engine_relative_root_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let host = root.join("host");
+        std::fs::create_dir_all(&host).expect("create host");
+        let absolute_host = host.canonicalize().expect("absolute host");
+        let lock = format!(
+            "{}{}",
+            lockfile(&absolute_host.join("components/billing").display().to_string()),
+            lockfile(&absolute_host.parent().unwrap().join("outside").display().to_string())
+        );
+        write(&host, &[
+            ("Gemfile.lock", &lock),
+            ("app/controllers/application_controller.rb", APPLICATION_CONTROLLER),
+            ("components/billing/lib/billing/engine.rb", ENGINE),
+            ("components/billing/lib/local.rb", "class Local\nend\n"),
+            ("components/billing/app/controllers/invoices_controller.rb", INVOICES_CONTROLLER),
+        ]);
+        write(&root, &[("outside/lib/foreign.rb", "class Foreign\nend\n")]);
+
+        let app = ingest_app(&host).expect("ingest relative host");
+        assert_eq!(app.app_roots, vec!["app", "components/billing/app"]);
+        assert!(app.controllers.iter().any(|c| c.name.0.as_str() == "InvoicesController"));
+        assert!(app.library_classes.iter().any(|c| c.name.0.as_str() == "Local"));
+        assert!(!app.library_classes.iter().any(|c| c.name.0.as_str() == "Foreign"));
+        std::fs::remove_dir_all(root).expect("remove temp app");
+    }
 }
