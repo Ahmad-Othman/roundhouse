@@ -3091,3 +3091,56 @@ end
         )
         .assert_passes();
 }
+
+/// A concern split in two, mixed into more than one controller: the
+/// inner module calls a method only its includers have (through the
+/// outer one). With several includers `self` in the inner module is the
+/// module, the bare call fell to `untyped`, and so did everything read
+/// from it — the Rails authentication generator's `Current.user` shape.
+#[test]
+fn a_concern_calls_a_method_every_includer_gets_from_a_sibling() {
+    emit_and_run::real_blog()
+        .write(
+            "app/controllers/concerns/featuring.rb",
+            r#"module Featuring
+  extend ActiveSupport::Concern
+
+  def featured_title
+    featured_article&.title
+  end
+end
+"#,
+        )
+        .write(
+            "app/controllers/concerns/browsing.rb",
+            r#"module Browsing
+  extend ActiveSupport::Concern
+
+  include Featuring
+
+  private
+
+  def featured_article
+    Article.order(:id).first
+  end
+end
+"#,
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "class ArticlesController < ApplicationController\n",
+            "class ArticlesController < ApplicationController\n  include Browsing\n",
+        )
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "class CommentsController < ApplicationController\n",
+            "class CommentsController < ApplicationController\n  include Browsing\n",
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n",
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n    @featured = featured_title.to_s.upcase\n",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}

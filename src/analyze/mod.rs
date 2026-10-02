@@ -95,6 +95,10 @@ pub struct Analyzer {
     /// from "a copy the fold wrote last iteration" (overwritten so each
     /// fixpoint round's refinement of the module's returns propagates).
     concern_folded: HashMap<ClassId, (BTreeSet<Symbol>, BTreeSet<Symbol>)>,
+    /// Method names the host fold copied onto each MODULE from its
+    /// includers (see `fold_host_surfaces`). Kept out of what the
+    /// concern fold copies back down, and rewritten every round.
+    host_folded: HashMap<ClassId, BTreeSet<Symbol>>,
     /// Methods whose body ends in `.inquiry` — the evidence
     /// [`inquiry::is_inquiry_predicate`] needs to answer
     /// `content_type.attachment?` as Bool on a `Str` receiver.
@@ -785,6 +789,7 @@ impl Analyzer {
             inferred_params: HashMap::new(),
             adapter,
             concern_folded: HashMap::new(),
+            host_folded: HashMap::new(),
             refined_action_bindings: HashMap::new(),
             inquirers: inquiry::inquirer_methods(app),
             const_resolver: app.const_resolver.for_sources(&app.sources),
@@ -2352,6 +2357,7 @@ impl Analyzer {
                     }
                 }
             }
+
         }
         // Flush Phase B's refinements. Later rounds of the whole-program
         // fixpoint read them back through `layer` above, which is what
@@ -2816,7 +2822,7 @@ impl Analyzer {
                     reseeded.insert(name, seeded);
                 }
                 let reseeded_ctx = Ctx {
-                    self_ty: Some(Ty::Class { id: lc_name.clone(), args: vec![] }),
+                    self_ty: class_ctx.self_ty.clone(),
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
                     constants: Default::default(), annotate_self_dispatch: false, in_view: false,
@@ -3434,6 +3440,7 @@ impl Analyzer {
 
         self.harvest_block_value_methods(app);
         self.fold_concern_surfaces(app);
+        self.fold_host_surfaces(app);
         self.fold_current_attribute_forwarders(app);
     }
 
@@ -3542,14 +3549,14 @@ impl Analyzer {
             .filter(|lc| lc.is_module)
             .filter_map(|lc| {
                 let cls = self.classes.get(&lc.name)?;
-                Some((
-                    lc.name.clone(),
-                    (
-                        cls.instance_methods.clone(),
-                        cls.class_methods.clone(),
-                        cls.includes.clone(),
-                    ),
-                ))
+                // What the host fold lent the module is the includers'
+                // own surface; copying it back down would only hand an
+                // includer a stale answer about itself.
+                let mut inst = cls.instance_methods.clone();
+                if let Some(lent) = self.host_folded.get(&lc.name) {
+                    inst.retain(|name, _| !lent.contains(name));
+                }
+                Some((lc.name.clone(), (inst, cls.class_methods.clone(), cls.includes.clone())))
             })
             .collect();
         if module_surfaces.is_empty() {
@@ -3594,6 +3601,101 @@ impl Analyzer {
                     cls.class_methods.insert(name.clone(), ty.clone());
                     folded.1.insert(name.clone());
                 }
+            }
+        }
+    }
+
+    /// Host fold: the other direction of `fold_concern_surfaces`. A
+    /// concern's methods run on its includer, so a bare call in one
+    /// (`resume_session` in `Impersonation`) may name a method the
+    /// module never defines — the includer does, or a sibling concern
+    /// the includer also mixes in. With ONE includer the module's
+    /// bodies are typed with that class as `self` and the call resolves
+    /// there. With several, `self` stays the module (a union `self` is
+    /// a poly cliff on every send) and the call fell to `untyped`,
+    /// which then spread: Rails' authentication concern split across
+    /// two modules left `current_user` as `User | untyped` in every
+    /// controller that read it.
+    ///
+    /// So lend the module the answer when there is exactly one: a name
+    /// the module's bodies call on implicit `self`, that the module
+    /// does not define, and that EVERY includer resolves to the same
+    /// type. Includers that disagree, or one that lacks the method,
+    /// leave the call as it was. Runs after the concern fold, so an
+    /// includer's surface already carries its other concerns' methods.
+    fn fold_host_surfaces(&mut self, app: &App) {
+        let modules: BTreeSet<&ClassId> =
+            app.library_classes.iter().filter(|lc| lc.is_module).map(|lc| &lc.name).collect();
+        if modules.is_empty() {
+            return;
+        }
+        // Module → the non-module classes that include it, transitively.
+        let mut hosts: HashMap<ClassId, BTreeSet<ClassId>> = HashMap::new();
+        for (id, cls) in &self.classes {
+            if modules.contains(id) || cls.includes.is_empty() {
+                continue;
+            }
+            let mut queue = cls.includes.clone();
+            let mut seen: BTreeSet<ClassId> = queue.iter().cloned().collect();
+            let mut qi = 0;
+            while qi < queue.len() {
+                let m = queue[qi].clone();
+                qi += 1;
+                if modules.contains(&m) {
+                    hosts.entry(m.clone()).or_default().insert(id.clone());
+                }
+                for n in self.classes.get(&m).map(|c| c.includes.as_slice()).unwrap_or_default() {
+                    if seen.insert(n.clone()) {
+                        queue.push(n.clone());
+                    }
+                }
+            }
+        }
+
+        fn bare_calls(e: &Expr, out: &mut BTreeSet<Symbol>) {
+            if let ExprNode::Send { recv: None, method, .. } = &*e.node {
+                out.insert(method.clone());
+            }
+            e.node.for_each_child(&mut |c| bare_calls(c, out));
+        }
+
+        for lc in app.library_classes.iter().filter(|lc| lc.is_module) {
+            let lent_before = self.host_folded.remove(&lc.name).unwrap_or_default();
+            let mut lent = BTreeSet::new();
+            let mut agreed: Vec<(Symbol, Ty)> = Vec::new();
+            // A sole includer is `self` in the module's bodies already.
+            if let Some(hosts) = hosts.get(&lc.name).filter(|h| h.len() > 1) {
+                let mut called = BTreeSet::new();
+                for method in &lc.methods {
+                    bare_calls(&method.body, &mut called);
+                }
+                let own = self.classes.get(&lc.name);
+                for name in called {
+                    if own.is_some_and(|c| c.instance_methods.contains_key(&name))
+                        && !lent_before.contains(&name)
+                    {
+                        continue; // the module's own answer
+                    }
+                    let mut answers = hosts.iter().map(|h| {
+                        self.classes.get(h).and_then(|c| c.instance_methods.get(&name))
+                    });
+                    let Some(Some(first)) = answers.next() else { continue };
+                    if first.is_unknown() || !answers.all(|a| a == Some(first)) {
+                        continue;
+                    }
+                    agreed.push((name, first.clone()));
+                }
+            }
+            let cls = self.classes.entry(lc.name.clone()).or_default();
+            for name in &lent_before {
+                cls.instance_methods.remove(name);
+            }
+            for (name, ty) in agreed {
+                cls.instance_methods.insert(name.clone(), ty);
+                lent.insert(name);
+            }
+            if !lent.is_empty() {
+                self.host_folded.insert(lc.name.clone(), lent);
             }
         }
     }
