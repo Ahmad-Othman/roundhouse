@@ -207,6 +207,43 @@ fn a_file_directly_in_the_engine_app_is_still_ingested_once() {
     }
 }
 
+/// (i) The app's template shadows an engine's of the same name and
+/// format, as Rails' view paths resolve it: the app's own `app/views`
+/// comes first. Another format of the same name is a different
+/// template and is kept.
+#[test]
+fn an_app_template_shadows_the_engines_copy() {
+    let lock = lockfile("lib/billing");
+    let app = tree_app(&[
+        ("Gemfile.lock", &lock),
+        ("db/schema.rb", SCHEMA),
+        ("app/models/application_record.rb", APPLICATION_RECORD),
+        ("app/controllers/application_controller.rb", APPLICATION_CONTROLLER),
+        ("app/views/invoices/index.html.erb", "<p>HOST COPY</p>\n"),
+        ("lib/billing/lib/billing/engine.rb", ENGINE),
+        ("lib/billing/app/models/invoice.rb", INVOICE_MODEL),
+        ("lib/billing/app/controllers/invoices_controller.rb", INVOICES_CONTROLLER),
+        ("lib/billing/app/views/invoices/index.html.erb", "<p>ENGINE COPY</p>\n"),
+        ("lib/billing/app/views/invoices/index.text.erb", "ENGINE TEXT\n"),
+        ("lib/billing/app/views/invoices/show.html.erb", "<p>ENGINE SHOW</p>\n"),
+    ]);
+
+    let rendered = |name: &str, format: &str| -> Vec<String> {
+        app.views
+            .iter()
+            .filter(|v| v.name.as_str() == name && v.format.as_str() == format)
+            .map(|v| format!("{:?}", v.body))
+            .collect()
+    };
+    let index = rendered("invoices/index", "html");
+    assert_eq!(index.len(), 1, "one invoices/index.html, not two");
+    assert!(index[0].contains("HOST COPY") && !index[0].contains("ENGINE COPY"), "{index:?}");
+    // Not shadowed: a format the app does not override, and a template
+    // only the engine has.
+    assert_eq!(rendered("invoices/index", "text").len(), 1);
+    assert_eq!(rendered("invoices/show", "html").len(), 1);
+}
+
 #[cfg(unix)]
 mod on_disk {
     use super::*;

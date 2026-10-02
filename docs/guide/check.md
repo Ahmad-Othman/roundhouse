@@ -37,7 +37,9 @@ the same way, and so does a Rails engine kept in the app's own tree: a
 `path:` gem in `Gemfile.lock` (`gem "billing", path: "lib/billing"`)
 that has an `app/` directory and a `Rails::Engine` subclass under its
 `lib/`. When there is more than one, `check` prints the roots it
-walked. An engine's own `config/routes.rb` is not read yet, so the
+walked. The roots are view paths in that order, the app's own first: a
+template the app has under the same name and format as an engine's
+shadows it, as it does in Rails. An engine's own `config/routes.rb` is not read yet, so the
 host's `mount` of it is still a dropped route.
 
 One thing the walk carries that no emitted tree can: a class extending

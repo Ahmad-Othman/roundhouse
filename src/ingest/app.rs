@@ -1196,7 +1196,21 @@ end
         }
     }
 
-    for root in &roots {
+    // The roots are Rails' view paths, the app's own first. A template
+    // an earlier root has under the same name and format shadows a later
+    // root's: `app/views/layouts/application.html.erb` is what renders,
+    // and an engine's copy of it never does. Keyed on name and format,
+    // not the file, so an `.erb` override shadows a `.haml` original;
+    // another FORMAT of the same name is a different template and stays.
+    // Only across roots — within one, nothing changes.
+    let mut view_owner: HashMap<(Symbol, Symbol), usize> = HashMap::new();
+    for (root_index, root) in roots.iter().enumerate() {
+        let mut keep = |view: &crate::dialect::View| {
+            let owner = *view_owner
+                .entry((view.name.clone(), view.format.clone()))
+                .or_insert(root_index);
+            owner == root_index
+        };
         let views_dir = dir.join(root).join("views");
         if !vfs.is_dir(&views_dir) {
             continue;
@@ -1226,7 +1240,9 @@ end
                 &erb_path.display().to_string(),
                 engine.compile_fn(),
             ))? {
-                app.views.push(view);
+                if keep(&view) {
+                    app.views.push(view);
+                }
             }
         }
 
@@ -1244,7 +1260,9 @@ end
                 rel,
                 &jb_path.display().to_string(),
             ))? {
-                app.views.push(view);
+                if keep(&view) {
+                    app.views.push(view);
+                }
             }
         }
     }
