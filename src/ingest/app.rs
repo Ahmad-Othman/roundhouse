@@ -1540,7 +1540,6 @@ end
     app.root = dir.display().to_string().trim_end_matches('/').to_string();
 
     resolve_polymorphic_targets(&mut app);
-    inherit_enums(&mut app.models);
     // Before the splice: it (and every later consumer) looks concerns up
     // by ClassId, so the lexical-scope resolution has to have happened.
     qualify_relative_model_includes(&mut app);
@@ -1550,7 +1549,8 @@ end
     super::thread_mattr::lower_thread_mattr(&mut app);
     // Alba declarations become ordinary property-reading methods before
     // inference; validate complete original resource bodies, not just IR.
-    super::alba::lower_alba_resources(&mut app, &sources)?;
+    // Rejected declarations still fail ingest, but survey must ledger them.
+    super::alba::lower_alba_resources(&mut app, &sources).inspect_err(survey::record)?;
     // After it, not before: `Current`'s own `delegate` reads an
     // ATTRIBUTE's ivar, which that pass has the declarations for. What
     // reaches here is the general shape, whose target is a method.
@@ -1604,6 +1604,9 @@ end
     // are resolved to their literal here.
     app.content_helper_allowed_attributes = content_helper_attribute_additions(vfs, dir, &app);
     fold_concern_enums_into_models(&mut app, &concern_enums);
+    // Include each base's Concern maps, and retain a child's own maps
+    // (direct or Concern-declared) before filling inherited columns.
+    inherit_enums(&mut app.models);
     // Last: needs every model's complete `enums` table, including the
     // columns an included concern declared.
     map_enum_labels(&mut app);
@@ -4213,8 +4216,8 @@ const FRAMEWORK_CONFIG_KEYS: &[&str] = &[
 /// it — the same discipline `extract_config_assignments` draws below.
 /// `ActiveSupport::DateFormats` is a SEPARATE registry whose strings
 /// differ for the same names (`:number` is `"%Y%m%d"` there against
-/// `"%Y%m%d%H%M%S"` here), so it is deliberately not folded in: our
-/// `Ty::Time` covers Date and DateTime too, and sharing one table would
+/// `"%Y%m%d%H%M%S"` here), so it is deliberately not folded in:
+/// Date's format registry is not modeled, and sharing Time's table would
 /// render a full timestamp where Rails renders eight digits.
 fn extract_time_formats(source: &[u8], file: &str) -> Vec<(String, TimeFormatSource)> {
     let result = super::prism::parse(source, file);
