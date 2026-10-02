@@ -404,6 +404,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "TypeError", "NameError", "NoMethodError", "IndexError",
         "KeyError", "RangeError", "IOError", "NotImplementedError",
         "FrozenError", "ZeroDivisionError", "StopIteration",
+        // Both CRuby's bundled libraries and Spinel's uri/net packages
+        // define these exception classes; emitted requires load them.
+        "URI::InvalidURIError", "Net::OpenTimeout", "Net::ReadTimeout",
     ] {
         register_stdlib_class(classes, exc, &[], &[
             ("message", Ty::Str),
@@ -500,6 +503,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("escape", Ty::Str), ("unescape", Ty::Str),
         ("encode_www_form", Ty::Str), ("decode_www_form", Ty::Untyped),
     ], &[]);
+    // A class test such as `URI.parse(url).is_a?(URI::HTTP)` names the
+    // real bundled class, without claiming any extra instance methods.
+    register_stdlib_class(classes, "URI::HTTP", &[], &[]);
     // `Set` is a value type: `Set.new` yields `Class { Set }` (via the
     // universal `.new`), then these instance methods dispatch on it.
     // Mutators return the receiver (self) for chaining; element-typed

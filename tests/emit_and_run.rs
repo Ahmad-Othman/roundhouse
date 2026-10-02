@@ -1797,6 +1797,53 @@ raise "GET /widgets answered #{status}" unless status == 204
         .assert_passes();
 }
 
+#[test]
+fn bundled_uri_and_http_exception_constants_run() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/services/http_constant_probe.rb",
+            r#"class HttpConstantProbe
+  def self.http?(url)
+    URI.parse(url).is_a?(URI::HTTP)
+  end
+
+  def self.invalid_uri
+    begin
+      URI.parse("https://bad host/")
+    rescue URI::InvalidURIError
+      "invalid"
+    end
+  end
+
+  def self.timeout(kind)
+    begin
+      if kind == "open"
+        raise Net::OpenTimeout
+      else
+        raise Net::ReadTimeout
+      end
+    rescue Net::OpenTimeout
+      "open"
+    rescue Net::ReadTimeout
+      "read"
+    end
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"raise unless HttpConstantProbe.http?("https://example.test/")
+raise if HttpConstantProbe.http?("ftp://example.test/")
+raise unless HttpConstantProbe.invalid_uri == "invalid"
+raise unless HttpConstantProbe.timeout("open") == "open"
+raise unless HttpConstantProbe.timeout("read") == "read"
+"#,
+        );
+    let probe = std::fs::read_to_string(run.emitted.join("app/models/http_constant_probe.rb")).unwrap();
+    assert!(probe.lines().any(|line| line == "require \"uri\""), "{probe}");
+    run.assert_passes();
+}
+
 /// Not `user || raise NotFound` (a syntax error) or `a && self.x = v && b` (assigns `v && b`): a command or a method assignment as an `&&`/`||` operand keeps its parentheses.
 #[test]
 fn a_command_operand_of_a_boolean_operator_keeps_its_parentheses() {
