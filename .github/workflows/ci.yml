@@ -43,6 +43,9 @@ jobs:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -52,15 +55,24 @@ jobs:
           curl -fsSL "https://codeload.github.com/basecamp/writebook/tar.gz/${WRITEBOOK_SHA}" -o /tmp/writebook.tar.gz
           mkdir /tmp/writebook
           tar -xzf /tmp/writebook.tar.gz -C /tmp/writebook --strip-components=1
+      - name: Look for an identical successful PR execution
+        id: reuse
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-reuse.py probe --job writebook-inventory --input /tmp/writebook
       - name: Build Roundhouse and run inventory
+        id: inventory
+        if: steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
         env:
           WRITEBOOK_ROOT: /tmp/writebook
           WRITEBOOK_INVENTORY_REPORT: writebook-inventory-current.json
         run: |
-          cargo build --release --bin roundhouse
-          cargo test --test writebook --release -- --ignored --nocapture
+          cargo build --locked --release --bin roundhouse
+          cargo test --locked --test writebook --release -- --ignored --nocapture
       - name: Save complete check report
-        if: always()
+        id: report
+        if: always() && (steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true')
         env:
           WRITEBOOK_ROOT: /tmp/writebook
         run: |
@@ -85,6 +97,20 @@ jobs:
             writebook-check.txt
             writebook-inventory-current.json
             tests/fixtures/writebook-inventory.json
+      - name: Record actual successful execution
+        id: execution
+        if: success() && steps.reuse.outputs.eligible == 'true' && steps.inventory.outcome == 'success' && steps.report.outcome == 'success'
+        continue-on-error: true
+        run: python3 scripts/ci-reuse.py record --job writebook-inventory --outcome '${{ steps.inventory.outcome }}' --outcome '${{ steps.report.outcome }}'
+      - name: Save execution receipt and reports
+        if: success() && steps.execution.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-executed-writebook-inventory-${{ github.run_attempt }}
+          path: ${{ steps.reuse.outputs.bundle }}
+          retention-days: 7
+          if-no-files-found: error
 
   # -------------------------------------------------------------------
   # Generate the real-blog fixture once, upload as artifact. Every
@@ -142,6 +168,9 @@ jobs:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -153,13 +182,37 @@ jobs:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      - name: Look for an identical successful PR execution
+        id: reuse
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-reuse.py probe --job store-check --input fixtures/store
       - name: cargo build
-        run: cargo build --release --bin roundhouse
+        id: build
+        if: steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
+        run: cargo build --locked --release --bin roundhouse
       - name: The analyzer reports no errors, no warnings and no ingest gaps on the store
+        id: check
+        if: steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
         run: |
           set -euo pipefail
           target/release/roundhouse check --continue fixtures/store 2>&1 | tee /tmp/store-check.txt
           grep -E "^roundhouse-check: .* 0 error\(s\), 0 warning\(s\), 0 gap-attributed note\(s\), 0 survey gap\(s\)" /tmp/store-check.txt
+      - name: Record actual successful execution
+        id: execution
+        if: success() && steps.reuse.outputs.eligible == 'true' && steps.build.outcome == 'success' && steps.check.outcome == 'success'
+        continue-on-error: true
+        run: python3 scripts/ci-reuse.py record --job store-check --outcome '${{ steps.build.outcome }}' --outcome '${{ steps.check.outcome }}'
+      - name: Save execution receipt
+        if: success() && steps.execution.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-executed-store-check-${{ github.run_attempt }}
+          path: ${{ steps.reuse.outputs.bundle }}
+          retention-days: 7
+          if-no-files-found: error
 
   # -------------------------------------------------------------------
   # Build the in-browser compiler wasm (roundhouse_wasm.wasm) from source

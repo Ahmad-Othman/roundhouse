@@ -481,3 +481,88 @@ fn spinel_model_differential_does_not_wait_for_the_gc_comparison_build() {
             .all(|step| step["run"].as_str() != Some(command))
     );
 }
+
+#[test]
+fn pr_reuse_never_masks_validation_failures_or_changes_the_job_graph() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let jobs = ci["jobs"].as_mapping().unwrap();
+    let mut enabled = Vec::new();
+    for (name, job) in jobs {
+        let name = name.as_str().unwrap();
+        let steps = job["steps"].as_sequence().unwrap();
+        let Some(probe) = steps
+            .iter()
+            .find(|step| step["id"].as_str() == Some("reuse"))
+        else {
+            continue;
+        };
+        enabled.push(name);
+        assert_eq!(job["permissions"]["actions"].as_str(), Some("read"));
+        assert_eq!(probe["continue-on-error"].as_bool(), Some(true));
+        assert!(
+            probe["run"]
+                .as_str()
+                .unwrap()
+                .contains("scripts/ci-reuse.py probe")
+        );
+        assert!(job.get("continue-on-error").is_none());
+        let validation_ids = match name {
+            "store-check" => {
+                assert_eq!(job["needs"][0].as_str(), Some("generate-fixture"));
+                assert_eq!(job["needs"][1].as_str(), Some("unit"));
+                ["build", "check"]
+            }
+            "writebook-inventory" => {
+                assert_eq!(job["needs"].as_str(), Some("unit"));
+                ["inventory", "report"]
+            }
+            _ => panic!("unaudited reuse job: {name}"),
+        };
+        for id in validation_ids {
+            let step = steps
+                .iter()
+                .find(|step| step["id"].as_str() == Some(id))
+                .unwrap();
+            assert!(step.get("continue-on-error").is_none());
+            let guard = step["if"].as_str().unwrap();
+            assert!(
+                guard.contains(
+                    "steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'"
+                )
+            );
+        }
+        let receipt = steps
+            .iter()
+            .find(|step| step["id"].as_str() == Some("execution"))
+            .unwrap();
+        for id in validation_ids {
+            assert!(
+                receipt["if"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("steps.{id}.outcome == 'success'"))
+            );
+        }
+        assert_eq!(receipt["continue-on-error"].as_bool(), Some(true));
+    }
+    enabled.sort();
+    assert_eq!(enabled, ["store-check", "writebook-inventory"]);
+    assert!(ci["on"].get("pull_request_target").is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn pr_reuse_receipts_are_checked_against_adversarial_inputs() {
+    let result = std::process::Command::new("python3")
+        .args(["tests/ci_reuse_test.py", "-v"])
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .expect("CI reuse tests require python3 (available on hosted runners)");
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
