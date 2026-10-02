@@ -3,9 +3,10 @@
 //! as an app-layer root, the way Rails adds an engine's `app/*` to the
 //! host's autoload and view paths. See `engine_app_roots` in
 //! `src/ingest/app.rs`; this pins discovery from `Gemfile.lock`'s
-//! `PATH` sources and the three shapes that must NOT become a root: a
-//! path gem with no engine class, one outside the app's tree, and an
-//! engine-shaped directory the lockfile does not name.
+//! `PATH` sources and the shapes that must NOT become a root: a path
+//! gem with no engine class, one outside the app's tree, one whose
+//! `app/` is a symbolic link, and an engine-shaped directory the
+//! lockfile does not name.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -155,5 +156,121 @@ fn path_sources_outside_the_tree_or_at_its_root_add_nothing() {
             ("lib/billing/engine.rb", ENGINE),
         ]);
         assert_eq!(app.app_roots, vec!["app".to_string()], "remote: {remote}");
+    }
+}
+
+/// (e) `Rails::Engine` is matched as a whole constant: a class named
+/// with that prefix is not an engine.
+#[test]
+fn a_superclass_that_only_starts_with_rails_engine_is_not_an_engine() {
+    for parent in ["Rails::EngineStub", "Rails::Engine::Configuration"] {
+        let lock = lockfile("lib/billing");
+        let source = format!("module Billing\n  class Engine < {parent}\n  end\nend\n");
+        let app = tree_app(&[
+            ("Gemfile.lock", &lock),
+            ("db/schema.rb", SCHEMA),
+            ("app/models/application_record.rb", APPLICATION_RECORD),
+            ("lib/billing/lib/billing/engine.rb", &source),
+            ("lib/billing/app/controllers/invoices_controller.rb", INVOICES_CONTROLLER),
+        ]);
+        assert_eq!(app.app_roots, vec!["app".to_string()], "superclass: {parent}");
+    }
+}
+
+/// (f) A Ruby file directly in the engine's `app/` has no layer pass
+/// of its own, so the root `lib/` walk that reaches it keeps it.
+#[test]
+fn a_file_directly_in_the_engine_app_is_still_ingested_once() {
+    let lock = lockfile("lib/billing");
+    let app = tree_app(&[
+        ("Gemfile.lock", &lock),
+        ("db/schema.rb", SCHEMA),
+        ("app/models/application_record.rb", APPLICATION_RECORD),
+        ("lib/billing/lib/billing/engine.rb", ENGINE),
+        ("lib/billing/app/entry.rb", "class Entry\n  def self.call\n    1\n  end\nend\n"),
+        ("lib/billing/app/services/invoice_totals.rb", INVOICE_TOTALS),
+    ]);
+
+    assert_eq!(app.app_roots, vec!["app".to_string(), "lib/billing/app".to_string()]);
+    let library_names: Vec<&str> = app.library_classes.iter().map(|c| c.name.0.as_str()).collect();
+    for name in ["Entry", "InvoiceTotals"] {
+        assert_eq!(
+            library_names.iter().filter(|n| **n == name).count(),
+            1,
+            "{name} should be ingested exactly once: {library_names:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+mod on_disk {
+    use super::*;
+    use roundhouse::ingest::ingest_app;
+    use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_tmp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "roundhouse_{name}_{}_{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        // `/var` → `/private/var` on macOS: the app's own path must
+        // not itself contain a link.
+        dir.canonicalize().expect("canonicalize temp dir")
+    }
+
+    fn write(root: &Path, files: &[(&str, &str)]) {
+        for (path, content) in files {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).expect("create parent");
+            std::fs::write(path, content).expect("write file");
+        }
+    }
+
+    /// (g) An engine whose `app/` is a symbolic link is not a root:
+    /// following it would walk a tree outside the app.
+    #[test]
+    fn engine_with_a_linked_app_directory_is_not_a_root() {
+        let root = unique_tmp_dir("engine_linked_app");
+        let app_root = root.join("host");
+        let lock = lockfile("lib/billing");
+        write(&app_root, &[
+            ("Gemfile.lock", &lock),
+            ("db/schema.rb", SCHEMA),
+            ("app/models/application_record.rb", APPLICATION_RECORD),
+            ("lib/billing/lib/billing/engine.rb", ENGINE),
+        ]);
+        write(&root, &[("outside/controllers/invoices_controller.rb", INVOICES_CONTROLLER)]);
+        std::os::unix::fs::symlink(root.join("outside"), app_root.join("lib/billing/app"))
+            .expect("link the engine app directory");
+
+        let app = ingest_app(&app_root).expect("ingest app");
+        assert_eq!(app.app_roots, vec!["app".to_string()]);
+        assert!(!app.controllers.iter().any(|c| c.name.0.as_str() == "InvoicesController"));
+        std::fs::remove_dir_all(root).expect("remove temp app");
+    }
+
+    /// (h) An absolute `remote:` that names a directory inside the app
+    /// is the same engine as its relative spelling.
+    #[test]
+    fn absolute_remote_inside_the_app_is_a_root() {
+        let root = unique_tmp_dir("engine_absolute_remote");
+        let app_root = root.join("host");
+        let lock = lockfile(&app_root.join("lib/billing").display().to_string());
+        write(&app_root, &[
+            ("Gemfile.lock", &lock),
+            ("db/schema.rb", SCHEMA),
+            ("app/models/application_record.rb", APPLICATION_RECORD),
+            ("app/controllers/application_controller.rb", APPLICATION_CONTROLLER),
+            ("lib/billing/lib/billing/engine.rb", ENGINE),
+            ("lib/billing/app/controllers/invoices_controller.rb", INVOICES_CONTROLLER),
+        ]);
+
+        let app = ingest_app(&app_root).expect("ingest app");
+        assert_eq!(app.app_roots, vec!["app".to_string(), "lib/billing/app".to_string()]);
+        assert!(app.controllers.iter().any(|c| c.name.0.as_str() == "InvoicesController"));
+        std::fs::remove_dir_all(root).expect("remove temp app");
     }
 }

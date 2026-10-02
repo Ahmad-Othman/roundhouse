@@ -521,10 +521,20 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // initializer explicitly requires is app code after all.
     // Support roots can nest: an engine at `lib/billing` puts
     // `lib/billing/app` and `lib/billing/lib` under the root `lib`.
-    // A file under another app root belongs to that root's own passes
-    // (its `models`/`controllers`/… walks, and one support root per
-    // remaining layer), and a file two support roots both reach is
-    // ingested by the first.
+    // A file in a layer of another app root belongs to that root's own
+    // passes (its `models`/`controllers`/… walks, and one support root
+    // per remaining layer), and a file two support roots both reach is
+    // ingested by the first. A file directly in `lib/billing/app`, or
+    // under its `assets`/`javascript`, has no pass of its own there and
+    // stays with the walk that reached it.
+    let in_nested_layer = |entry: &Path, root: &Path| {
+        entry.strip_prefix(root).is_ok_and(|rel| {
+            let mut components = rel.components();
+            let layer = components.next();
+            components.next().is_some()
+                && !layer.is_some_and(|c| c.as_os_str() == "assets" || c.as_os_str() == "javascript")
+        })
+    };
     let nested_app_roots: Vec<PathBuf> = roots.iter().skip(1).map(|root| dir.join(root)).collect();
     let mut support_seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for sub in support_roots(vfs, dir, &roots, &lib_ignores) {
@@ -540,7 +550,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             }
             if nested_app_roots
                 .iter()
-                .any(|root| entry.starts_with(root) && !support_dir.starts_with(root))
+                .any(|root| in_nested_layer(&entry, root) && !support_dir.starts_with(root))
             {
                 continue;
             }
@@ -3886,9 +3896,14 @@ pub(super) fn app_roots<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
 fn engine_app_roots<V: Vfs + ?Sized>(vfs: &V, dir: &Path, roots: &mut Vec<PathBuf>) {
     let Ok(lock) = vfs.read_to_string(&dir.join("Gemfile.lock")) else { return };
     for remote in crate::gems::lock_path_remotes(&lock) {
+        // An absolute remote (the Gemfile gave an absolute path) that
+        // names a directory under `dir` is the same engine spelled the
+        // long way.
+        let remote = Path::new(&remote);
+        let remote = remote.strip_prefix(dir).unwrap_or(remote);
         let mut rel = PathBuf::new();
         let mut inside = true;
-        for component in Path::new(&remote).components() {
+        for component in remote.components() {
             match component {
                 Component::CurDir => {}
                 Component::Normal(part) => rel.push(part),
@@ -3901,7 +3916,8 @@ fn engine_app_roots<V: Vfs + ?Sized>(vfs: &V, dir: &Path, roots: &mut Vec<PathBu
             continue;
         }
         let engine_dir = dir.join(&rel);
-        if path_has_symlink_component(vfs, dir, &engine_dir)
+        // `app` included: a linked `app/` would walk someone else's tree.
+        if path_has_symlink_component(vfs, dir, &engine_dir.join("app"))
             || !vfs.is_dir(&engine_dir.join("app"))
             || !declares_rails_engine(vfs, &engine_dir.join("lib"))
         {
@@ -3922,10 +3938,18 @@ fn declares_rails_engine<V: Vfs + ?Sized>(vfs: &V, lib_dir: &Path) -> bool {
         vfs.read_to_string(file).is_ok_and(|source| {
             source.lines().any(|line| {
                 let line = line.trim_start();
+                // The whole constant: `Rails::EngineStub` and
+                // `Rails::Engine::Configuration` are other classes.
                 line.starts_with("class ")
-                    && line
-                        .split_once('<')
-                        .is_some_and(|(_, parent)| parent.trim().trim_start_matches("::").starts_with("Rails::Engine"))
+                    && line.split_once('<').is_some_and(|(_, parent)| {
+                        parent
+                            .trim()
+                            .trim_start_matches("::")
+                            .strip_prefix("Rails::Engine")
+                            .is_some_and(|rest| {
+                                !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == ':')
+                            })
+                    })
             })
         })
     })
