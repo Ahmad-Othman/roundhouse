@@ -149,6 +149,141 @@ fn unconsumed_included_hook(model: &crate::dialect::Model, app: &App) -> Option<
     None
 }
 
+/// The model splice supplies only direct inclusions. Refuse other activated
+/// candidates instead of emitting a clean program without their accessors.
+/// Concern-to-Concern dependencies defer execution; plain modules do not.
+fn validate_activation(app: &mut App, spans: &HashSet<crate::span::Span>) -> IngestResult<()> {
+    use std::collections::BTreeMap;
+    use super::util::{class_name_path, constant_id_str, constant_path_of,
+        constant_path_is_rooted,
+        collect_modules, find_all_classes_with_scope, flatten_statements,
+        module_name_path};
+    use crate::span::{FileId, Span};
+
+    if spans.is_empty() {
+        return Ok(());
+    }
+    let resolver = app.const_resolver.for_sources(&app.sources);
+    let mut includes = BTreeMap::<crate::ClassId, Vec<crate::ClassId>>::new();
+    let mut deferred = HashSet::new();
+    let mut modules = HashSet::new();
+    let retained: HashSet<_> = app.library_classes.iter().map(|c| &c.name)
+        .chain(app.models.iter().map(|m| &m.name))
+        .chain(app.controllers.iter().map(|c| &c.name))
+        .chain(app.test_modules.iter().map(|t| &t.name))
+        .cloned()
+        // Test ingest retains inner classes under file-local names; the
+        // source resolver correctly addresses their enclosing test class.
+        .chain(app.test_modules.iter().flat_map(|t| t.inner_classes.iter().map(|c| {
+            crate::ClassId(Symbol::from(format!("{}::{}", t.name.0, c.name.0)))
+        })))
+        .collect();
+    for (index, source) in app.sources.iter().enumerate().filter(|(_, s)| s.path.ends_with(".rb")) {
+        let parsed = ruby_prism::parse(source.text.as_bytes());
+        let root = parsed.node();
+        let mut bodies: Vec<_> = find_all_classes_with_scope(&root).into_iter()
+            .filter_map(|(scope, class)| Some((scope, class_name_path(&class)?, class.body()?, false)))
+            .collect();
+        // Even include-only wrappers omitted from emission carry dependency
+        // edges. Keep the existing LibraryClass classification unchanged.
+        collect_modules(&root, &[], &mut |scope, module| {
+            if let (Some(name), Some(body)) = (module_name_path(&module), module.body()) {
+                bodies.push((scope.to_vec(), name, body, true));
+            }
+        });
+        for (mut scope, name, body, is_module) in bodies {
+            scope.extend(name);
+            let owner = crate::ClassId(Symbol::from(scope.join("::")));
+            if is_module {
+                modules.insert(owner.clone());
+            }
+            let edges = includes.entry(owner.clone()).or_default();
+            for statement in flatten_statements(body) {
+                let Some(call) = statement.as_call_node() else { continue };
+                if call.receiver().is_some() || call.block().is_some() {
+                    continue;
+                }
+                let name = call.name();
+                let name = constant_id_str(&name);
+                if !matches!(name, "include" | "extend") {
+                    continue;
+                }
+                let Some(args) = call.arguments() else { continue };
+                for arg in args.arguments().iter() {
+                    let Some(path) = constant_path_of(&arg) else { continue };
+                    if name == "extend" {
+                        if is_module && path == ["ActiveSupport", "Concern"] {
+                            deferred.insert(owner.clone());
+                        }
+                    } else {
+                        let span = Span {
+                            file: FileId((index + 1) as u32),
+                            start: arg.location().start_offset() as u32,
+                            end: arg.location().end_offset() as u32,
+                        };
+                        let path: Vec<_> = path.into_iter().map(Symbol::from).collect();
+                        if arg.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p)) {
+                            // An explicit root names the exact namespace. Rubydex
+                            // does not retain a name-only reference for `::X`.
+                            edges.push(crate::ClassId(Symbol::from(path.iter()
+                                .map(Symbol::as_str).collect::<Vec<_>>().join("::"))));
+                        } else if let Some(id) = resolver.namespace(span, &path) {
+                            edges.push(id.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (owner, direct) in &includes {
+        // A survey source refusal already diagnosed an omitted class.
+        if deferred.contains(owner) || (!retained.contains(owner) && !modules.contains(owner)) {
+            continue;
+        }
+        let mut model = app.models.iter_mut().find(|m| &m.name == owner);
+        if let Some(model) = model.as_mut() {
+            for item in &mut model.body {
+                let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+                if spans.contains(&expr.span) && !direct.iter().any(|id| {
+                    app.concern_model_items.get(id).is_some_and(|items| items.iter().any(|item| {
+                        matches!(item, ModelBodyItem::Unknown { expr: original, .. } if original.span == expr.span)
+                    }))
+                }) {
+                    // The legacy splice can select an unqualified namesake.
+                    // Do not turn that mismatch into a new accessor contract.
+                    decline(item, "is not supplied by a source-resolved direct include");
+                }
+            }
+        }
+        let mut pending = direct.clone();
+        let mut seen = HashSet::new();
+        let mut reported = HashSet::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(items) = app.concern_model_items.get(&id) {
+                for item in items.iter().filter(|item| is_candidate(item)) {
+                    let ModelBodyItem::Unknown { expr, .. } = item else { unreachable!() };
+                    let supplied = direct.contains(&id) && model.as_ref().is_some_and(|m| m.body.iter().any(|item| {
+                        matches!(item, ModelBodyItem::Unknown { expr: carried, .. } if carried.span == expr.span)
+                    }));
+                    if !supplied && reported.insert(expr.span) {
+                        unwrap_or_record::<()>(Err(IngestError::Unsupported {
+                            file: app.sources[(expr.span.file.0 - 1) as usize].path.clone(),
+                            message: format!("concern attr_accessor on {}: only direct model inclusion is supported", owner.0),
+                        }))?;
+                    }
+                }
+            }
+            if let Some(nested) = includes.get(&id) {
+                pending.extend(nested.iter().cloned());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Ask the canonical synthesizers about occupied methods/storage,
 /// rather than maintaining another DSL collision list.
 pub(super) fn validate(app: &mut App) -> IngestResult<()> {
@@ -171,6 +306,7 @@ pub(super) fn validate(app: &mut App) -> IngestResult<()> {
             Some(expr.span)
         })
         .collect();
+    validate_activation(app, &spans)?;
     let candidates: HashSet<_> = app
         .models
         .iter()
@@ -196,7 +332,6 @@ pub(super) fn validate(app: &mut App) -> IngestResult<()> {
         };
         let occupied = surfaces[&model.name].as_ref();
         let hook = unconsumed_included_hook(model, app);
-        let mut nonpublic = false;
         let mut nonpublic_methods = HashSet::new();
         for item in &model.body {
             match item {
@@ -222,24 +357,20 @@ pub(super) fn validate(app: &mut App) -> IngestResult<()> {
                             .is_none_or(|recv| matches!(&*recv.node, ExprNode::SelfRef))
                             && matches!(method.as_str(), "private" | "protected" | "public")
                         {
-                            if args.is_empty() {
-                                nonpublic = method.as_str() != "public";
-                            } else {
-                                for arg in args {
-                                    let name = match &*arg.node {
-                                        ExprNode::Lit {
-                                            value: Literal::Sym { value },
-                                        } => value.clone(),
-                                        ExprNode::Lit {
-                                            value: Literal::Str { value },
-                                        } => Symbol::from(value.as_str()),
-                                        _ => continue,
-                                    };
-                                    if method.as_str() == "public" {
-                                        nonpublic_methods.remove(&name);
-                                    } else {
-                                        nonpublic_methods.insert(name);
-                                    }
+                            for arg in args {
+                                let name = match &*arg.node {
+                                    ExprNode::Lit {
+                                        value: Literal::Sym { value },
+                                    } => value.clone(),
+                                    ExprNode::Lit {
+                                        value: Literal::Str { value },
+                                    } => Symbol::from(value.as_str()),
+                                    _ => continue,
+                                };
+                                if method.as_str() == "public" {
+                                    nonpublic_methods.remove(&name);
+                                } else {
+                                    nonpublic_methods.insert(name);
                                 }
                             }
                         }
@@ -248,7 +379,7 @@ pub(super) fn validate(app: &mut App) -> IngestResult<()> {
                 ModelBodyItem::Method { method, .. }
                     if method.receiver == MethodReceiver::Instance =>
                 {
-                    if nonpublic {
+                    if method.visibility != crate::dialect::MethodVisibility::Public {
                         nonpublic_methods.insert(method.name.clone());
                     } else {
                         nonpublic_methods.remove(&method.name);

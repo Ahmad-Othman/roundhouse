@@ -8,13 +8,17 @@ use super::emit_and_run;
 fn concern_model_virtual_accessors_run() {
     emit_and_run::real_blog()
         .write(
+            "app/models/concerns/dormant.rb",
+            "module Dormant\n  extend ActiveSupport::Concern\n  included { private; attr_accessor :scratch }\nend\n",
+        )
+        .write(
             "app/models/concerns/draft_state.rb",
             "module DraftState\n  extend ActiveSupport::Concern\n  included do\n    attr_accessor :scratch, :flag, :reader_override, :writer_override\n    nil\n    false\n    42\n    :inert\n    \"inert\"\n  end\n  class_methods do\n    def ordered\n      order(:id)\n    end\n  end\nend\n",
         )
         .edit(
             "app/models/article.rb",
             "class Article < ApplicationRecord\n",
-            "class Article < ApplicationRecord\n  include DraftState\n\n  def scratch_ivar\n    @scratch\n  end\n\n  def set_scratch_ivar(value)\n    @scratch = value\n  end\n\n  def reader_override\n    \"custom reader\"\n  end\n\n  def reader_override_ivar\n    @reader_override\n  end\n\n  def writer_override=(value)\n    @writer_override = \"custom \" + value\n  end\n\n  private \"reader_override\"\n  public :reader_override\n  private :writer_override=\n  public \"writer_override=\"\n",
+            "class Article < ApplicationRecord\n  include DraftState\n\n  def scratch_ivar\n    @scratch\n  end\n\n  def set_scratch_ivar(value)\n    @scratch = value\n  end\n\n  private def reader_override\n    \"custom reader\"\n  end\n\n  def reader_override_ivar\n    @reader_override\n  end\n\n  protected def writer_override=(value)\n    @writer_override = \"custom \" + value\n  end\n\n  private \"reader_override\"\n  public :reader_override\n  private :writer_override=\n  public \"writer_override=\"\n",
         )
         .edit(
             "app/models/comment.rb",

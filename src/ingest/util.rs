@@ -210,12 +210,14 @@ pub(super) fn find_all_modules_with_scope<'pr>(
 ) -> Vec<(Vec<String>, ruby_prism::ModuleNode<'pr>)> {
     let mut out = Vec::new();
     collect_modules(node, &[], &mut |scope, m| {
-        out.push((scope.to_vec(), m));
+        if module_has_direct_def(&m) {
+            out.push((scope.to_vec(), m));
+        }
     });
     out
 }
 
-fn collect_modules<'pr, F: FnMut(&[String], ruby_prism::ModuleNode<'pr>)>(
+pub(super) fn collect_modules<'pr, F: FnMut(&[String], ruby_prism::ModuleNode<'pr>)>(
     node: &Node<'pr>,
     scope: &[String],
     out: &mut F,
@@ -227,9 +229,7 @@ fn collect_modules<'pr, F: FnMut(&[String], ruby_prism::ModuleNode<'pr>)>(
         if let Some(name_path) = module_name_path(&m) {
             inner.extend(name_path);
         }
-        if module_has_direct_def(&m) {
-            out(scope, m);
-        }
+        out(scope, m);
         if let Some(b) = body {
             collect_modules(&b, &inner, out);
         }

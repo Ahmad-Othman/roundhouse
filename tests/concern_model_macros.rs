@@ -280,6 +280,9 @@ fn accessor_contexts_fail_strict_ingest_and_are_not_carried_in_survey() {
     use roundhouse::ingest::survey;
 
     for (included_body, model_body) in [
+        ("attr_accessor :scratch", "include DraftState\n  private def scratch\n    'private override'\n  end"),
+        ("attr_accessor :scratch", "include DraftState\n  protected def scratch\n    'protected override'\n  end"),
+        ("attr_accessor :scratch", "include DraftState\n  private def scratch=(value)\n    @scratch = value\n  end"),
         ("private\n    attr_accessor :scratch", "include DraftState"),
         ("protected\n    attr_accessor :scratch", "include DraftState"),
         ("attr_accessor :scratch\n    private :scratch", "include DraftState"),
@@ -297,12 +300,6 @@ fn accessor_contexts_fail_strict_ingest_and_are_not_carried_in_survey() {
         ("attr_accessor :persisted", "include DraftState"),
         ("attr_accessor :destroyed", "include DraftState"),
         ("attr_accessor :id_previously_changed", "include DraftState"),
-        ("attr_accessor :scratch", "include DraftState\n  private :scratch="),
-        ("attr_accessor :scratch", "include DraftState\n  private \"scratch=\""),
-        ("attr_accessor :scratch", "include DraftState\n  protected \"scratch\""),
-        ("attr_accessor :scratch", "include DraftState\n  private :scratch if true"),
-        ("attr_accessor :scratch", "include DraftState\n  with_options do\n    protected :scratch=\n  end"),
-        ("attr_accessor :scratch", "include DraftState\n  private [:scratch].first"),
         ("attr_accessor :scratch", "include DraftState\n  private\n  def scratch\n    'private override'\n  end"),
         ("attr_accessor :scratch", "primary_abstract_class\n  include DraftState"),
         ("attr_accessor :scratch", "self.abstract_class = true\n  include DraftState"),
@@ -325,6 +322,61 @@ fn accessor_contexts_fail_strict_ingest_and_are_not_carried_in_survey() {
             !matches!(item, ModelBodyItem::Unknown { expr, .. } if matches!(&*expr.node,
                 ExprNode::Send { method, .. } if method.as_str() == "attr_accessor"))
         })), "declined declaration must not advertise accessors");
+    }
+}
+
+/// Forward/inherited/dynamic model markers are source errors before splicing,
+/// independently of accessor admission. Keep the canonical visibility boundary.
+#[test]
+fn source_visibility_refusals_precede_concern_accessor_admission() {
+    use roundhouse::ingest::survey;
+    for marker in [
+        "private :scratch=", "private \"scratch=\"", "protected \"scratch\"",
+        "private :scratch if true", "with_options do\n    protected :scratch=\n  end",
+        "private [:scratch].first",
+    ] {
+        let model = format!("class Message < ApplicationRecord\n  include DraftState\n  {marker}\nend\n");
+        let mut files = tree(&[
+            ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :messages do |t|\n    t.string :body\n  end\nend\n"),
+            ("app/models/concerns/draft_state.rb", "module DraftState\n  extend ActiveSupport::Concern\n  included { attr_accessor :scratch }\nend\n"),
+            ("app/models/message.rb", &model),
+        ]);
+        let error = ingest_app_from_tree(files.clone()).unwrap_err().to_string();
+        assert!(error.contains("app/models/message.rb") && error.contains("visibility"), "{error}");
+        survey::activate();
+        let result = ingest_app_from_tree(files.clone());
+        let gaps = survey::drain();
+        let app = result.unwrap();
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert_eq!(gaps[0].to_string(), error);
+        assert!(app.models.is_empty(), "the unsupported source model is not retained");
+        files.insert("app/models/message.rb".into(), model.replace("include DraftState", "").into_bytes());
+        assert_eq!(ingest_app_from_tree(files).unwrap_err().to_string(), error,
+            "the marker is unsupported even without a carried accessor");
+    }
+}
+
+/// A broad included-block exception would erase these errors and leave the
+/// emitted helper public. Only actual collector-owned candidates can defer.
+#[test]
+fn only_retained_module_candidates_defer_included_visibility() {
+    for (opening, body) in [
+        ("module DraftState", "included { private :helper }"),
+        ("module DraftState", "included { Other.attr_accessor :scratch; private :helper }"),
+        ("module DraftState", "included { arbitrary_dsl { attr_accessor :scratch }; private :helper }"),
+        ("module DraftState", "included { attr_accessor :scratch }\n  included { private :helper }"),
+        ("module DraftState", "class_methods { included { attr_accessor :scratch; private :helper } }"),
+        ("module DraftState", "class << self; included { attr_accessor :scratch; private :helper }; end"),
+        ("module DraftState", "if true; included { attr_accessor :scratch; private :helper }; end"),
+        ("class DraftState", "included { attr_accessor :scratch; private :helper }"),
+    ] {
+        let concern = format!("{opening}\n  extend ActiveSupport::Concern\n  def helper; 'helper'; end\n  {body}\nend\n");
+        let error = ingest_app_from_tree(tree(&[
+            ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :messages do |t|\n    t.string :body\n  end\nend\n"),
+            ("app/models/concerns/draft_state.rb", &concern),
+            ("app/models/message.rb", "class Message < ApplicationRecord\n  include DraftState\nend\n"),
+        ])).unwrap_err().to_string();
+        assert!(error.contains("conditional or dynamic visibility"), "{body}: {error}");
     }
 }
 
@@ -410,6 +462,77 @@ fn unused_accessor_contexts_do_not_reject_an_app() {
             ("app/models/message.rb", "class Message < ApplicationRecord\nend\n"),
         ])).expect("no model executes the dormant included block");
     }
+}
+
+/// Accessors are supplied only by direct model splicing. Neither a plain
+/// module nor a non-model class has that replacement for Concern execution.
+#[test]
+fn non_model_and_indirect_accessor_activations_are_errors() {
+    use roundhouse::ingest::survey;
+    for body in ["attr_accessor :scratch", "attr_accessor :scratch; private :helper"] {
+        let concern = format!("module DraftState\n  extend ActiveSupport::Concern\n  def helper; 'helper'; end\n  included {{ {body} }}\nend\n");
+        for (path, owner, source) in [
+            ("app/models/support.rb", "Support", "class Support; include DraftState; end"),
+            ("app/models/support.rb", "Support", "module Support; include DraftState; end"),
+            ("app/controllers/support_controller.rb", "SupportController", "class SupportController < ApplicationController; include DraftState; end"),
+            ("test/models/support_test.rb", "SupportTest", "class SupportTest < ActiveSupport::TestCase; include DraftState; end"),
+            ("test/models/support_test.rb", "SupportTest::Support", "class SupportTest < ActiveSupport::TestCase; class Support; include DraftState; end; end"),
+            ("app/models/support.rb", "Support", "module Wrapper; extend ActiveSupport::Concern; include DraftState; end\nclass Support; include Wrapper; end"),
+            ("app/models/support.rb", "Indirect", "module Wrapper; extend ActiveSupport::Concern; include DraftState; end\nclass Indirect < ApplicationRecord; include Wrapper; end"),
+            ("app/models/support.rb", "Support", "module Left; extend ActiveSupport::Concern; include DraftState; end\nmodule Right; extend ActiveSupport::Concern; include DraftState; end\nclass Support; include Left, Right; end"),
+        ] {
+            let files = tree(&[
+                ("db/schema.rb", "ActiveRecord::Schema.define { create_table(:messages) { |t| t.string :body } }"),
+                ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base; primary_abstract_class; end"),
+                ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base; end"),
+                ("app/models/concerns/draft_state.rb", &concern),
+                ("app/models/concerns/safe_draft.rb", "module SafeDraft; extend ActiveSupport::Concern; included { attr_accessor :kept; validates :body, presence: true }; end"),
+                ("app/models/message.rb", "class Message < ApplicationRecord; include SafeDraft; end"),
+                (path, source),
+            ]);
+            let error = ingest_app_from_tree(files.clone()).unwrap_err().to_string();
+            assert!(error.contains("concern attr_accessor") && error.contains(&format!("on {owner}")), "{source}: {error}");
+            survey::activate();
+            let result = ingest_app_from_tree(files);
+            let gaps = survey::drain();
+            let app = result.expect("survey retains the app but reports unsupported activation");
+            assert_eq!(gaps.len(), 1, "{source}: {gaps:?}");
+            assert_eq!(gaps[0].to_string(), error);
+            let model = app.models.iter().find(|m| m.name.0.as_str() == "Message").unwrap();
+            assert_eq!(model.validations().count(), 1);
+            let lowered = roundhouse::lower::lower_model_to_library_class(model, &app.schema);
+            assert!(lowered.methods.iter().any(|m| m.name.as_str() == "kept="));
+        }
+    }
+}
+
+#[test]
+fn deferred_concern_dependencies_stay_dormant_and_use_lexical_names() {
+    let files = tree(&[
+        ("db/schema.rb", "ActiveRecord::Schema.define { create_table(:messages) { |t| t.string :body } }"),
+        ("app/models/concerns/draft_state.rb", "module DraftState; extend ActiveSupport::Concern; included { attr_accessor :scratch }; end"),
+        ("app/models/concerns/wrapper.rb", "module Wrapper; extend ActiveSupport::Concern; include DraftState; end"),
+        ("app/models/message.rb", "class Message < ApplicationRecord; end"),
+        ("app/models/support.rb", "module Scope; module DraftState; def helper; 'local'; end; end; class Support; include DraftState; end; end"),
+    ]);
+    ingest_app_from_tree(files.clone()).expect("a Concern dependency is deferred, and the local namesake has no accessors");
+    let mut shadowed = files.clone();
+    shadowed.insert("app/models/support.rb".into(), b"module Scope; module DraftState; def helper; 'local'; end; end; class Message < ApplicationRecord; self.table_name = 'messages'; include DraftState; end; end".to_vec());
+    let error = ingest_app_from_tree(shadowed.clone()).unwrap_err().to_string();
+    assert!(error.contains("on Scope::Message") && error.contains("source-resolved"), "{error}");
+    roundhouse::ingest::survey::activate();
+    let result = ingest_app_from_tree(shadowed);
+    let gaps = roundhouse::ingest::survey::drain();
+    let app = result.unwrap();
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert_eq!(gaps[0].to_string(), error);
+    let model = app.models.iter().find(|m| m.name.0.as_str() == "Scope::Message").unwrap();
+    let lowered = roundhouse::lower::lower_model_to_library_class(model, &app.schema);
+    assert!(!lowered.methods.iter().any(|m| ["scratch", "scratch="].contains(&m.name.as_str())));
+    let mut files = files;
+    files.insert("app/models/support.rb".into(), b"module Scope; class Support; include ::DraftState; end; end".to_vec());
+    let error = ingest_app_from_tree(files).unwrap_err().to_string();
+    assert!(error.contains("on Scope::Support") && error.contains("concern attr_accessor"), "{error}");
 }
 
 #[test]
