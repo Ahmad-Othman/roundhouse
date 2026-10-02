@@ -454,9 +454,18 @@ fn ledger_scoped_creations(e: &Expr, models: &ModelColumns, diagnostics: &mut Ve
                 || matches!(recv.ty.as_ref(), Some(Ty::Relation { of }) if models.contains_key(of))
                 || matches!(recv.ty.as_ref(), Some(Ty::Array { elem }) if matches!(&**elem, Ty::Class { id, .. } if models.contains_key(id))))
         {
+            // Name the cause: the ledger entry is the unsupported list,
+            // and the three gaps close in different places.
+            let cause = if block.is_some() {
+                "an initialization block is inlined only on a statement-position call with scalar literal conditions, and only without control flow or new locals in its body"
+            } else if method.as_str() == "find_or_create_by!" {
+                "the runtime has no `find_or_create_by!`; only a statement-position call with scalar literal conditions is inlined"
+            } else {
+                "a `where` scope materializes before the call; only scalar literal predicates and conditions on a concrete model are inlined"
+            };
             let mut diagnostic = super::residue_diagnostic("first_or_create", "scoped-find-or-create", e.span,
                 "requires statement position, scalar literal Hash conditions, and a concrete model with literal where predicates",
-                "scoped find-or-create cannot be lowered safely; general relations and initialization block control flow remain unsupported".to_string());
+                format!("scoped find-or-create cannot be lowered safely: {cause}"));
             diagnostic.severity = crate::diagnostic::Severity::Error;
             diagnostics.push(diagnostic);
         }
