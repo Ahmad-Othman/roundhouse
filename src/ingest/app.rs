@@ -1544,7 +1544,8 @@ end
     super::thread_mattr::lower_thread_mattr(&mut app);
     // Alba declarations become ordinary property-reading methods before
     // inference; validate complete original resource bodies, not just IR.
-    super::alba::lower_alba_resources(&mut app)?;
+    // Rejected declarations still fail ingest, but survey must ledger them.
+    super::alba::lower_alba_resources(&mut app).inspect_err(survey::record)?;
     // After it, not before: `Current`'s own `delegate` reads an
     // ATTRIBUTE's ivar, which that pass has the declarations for. What
     // reaches here is the general shape, whose target is a method.
