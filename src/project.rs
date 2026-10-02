@@ -6623,10 +6623,23 @@ pub fn build_site(fixture: &Path, out: &Path) -> Result<(), String> {
     fs::create_dir_all(out.join("browse"))
         .map_err(|e| format!("mkdir {}: {e}", out.display()))?;
 
+    // Archive generation cleans browse/, so copy its viewer assets afterwards.
+    build_archives(fixture, out, BuildTarget::ALL)?;
     copy_site_assets(out)?;
     copy_create_blog(out)?;
     crate::guide::render_site(out)?;
 
+    Ok(())
+}
+
+/// Build selected browse archives without website assets or WASM demos.
+/// The file sets and archive writers are shared with `build_site`.
+pub fn build_archives(fixture: &Path, out: &Path, targets: &[BuildTarget]) -> Result<(), String> {
+    let browse = out.join("browse");
+    if browse.exists() {
+        fs::remove_dir_all(&browse).map_err(|e| format!("clean {}: {e}", browse.display()))?;
+    }
+    fs::create_dir_all(&browse).map_err(|e| format!("mkdir {}: {e}", browse.display()))?;
     let mut app =
         ingest_app(fixture).map_err(|e| format!("ingest {}: {e}", fixture.display()))?;
     // Analyze + the same post-analyze shared lowerings as the
@@ -6634,7 +6647,7 @@ pub fn build_site(fixture: &Path, out: &Path) -> Result<(), String> {
     // so the residue is dropped.
     let _ = crate::session::analyze_and_lower(&mut app);
 
-    for target in BuildTarget::ALL {
+    for target in targets {
         let files = target_files(&app, fixture, *target)?;
         let name = target.as_str();
 

@@ -23,9 +23,10 @@ tiers.
 
 **The blog** (`fixtures/real-blog`, the Rails 8 scaffold with articles,
 comments, nested routes, validations, Turbo Streams, Action Cable,
-Tailwind, JSON endpoints) is what **every server target** passes the
-DOM-equivalence gate against on every push. What the blog uses is
-supported everywhere.
+Tailwind, JSON endpoints) is the shared DOM-equivalence fixture for
+**every server target** in full validation. Ordinary PRs/main pushes run
+the compact floor plus selected target lanes; see [CI coverage](../ci-reuse.md).
+A passing target's comparison proves the blog's features on that target.
 
 **Campfire** (Basecamp's chat product — file attachments with image
 variants, rich text, web push, bots and webhooks, full-text search,
