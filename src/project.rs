@@ -956,7 +956,7 @@ pub fn target_files(
         }
     }
     for (_, method) in crate::analyze::forwarding::methods(app) {
-        if let Some(formal) = method.unsupported_formals {
+        if target != BuildTarget::Blog && let Some(formal) = method.unsupported_formals {
             crate::emit::diagnostics::report_unsupported(method.name_span, target.as_str(), "parameter declaration", formal.description());
         }
         if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {

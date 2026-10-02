@@ -449,6 +449,37 @@ fn keyword_target_gates_distinguish_ordinary_super_from_full_forwarding() {
 }
 
 #[test]
+fn source_archive_copies_unrepresented_formals_without_a_transpile_error() {
+    use roundhouse::diagnostic::DiagnosticKind;
+    use roundhouse::project::{BuildTarget, target_files};
+
+    for formal in ["(a,b)", "**nil"] {
+        let source = format!("class Probe; def call({formal}); 7; end; end\n");
+        let app = analyzed(&source);
+        let fixture = std::env::temp_dir().join(format!("roundhouse-source-archive-{}-{}", std::process::id(), formal.len()));
+        std::fs::create_dir(&fixture).unwrap();
+        std::fs::write(fixture.join("probe.rb"), &source).unwrap();
+        for target in [BuildTarget::Blog, BuildTarget::Ruby] {
+            let (files, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
+                target_files(&app, &fixture, target)
+            });
+            let formal_errors: Vec<_> = diagnostics.iter().filter(|d| {
+                matches!(&d.kind, DiagnosticKind::Unsupported { construct, .. }
+                    if construct.as_str() == "parameter declaration")
+            }).collect();
+            assert_eq!(formal_errors.len(), usize::from(target == BuildTarget::Ruby), "{target:?}: {diagnostics:?}");
+            if target == BuildTarget::Blog {
+                let files = files.expect("source archive");
+                assert!(files.iter().any(|(path, text)| path == "probe.rb" && text == &source), "{files:?}");
+            } else {
+                assert_eq!(formal_errors[0].severity, Severity::Error);
+            }
+        }
+        std::fs::remove_dir_all(&fixture).unwrap();
+    }
+}
+
+#[test]
 fn declaration_only_forwarders_are_gated_on_unverified_targets() {
     use roundhouse::project::{BuildTarget, target_files};
     let app = analyzed("class Probe\n def call(...)\n 11\n end\nend");
