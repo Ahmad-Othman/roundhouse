@@ -56,6 +56,108 @@ ADVISORY = set(SPINEL11) - {"build-campfire-archive"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 
 
+def native_coverage(path):
+    """Identify native core/focused suites and interpreter-only exceptions."""
+    interpreter_only = path.startswith(
+        "runtime/spinel/scaffold/ruby_overlay/"
+    ) or path in {
+        "runtime/spinel/db_jruby.rb",
+        "runtime/spinel/markly_jruby.rb",
+        "runtime/spinel/db_cruby.rb",
+        "runtime/spinel/message_digest_cruby.rb",
+        "runtime/spinel/module_delegate.rb",
+    }
+    native = (
+        path.startswith(("runtime/ruby/", "runtime/spinel/", "src/emit/ruby/"))
+        or path == "src/emit/ruby.rs"
+        or (path.startswith("tests/spinel") and path.endswith((".rs", ".rb")))
+        or path in {f"tests/{name}.rs" for name in SPINEL_TESTS}
+    ) and not interpreter_only
+    suites = set()
+    if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):
+        suites.add("framework_tests_spinel")
+    focused = re.fullmatch(r"tests/([^/]+)\.(?:rs|rb)", path)
+    if focused and focused[1] in SPINEL_TESTS:
+        suites.add(focused[1])
+    if path.startswith(("runtime/spinel/", "runtime/ruby/")) and not interpreter_only:
+        name = path.rsplit("/", 1)[-1]
+        owned_tests = set()
+        if any(word in name for word in ("web_push", "base64")):
+            owned_tests.add("spinel_web_push_crypto")
+        if any(
+            word in name
+            for word in (
+                "signed_cookie",
+                "message_verifier",
+                "signed_id",
+                "message_digest",
+                "base64",
+            )
+        ) or path.startswith("runtime/spinel/tep/url."):
+            owned_tests.add("rails_compat_vectors_spinel")
+        if any(
+            word in path for word in ("/db", "sqlite", "active_support_time_parsing")
+        ):
+            owned_tests.add("spinel_db_lease")
+        if any(word in name for word in ("param", "multipart", "request")):
+            owned_tests.add("spinel_param_builder")
+        if (
+            path.startswith("runtime/spinel/")
+            and not path.startswith("runtime/spinel/scaffold/")
+            and not owned_tests
+        ):
+            owned_tests.add("framework_tests_spinel")
+        suites.update(owned_tests)
+    if (
+        path.startswith(("tests/rails_compat/", "tests/params_vectors/"))
+        or path == "tests/rails_compat_vectors.rb"
+    ):
+        suites.add(
+            "spinel_param_builder"
+            if path.startswith("tests/params_vectors/")
+            else "rails_compat_vectors_spinel"
+        )
+    return native, interpreter_only, suites
+
+
+def archive_and_campfire_jobs(path, interpreter_only):
+    """Select packaging and Campfire consumers, not every native runtime edit."""
+    jobs = set()
+    if path.startswith("runtime/spinel/scaffold/") and not interpreter_only:
+        jobs.update((*CORE, "smoke-spinel", "build-site"))
+    if path.startswith(("scripts/campfire-compare", "scripts/build-campfire-compare")):
+        jobs.update(
+            ("build-spinel", "build-campfire-compare-spinel", "campfire-compare-spinel")
+        )
+    if path.startswith("scripts/campfire-db-differential"):
+        jobs.update(("build-spinel", "campfire-db-differential-spinel"))
+    campfire_archive = (
+        path.startswith(
+            (
+                "scripts/build-campfire-archive",
+                "scripts/campfire-archive",
+                "e2e/campfire/",
+            )
+        )
+        or path == "scripts/campfire-docker-files"
+    )
+    shared_smoke = (
+        path.startswith("e2e/") and not path.startswith("e2e/campfire/")
+    ) or path in {"scripts/smoke", "scripts/ci-playwright-install"}
+    if campfire_archive or shared_smoke:
+        jobs.update(
+            (
+                "build-spinel",
+                "build-campfire-archive",
+                "smoke-campfire",
+                "smoke-campfire-docker",
+            )
+        )
+    if shared_smoke:
+        jobs.add("smoke-spinel")
+    return jobs
+
+
 def select(paths, *, draft=False, full=False, publish=False):
     if draft:
         return finish(
@@ -102,27 +204,13 @@ def select(paths, *, draft=False, full=False, publish=False):
             if test
             else None
         )
-        interpreter_only = path.startswith(
-            "runtime/spinel/scaffold/ruby_overlay/"
-        ) or path in {
-            "runtime/spinel/db_jruby.rb",
-            "runtime/spinel/markly_jruby.rb",
-            "runtime/spinel/db_cruby.rb",
-            "runtime/spinel/message_digest_cruby.rb",
-            "runtime/spinel/module_delegate.rb",
-        }
-        native_path = (
-            path.startswith(("runtime/ruby/", "runtime/spinel/", "src/emit/ruby/"))
-            or path == "src/emit/ruby.rs"
-        )
-        native_path |= path.startswith("tests/spinel") and path.endswith((".rs", ".rb"))
-        native_path |= path in {f"tests/{name}.rs" for name in SPINEL_TESTS}
-        if native_path and not interpreter_only:
+        native, interpreter_only, owned_tests = native_coverage(path)
+        spinel_tests.update(owned_tests)
+        if native or owned_tests:
             spinel = True
             jobs_selected.update(CORE)
+        if native:
             reasons.append(f"{path}: native Spinel core")
-        if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):
-            spinel_tests.add("framework_tests_spinel")
         if target in TARGETS or target == "spinel":
             owners = (
                 {"ruby", "jruby", "spinel"}
@@ -181,118 +269,10 @@ def select(paths, *, draft=False, full=False, publish=False):
             jobs_selected.update(CORE)
             if path.startswith("tests/framework_test_support"):
                 spinel_tests.add("framework_tests_spinel")
-        focused = re.fullmatch(
-            r"tests/(framework_tests_spinel|spinel_web_push_crypto|spinel_db_lease|spinel_param_builder|rails_compat_vectors_spinel)\.(?:rs|rb)",
-            path,
-        )
-        if focused:
+        archive_jobs = archive_and_campfire_jobs(path, interpreter_only)
+        if archive_jobs:
             spinel = True
-            jobs_selected.update(CORE)
-            spinel_tests.add(focused[1])
-        if (
-            path.startswith(("runtime/spinel/", "runtime/ruby/"))
-            and not interpreter_only
-        ):
-            name = path.rsplit("/", 1)[-1]
-            owned_tests = set()
-            if any(word in name for word in ("web_push", "base64")):
-                owned_tests.add("spinel_web_push_crypto")
-            if any(
-                word in name
-                for word in (
-                    "signed_cookie",
-                    "message_verifier",
-                    "signed_id",
-                    "message_digest",
-                    "base64",
-                )
-            ) or path.startswith("runtime/spinel/tep/url."):
-                owned_tests.add("rails_compat_vectors_spinel")
-            if any(
-                word in path
-                for word in ("/db", "sqlite", "active_support_time_parsing")
-            ):
-                owned_tests.add("spinel_db_lease")
-            if any(word in name for word in ("param", "multipart", "request")):
-                owned_tests.add("spinel_param_builder")
-            if (
-                path.startswith("runtime/spinel/")
-                and not path.startswith("runtime/spinel/scaffold/")
-                and not owned_tests
-            ):
-                owned_tests.add("framework_tests_spinel")
-            spinel_tests.update(owned_tests)
-        if (
-            path.startswith(("tests/rails_compat/", "tests/params_vectors/"))
-            or path == "tests/rails_compat_vectors.rb"
-        ):
-            spinel = True
-            jobs_selected.update(CORE)
-            spinel_tests.add(
-                "spinel_param_builder"
-                if path.startswith("tests/params_vectors/")
-                else "rails_compat_vectors_spinel"
-            )
-        if path.startswith("runtime/spinel/scaffold/") and not interpreter_only:
-            spinel = True
-            jobs_selected.update((*CORE, "smoke-spinel", "build-site"))
-        if path.startswith(
-            ("scripts/campfire-compare", "scripts/build-campfire-compare")
-        ):
-            spinel = True
-            jobs_selected.update(
-                (
-                    "build-spinel",
-                    "build-campfire-compare-spinel",
-                    "campfire-compare-spinel",
-                )
-            )
-        if path.startswith("scripts/campfire-db-differential"):
-            spinel = True
-            jobs_selected.update(("build-spinel", "campfire-db-differential-spinel"))
-        if (
-            path.startswith(
-                ("scripts/build-campfire-archive", "scripts/campfire-archive")
-            )
-            or path == "scripts/campfire-docker-files"
-        ):
-            spinel = True
-            jobs_selected.update(
-                (
-                    "build-spinel",
-                    "build-campfire-archive",
-                    "smoke-campfire",
-                    "smoke-campfire-docker",
-                )
-            )
-        if path.startswith("e2e/campfire/"):
-            spinel = True
-            jobs_selected.update(
-                (
-                    "build-spinel",
-                    "build-campfire-archive",
-                    "smoke-campfire",
-                    "smoke-campfire-docker",
-                )
-            )
-        if path in {"scripts/smoke", "scripts/ci-playwright-install"}:
-            jobs_selected.update(
-                (
-                    "smoke-spinel",
-                    "build-campfire-archive",
-                    "smoke-campfire",
-                    "smoke-campfire-docker",
-                )
-            )
-        if path.startswith("e2e/") and not path.startswith("e2e/campfire/"):
-            jobs_selected.update(
-                (
-                    "smoke-spinel",
-                    "build-campfire-archive",
-                    "smoke-campfire",
-                    "smoke-campfire-docker",
-                )
-            )
+            jobs_selected.update(archive_jobs)
         if path in {"tests/writebook.rs", "tests/fixtures/writebook-inventory.json"}:
             writebook = True
     if full:
