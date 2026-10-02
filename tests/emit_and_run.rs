@@ -1618,6 +1618,29 @@ raise "nil chain" unless !article.title_long? && article.title_short?
 }
 
 #[test]
+fn forwarded_proc_expressions_execute_once_in_an_emitted_app() {
+    emit_and_run::real_blog()
+        .write("app/services/block_forward_probe.rb", r#"class BlockForwardProbe
+  def initialize
+    @calls = 0
+    @callback = ->(x) { x * 2 }
+  end
+  def compute(n)
+    @calls += 1
+    ->(x) { x + n }
+  end
+  def run
+    doubled = [1, 2].map(&@callback)
+    added = [1, 2].map(&compute(3))
+    [doubled, added, @calls]
+  end
+end
+"#)
+        .run_ruby("raise 'forwarded expression' unless BlockForwardProbe.new.run == [[2, 4], [4, 5], 1]")
+        .assert_passes();
+}
+
+#[test]
 fn multiple_erb_openers_execute_inside_an_output_block() {
     on_the_index(emit_and_run::real_blog(), r#"<span class="multi-opener"><%= capture do %>
 <% [1, 2].each do |number|
