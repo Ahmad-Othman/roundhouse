@@ -107,7 +107,7 @@ the prerequisites.
 - [**Campfire**](https://rubys.github.io/roundhouse/apps/campfire.html)
   — the compiled product, as a Docker archive.
 - [**Browse**](https://rubys.github.io/roundhouse/browse/) — what every
-  emitter produces from the blog fixture, updated on each push.
+  emitter produces from the blog fixture, refreshed by scheduled full validation.
 - [**Bench**](https://rubys.github.io/roundhouse/bench/) — throughput,
   memory and latency across the live targets on a fixed box, against
   Rails as it ships.
@@ -173,7 +173,8 @@ conversation first: CI runs a compact correctness/runtime floor plus
 targeted checks. Add `ci:full` for full PR validation; the complete
 matrix also runs freshly every four hours. See
 [CI coverage](docs/ci-reuse.md). The
-`ci-required` status gates selected blocking coverage; the Spinel
+`CI summary` status reports selected checks without imposing a merge
+requirement; maintainers decide when to merge. The Spinel
 and Campfire jobs marked `continue-on-error` track current Spinel
 master, and red there is a signal to investigate Roundhouse runtime,
 RBS or packaging as well as possible upstream drift—not proof of an

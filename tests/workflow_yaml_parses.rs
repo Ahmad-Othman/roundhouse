@@ -1038,14 +1038,20 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
     );
     assert!(
         ci["on"]["pull_request"].get("paths-ignore").is_none(),
-        "required status must run even for documentation-only PRs"
+        "summary must run even for documentation-only PRs"
     );
-    for name in ["compact-required", "ci-required"] {
+    assert!(jobs.get("ci-required").is_none());
+    assert_eq!(jobs["ci-summary"]["name"].as_str(), Some("CI summary"));
+    assert_eq!(
+        ci["on"]["workflow_call"]["outputs"]["complete"]["value"].as_str(),
+        Some("${{ jobs.ci-summary.outputs.complete }}")
+    );
+    for name in ["compact-required", "ci-summary"] {
         assert_eq!(jobs[name]["if"].as_str(), Some("always()"));
     }
-    let gate = jobs["ci-required"]["needs"].as_sequence().unwrap();
+    let gate = jobs["ci-summary"]["needs"].as_sequence().unwrap();
     for name in jobs.as_mapping().unwrap().keys().filter_map(|v| v.as_str()) {
-        if name != "ci-required" {
+        if name != "ci-summary" {
             assert!(
                 gate.iter().any(|v| v.as_str() == Some(name)),
                 "missing result: {name}"
@@ -1193,7 +1199,7 @@ fn spinel_jobs_are_selected_explicitly_and_archive_evidence_reaches_pages() {
         })
         .unwrap();
     assert!(verify < pages);
-    assert!(jobs["ci-required"]["needs"]
+    assert!(jobs["ci-summary"]["needs"]
         .as_sequence()
         .unwrap()
         .iter()

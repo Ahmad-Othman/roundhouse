@@ -11,17 +11,21 @@
   comparison including its model/database differential.
 
 These are nine validation executions, plus three small orchestration jobs
-(`plan`, `compact-required`, `ci-required`). Drafts select only fixture and
-unit validation. **`ci-required` is the stable merge-gate status:** it rejects
-missing, skipped, cancelled or failed selected blocking checks. Unselected
-jobs may skip. Advisory failures remain visible, not merge blockers.
-Repository administrators should migrate required-check settings only after
-observing the new status on a real PR; the workflow does not change protection.
+(`plan`, `compact-required`, `ci-summary`). Drafts select only fixture and
+unit validation. **`CI summary` is informational:** it reports missing,
+skipped, cancelled or failed selected non-advisory checks as red. Unselected
+jobs may skip; advisory failures remain separate signals. This workflow does
+not configure branch protection or require the summary to pass before merging;
+maintainers decide when to merge. Publication still requires the compact floor
+and verified assembly.
 
 The planner compares the actual PR merge tree with its base, not just the last
 commit. Renames/deletions retain both ownership sets. Unknown diff identity
-expands to full validation. Documentation-only PRs still get the required
+expands to full validation. Documentation-only PRs still get the summary
 status instead of being left pending by workflow-level path filters.
+
+The CI helpers use Python's standard library, following the existing receipt
+helper, without additional Python packages.
 
 | Changed inputs | Additional coverage |
 |---|---|

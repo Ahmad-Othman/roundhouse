@@ -21,7 +21,7 @@ on:
         default: ''
     outputs:
       complete:
-        value: ${{ jobs.ci-required.outputs.complete }}
+        value: ${{ jobs.ci-summary.outputs.complete }}
       publication-ready:
         value: ${{ jobs.compact-required.outputs.passed == 'true' && jobs.assemble-site.outputs.ready == 'true' }}
 
@@ -3169,7 +3169,9 @@ jobs:
           python3 scripts/ci-plan.py compact-gate
           echo 'passed=true' >> "$GITHUB_OUTPUT"
 
-  ci-required:
+  # Informational validation summary; no branch-protection or merge policy.
+  ci-summary:
+    name: CI summary
     needs: [plan, generate-fixture, unit, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, writebook-inventory, build-spinel, framework-tests-spinel, build-campfire-compare-spinel, campfire-compare-spinel, campfire-db-differential-spinel, toolchain-spinel, compare-spinel, smoke-spinel, build-campfire-archive, smoke-campfire, smoke-campfire-docker, archive-results, assemble-site]
     if: always()
     runs-on: ubuntu-latest
@@ -3178,7 +3180,7 @@ jobs:
       complete: ${{ steps.gate.outputs.complete }}
     steps:
       - uses: actions/checkout@v5
-      - name: Reject missing, skipped or failed required coverage
+      - name: Report missing, skipped or failed selected checks
         id: gate
         env:
           CI_PLAN: ${{ needs.plan.outputs.plan }}

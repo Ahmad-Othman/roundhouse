@@ -89,8 +89,9 @@ defect even if the build is green.
 - **Outside contributors: fork, and open a pull request against `main`.**
   CI runs a compact floor plus targeted lanes; add `ci:full` for the
   complete PR matrix. Full main validation/publication is scheduled every
-  four hours and executes freshly every cycle. `ci-required`
-  gates selected blocking coverage; see [CI coverage](docs/ci-reuse.md).
+  four hours and executes freshly every cycle. `CI summary` reports
+  selected checks, not a mandatory merge gate; maintainers decide when
+  to merge. See [CI coverage](docs/ci-reuse.md).
   You do not need every toolchain locally; CI covers the missing lanes.
   Before opening one: `bin/rh fixture` (the test fixtures are generated,
   not checked in — see below), `cargo test --lib` plus the targeted
