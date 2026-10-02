@@ -56,10 +56,11 @@ It excludes symbolic links throughout selected path gem trees.
 These rules also prevent linked engine declarations and directory cycles.
 
 When an app has multiple `app/` roots, `check` prints those roots.
+The roots are view paths in that order, the app's own first: a template
+the app has under the same name and format as an engine's shadows it,
+as it does in Rails.
 Roundhouse does not read an engine's own `config/routes.rb` yet.
 The host's `mount` of the engine remains a dropped route.
-When the host and an engine have the same view path, Roundhouse reads both views.
-The host does not yet replace the engine's view.
 
 One thing the walk carries that no emitted tree can: a class extending
 a Rails base the runtime does not port. `ApplicationMailbox <
