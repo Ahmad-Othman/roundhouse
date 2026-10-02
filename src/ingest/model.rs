@@ -158,7 +158,7 @@ pub(super) fn ingest_model_with_enum_constants(
     let mut enums: IndexMap<Symbol, Vec<(String, Literal)>> = IndexMap::new();
     let mut enum_defaults: IndexMap<Symbol, Literal> = IndexMap::new();
     let mut primary_key: Option<Symbol> = None;
-    let visibility = Visibility::resolve(class.body().as_ref(), file)?;
+    let visibility = Visibility::resolve(class.body().as_ref(), file, None)?;
     if let Some(class_body) = class.body() {
         let mut prev_end: Option<usize> = None;
         // Constants the class body assigns, for `enum :x, CONST`.

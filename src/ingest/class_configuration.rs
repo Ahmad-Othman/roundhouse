@@ -89,6 +89,58 @@ fn verified_concerns(
     module_includes: &HashMap<ClassId, Vec<ClassId>>,
     framework_shadows: &HashSet<ClassId>,
 ) -> HashSet<ClassId> {
+    verified_framework_concerns(carriers, module_includes, framework_shadows)
+        .into_iter()
+        .filter(|owner| {
+            // Configuration callbacks can mutate receiver state too. Only
+            // the existing complete filter-DSL contract may coexist.
+            !app.library_classes
+                .iter()
+                .filter(|lc| &lc.name == owner)
+                .any(|lc| {
+                    let overrides_api = lc.methods.iter().any(overrides_framework_api);
+                    overrides_api
+                        || lc.unknown_calls.iter().any(|expr| match &*expr.node {
+                            ExprNode::Send {
+                                recv: None, method, ..
+                            } if method.as_str() == "extend" => false,
+                            ExprNode::Send {
+                                recv: None,
+                                method,
+                                args,
+                                block: Some(block),
+                                ..
+                            } if method.as_str() == "included" && args.is_empty() => {
+                                match &*block.node {
+                                    ExprNode::Lambda { body, .. } => {
+                                        filters_from_macro_body(body, owner).is_none()
+                                    }
+                                    _ => true,
+                                }
+                            }
+                            _ => true,
+                        })
+                })
+        })
+        .collect()
+}
+
+/// Source singleton definitions that replace the Concern protocol.
+pub(super) fn overrides_framework_api(method: &MethodDef) -> bool {
+    method.receiver == MethodReceiver::Class
+        && matches!(
+            method.name.as_str(),
+            "class_methods" | "append_features" | "included" | "extended" | "prepend_features"
+        )
+}
+
+/// Shared identity/installation proof. Consumers separately admit API
+/// overrides and body effects (accessors allow proven inert include hooks).
+pub(super) fn verified_framework_concerns(
+    carriers: &[ConcernClassMethodSpans],
+    module_includes: &HashMap<ClassId, Vec<ClassId>>,
+    framework_shadows: &HashSet<ClassId>,
+) -> HashSet<ClassId> {
     let mut extensions: HashMap<ClassId, Vec<crate::span::Span>> = HashMap::new();
     for carrier in carriers {
         extensions
@@ -131,52 +183,7 @@ fn verified_concerns(
                             })
                         })
                 });
-            let overrides_api = app
-                .library_classes
-                .iter()
-                .filter(|lc| &lc.name == owner)
-                .any(|lc| {
-                    lc.methods.iter().any(|m| {
-                        m.receiver == MethodReceiver::Class
-                            && matches!(
-                                m.name.as_str(),
-                                "class_methods"
-                                    | "append_features"
-                                    | "included"
-                                    | "extended"
-                                    | "prepend_features"
-                            )
-                    })
-                });
-            // Inclusion callbacks can mutate receiver state too. Only the
-            // existing complete filter-DSL contract may coexist; no replay
-            // or hidden storage initialization is inferred from a callback.
-            let unsupported_body = app
-                .library_classes
-                .iter()
-                .filter(|lc| &lc.name == owner)
-                .any(|lc| {
-                    lc.unknown_calls.iter().any(|expr| match &*expr.node {
-                        ExprNode::Send {
-                            recv: None, method, ..
-                        } if method.as_str() == "extend" => false,
-                        ExprNode::Send {
-                            recv: None,
-                            method,
-                            args,
-                            block: Some(block),
-                            ..
-                        } if method.as_str() == "included" && args.is_empty() => match &*block.node
-                        {
-                            ExprNode::Lambda { body, .. } => {
-                                filters_from_macro_body(body, owner).is_none()
-                            }
-                            _ => true,
-                        },
-                        _ => true,
-                    })
-                });
-            (source_is_verified && !overrides_api && !unsupported_body).then(|| owner.clone())
+            source_is_verified.then(|| owner.clone())
         })
         .collect()
 }

@@ -1676,6 +1676,11 @@ end
     // splices — and `ActionText::RichText` has to be in `app.models`
     // before anything downstream enumerates models.
     crate::lower::rich_text::synthesize_record_model(&mut app);
+    app.const_resolver = crate::timings::phase("rubydex: wait", || const_resolver.finish());
+    // Admission needs complete controller permit demand and model DSL,
+    // including declarations contributed by either kind of Concern,
+    // and reuses the prepared resolver rather than rebuilding it.
+    super::concern_accessors::validate(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
 
     collect_binary_assets(vfs, dir, &mut app);
 
@@ -1683,7 +1688,6 @@ end
         super::sources::drain().is_empty(),
         "a pass registered a source after ingest drained the registry"
     );
-    app.const_resolver = crate::timings::phase("rubydex: wait", || const_resolver.finish());
     Ok(app)
 }
 
