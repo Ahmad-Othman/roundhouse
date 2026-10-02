@@ -5,6 +5,7 @@
 //! by Rubydex declaration IDs.
 
 use std::collections::{HashMap, hash_map::Entry};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 use rubydex::indexing::local_graph::LocalGraph;
@@ -63,10 +64,23 @@ pub(crate) struct ConstResolver {
     /// Indexed by `FileId - 1`. `None` marks a source that Rubydex did
     /// not index, such as an ERB template.
     files: Vec<Option<FileAnswers>>,
+    /// Includes paths, full text and order because answers use file IDs
+    /// and byte offsets. Retain no second copy of the source snapshot.
+    source_fingerprint: u64,
 }
 
 fn is_indexed(source: &SourceFile) -> bool {
     source.path.ends_with(".rb")
+}
+
+fn source_fingerprint(sources: &[SourceFile]) -> u64 {
+    let mut hash = DefaultHasher::new();
+    sources.len().hash(&mut hash);
+    for source in sources {
+        source.path.hash(&mut hash);
+        source.text.hash(&mut hash);
+    }
+    hash.finish()
 }
 
 /// One Rubydex input document. The indexing thread builds its URI.
@@ -267,7 +281,7 @@ impl ConstResolver {
         crate::timings::phase("rubydex: resolve", || Resolver::new(&mut graph).resolve());
         let files = crate::timings::phase("rubydex: answers", || collect_answers(&graph, sources));
         drop(graph);
-        Self { files }
+        Self { files, source_fingerprint: source_fingerprint(sources) }
     }
 
     fn file(&self, file: FileId) -> Option<&FileAnswers> {
@@ -316,11 +330,11 @@ pub struct PreparedConstResolver(Option<Arc<ConstResolver>>);
 
 impl PreparedConstResolver {
     /// The answers that ingest prepared, if they cover these sources.
-    /// No pass edits `App::sources` after ingest, so a matching count
-    /// means the same sources. Other apps get new answers.
+    /// Cloning an app retains the cache, but callers can edit its public
+    /// sources. Rebuild when paths, text or file order have changed.
     pub(crate) fn for_sources(&self, sources: &[SourceFile]) -> Arc<ConstResolver> {
         match &self.0 {
-            Some(resolver) if resolver.files.len() == sources.len() => {
+            Some(resolver) if resolver.source_fingerprint == source_fingerprint(sources) => {
                 Arc::clone(resolver)
             }
             _ => Arc::new(ConstResolver::from_app_sources(sources)),
@@ -527,4 +541,52 @@ fn answer_file(
     }
     answers.constants.sort_unstable_by_key(|(end, ..)| *end);
     answers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepared_answers_require_the_same_paths_text_and_file_order() {
+        let mut sources = vec![
+            SourceFile {
+                path: "first.rb".into(),
+                text: "module Alpha\n  class Widget; end\n  def self.value; Widget; end\nend\n".into(),
+            },
+            SourceFile {
+                path: "other.rb".into(),
+                text: "module Other\n  class Widget; end\n  def self.value; Widget; end\nend\n".into(),
+            },
+        ];
+        let snapshot = sources.clone();
+        let prepared = ConstResolverTask::start(Arc::new(snapshot.clone())).finish();
+        let original = prepared.for_sources(&sources);
+        assert!(Arc::ptr_eq(&original, &prepared.clone().for_sources(&sources)));
+        let resolved = |resolver: &ConstResolver, source: &SourceFile| {
+            let start = source.text.rfind("Widget").unwrap() as u32;
+            let span = Span { file: FileId(1), start, end: start + 6 };
+            match resolver.reference(span, &[Symbol::new("Widget")]) {
+                Some(Some(ResolvedConstant::Namespace { class, .. })) => class.0.as_str().to_owned(),
+                _ => panic!("expected a resolved Widget"),
+            }
+        };
+        assert_eq!(resolved(&original, &sources[0]), "Alpha::Widget");
+
+        // Same source count, byte length and reference offset, different binding.
+        sources[0].text = sources[0].text.replace("Alpha", "Bravo");
+        let changed = prepared.clone().for_sources(&sources);
+        assert_eq!(resolved(&changed, &sources[0]), "Bravo::Widget");
+        assert!(!Arc::ptr_eq(&original, &changed));
+
+        // FileId(1) must follow input order, not the cached first file.
+        sources = snapshot.clone();
+        sources.swap(0, 1);
+        assert_eq!(resolved(&prepared.for_sources(&sources), &sources[0]), "Other::Widget");
+
+        // A path-only change can make the same text non-indexed.
+        sources = snapshot;
+        sources[0].path = "first.md".into();
+        assert!(!prepared.for_sources(&sources).has_source_file(FileId(1)));
+    }
 }

@@ -3409,8 +3409,41 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     }
     let mut visit = |expr: &crate::expr::Expr| visit(expr, app, target.as_str());
     crate::lower::for_each_hook_body_ref(app, &mut visit);
-    // The app-body survey intentionally excludes views and tests.
-    // Their constants need the same target-capability check.
+    // Like the Date gate, include roots outside the app-body survey.
+    for controller in &app.controllers {
+        for action in controller.actions() {
+            for (_, default) in &action.kw_params {
+                if let Some(default) = default {
+                    visit(default);
+                }
+            }
+        }
+    }
+    for fixture in &app.fixtures {
+        for expr in &fixture.preamble {
+            visit(expr);
+        }
+        for value in fixture.records.values().flat_map(|record| record.values()) {
+            if let crate::dialect::FixtureValue::Ruby(expr) = value {
+                visit(expr);
+            }
+        }
+    }
+    for helper in &app.routes.direct_helpers {
+        visit(&helper.body);
+    }
+    for function in &app.sql_functions {
+        let methods = match &function.kind {
+            crate::app::SqlFunctionKind::Scalar { method } => [Some(method), None],
+            crate::app::SqlFunctionKind::Aggregate { step, finalize } => [Some(step), Some(finalize)],
+        };
+        for method in methods.into_iter().flatten() {
+            visit(&method.body);
+            for default in method.params.iter().filter_map(|param| param.default.as_ref()) {
+                visit(default);
+            }
+        }
+    }
     for view in &app.views {
         visit(&view.body);
         for param in view.strict_locals.iter().flatten() {
@@ -6599,6 +6632,78 @@ fn walk_ruby(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_constant_gate_covers_auxiliary_emitted_roots() {
+        use crate::app::{SqlFunction, SqlFunctionKind};
+        use crate::dialect::{ControllerBodyItem, DirectHelper, Fixture, FixtureValue, Param};
+        use crate::expr::{Expr, ExprNode};
+        use crate::ident::{ClassId, Symbol};
+        use crate::span::{FileId, Span};
+        use crate::ty::Ty;
+
+        let tree = [
+            ("app/controllers/probes_controller.rb", "class ProbesController < ActionController::Base\n  def index(value: nil); nil; end\nend\n"),
+            ("app/services/probe.rb", "class Probe\n  def value; nil; end\nend\n"),
+        ].into_iter().map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec())).collect();
+        let mut base = crate::ingest::ingest_app_from_tree(tree).unwrap();
+        let method = base.library_classes.iter().find(|class| class.name.0.as_str() == "Probe")
+            .unwrap().methods[0].clone();
+        base.library_classes.clear();
+
+        for root in 0..8 {
+            let mut app = base.clone();
+            let span = Span { file: FileId(1), start: root, end: root + 1 };
+            let mut constant = Expr::new(span, ExprNode::Const {
+                path: vec![Symbol::new("Net"), Symbol::new("HTTPOK")],
+            });
+            constant.ty = Some(Ty::Class { id: ClassId(Symbol::new("Net::HTTPOK")), args: vec![] });
+            match root {
+                0 | 1 => app.fixtures.push(Fixture {
+                    name: Symbol::new("probes"), path: Symbol::new("probes"), model_class: None,
+                    preamble: if root == 0 { vec![constant.clone()] } else { vec![] },
+                    records: if root == 1 {
+                        [(Symbol::new("one"), [(Symbol::new("value"), FixtureValue::Ruby(constant))].into_iter().collect())].into_iter().collect()
+                    } else { Default::default() },
+                }),
+                2 => {
+                    let ControllerBodyItem::Action { action, .. } = &mut app.controllers[0].body[0] else {
+                        panic!("expected the controller action");
+                    };
+                    action.kw_params[0].1 = Some(constant);
+                }
+                3 => app.routes.direct_helpers.push(DirectHelper {
+                    name: Symbol::new("probe"), params: vec![], body: constant,
+                }),
+                _ => {
+                    let mut changed = method.clone();
+                    if root == 4 || root == 6 {
+                        changed.body = constant;
+                    } else {
+                        changed.params = vec![Param::with_default(Symbol::new("value"), constant)];
+                    }
+                    let kind = if root < 6 {
+                        SqlFunctionKind::Scalar { method: changed }
+                    } else if root == 6 {
+                        SqlFunctionKind::Aggregate { step: changed, finalize: method.clone() }
+                    } else {
+                        SqlFunctionKind::Aggregate { step: method.clone(), finalize: changed }
+                    };
+                    app.sql_functions.push(SqlFunction { name: "probe".into(), arity: 1, kind });
+                }
+            }
+            for target in [BuildTarget::Kotlin, BuildTarget::Ruby, BuildTarget::Jruby] {
+                let (_, diags) = emit::diagnostics::scope(|| report_unsupported_bundled_constants(&app, target));
+                assert_eq!(diags.len(), usize::from(target == BuildTarget::Kotlin), "root {root}, {target:?}: {diags:?}");
+                if let Some(diag) = diags.first() {
+                    assert_eq!(diag.span, span);
+                    assert_eq!(diag.severity, crate::diagnostic::Severity::Error);
+                    assert!(matches!(&diag.kind, crate::diagnostic::DiagnosticKind::Unsupported { construct, target: Some(name), .. }
+                        if construct.as_str() == "bundled_constant" && name.as_str() == "kotlin"));
+                }
+            }
+        }
+    }
 
     #[test]
     fn archive_playwright_matches_the_prewarmed_version() {

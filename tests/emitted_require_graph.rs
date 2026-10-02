@@ -270,7 +270,11 @@ fn an_app_model_is_not_mistaken_for_a_bundled_class() {
     let (_, diags) = roundhouse::emit::diagnostics::scope(|| {
         target_files(&app, Path::new("."), BuildTarget::Go).expect("target files")
     });
-    assert!(!diags.iter().any(|d| d.message.contains("bundled_constant")), "{diags:?}");
+    assert!(!diags.iter().any(|d| matches!(
+        &d.kind,
+        roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+            if construct.as_str() == "bundled_constant"
+    )), "{diags:?}");
 }
 
 #[test]
