@@ -120,6 +120,50 @@ fn instance_keyword_normalization_uses_the_effective_last_definition() {
 }
 
 #[test]
+fn unknown_ordinary_super_abi_is_not_mislabeled_as_full_forwarding() {
+    for (extra, relevant_full_selector) in [
+        ("", false),
+        ("class Other; def unrelated(...); 11; end; end", false),
+        ("class Other; def initialize(...); end; end", true),
+    ] {
+        let source = format!("class Probe < StandardError; def initialize; options={{}}; super(**options); end; end; {extra}");
+        let script = "puts Probe.new.message";
+        native_result(&source, script, "Probe\n");
+        let run = emit_and_run::real_blog()
+            .write("app/lib/probe.rb", &source)
+            .run_ruby(script);
+        if relevant_full_selector {
+            assert!(
+                run.errors.iter().any(|e| e.contains("keyword producer")),
+                "{:?}; actual={}; stderr={}",
+                run.errors,
+                run.stdout,
+                run.stderr
+            );
+        } else {
+            // Simply restoring Legacy would emit super(options), changing
+            // Ruby's empty-keyword semantics: the message becomes "{}".
+            assert!(run.errors.iter().any(|e| e.contains("ordinary super") && e.contains("argument ABI")), "{:?}", run.errors);
+            assert!(!run.errors.iter().any(|e| e.contains("full forwarding")), "{:?}", run.errors);
+        }
+    }
+}
+
+#[test]
+fn source_super_keyword_rest_keeps_verified_legacy_projection() {
+    for (options, expected) in [("{}", "8\n"), ("{left:33,right:11}", "22\n")] {
+        let source = format!("class Parent; def initialize(**options); @proof=options.fetch(:left,11)-options.fetch(:right,3); end; def proof; @proof; end; end; class Probe < Parent; def initialize; options={options}; super(**options); end; end");
+        let script = "puts Probe.new.proof";
+        native_result(&source, script, expected);
+        let run = emit_and_run::real_blog()
+            .write("app/lib/probe.rb", &source)
+            .run_ruby(script);
+        run.assert_passes();
+        assert_eq!(run.stdout, expected);
+    }
+}
+
+#[test]
 fn compiled_keyword_producer_into_forwarding_operator_keeps_call_syntax() {
     let source = "class Sink; def ==(...); 11; end; end; class Probe; def self.run; kw={factor:3}; Sink.new.==(**kw); end; end";
     native_result(source, "puts Probe.run", "11\n");

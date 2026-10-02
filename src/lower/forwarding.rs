@@ -11,8 +11,8 @@ pub(super) fn apply(app: &mut App) -> Vec<Diagnostic> {
     let plans = keyword_calls(app);
     let mut diagnostics = Vec::new();
     for (span, policy) in &plans {
-        if *policy == KeywordPolicy::Refuse {
-            diagnostics.push(keyword_refusal(*span));
+        if matches!(policy, KeywordPolicy::Refuse | KeywordPolicy::RefuseOrdinarySuper) {
+            diagnostics.push(keyword_refusal(*span, *policy));
         }
     }
     fn project(e: &mut Expr, plans: &std::collections::HashMap<crate::span::Span, KeywordPolicy>) {

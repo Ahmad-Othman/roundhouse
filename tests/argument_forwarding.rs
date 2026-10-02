@@ -281,6 +281,46 @@ fn analyzed(source: &str) -> roundhouse::App {
 }
 
 #[test]
+fn forwarding_markers_are_not_values_or_gradual_escapes() {
+    use roundhouse::diagnostic::DiagnosticKind;
+    use roundhouse::expr::ExprNode;
+
+    let sink = "class Sink; def self.target(a,b); a-b; end; end";
+    let methods = "def relay(...); Sink.target(...); end; def opaque; yield; end";
+    let mut app = ingest_app_from_tree(HashMap::from([
+        (PathBuf::from("app/lib/sink.rb"), sink.as_bytes().to_vec()),
+        (PathBuf::from("app/models/article.rb"), format!("class Article < ApplicationRecord; {methods}; end").into_bytes()),
+    ])).unwrap();
+    Analyzer::new(&app).analyze(&mut app);
+    let mut pending: Vec<_> = app.models[0].methods().map(|m| &m.body).collect();
+    let mut packets = Vec::new();
+    let mut yields = Vec::new();
+    while let Some(expr) = pending.pop() {
+        match &*expr.node {
+            ExprNode::ForwardArgs => packets.push(expr.span),
+            ExprNode::Yield { .. } => yields.push(expr.span),
+            _ => {}
+        }
+        expr.node.for_each_child(&mut |child| pending.push(child));
+    }
+    assert_eq!(packets.len(), 1);
+    assert_eq!(yields.len(), 1);
+    let diags = diagnose(&app);
+    let gradual: Vec<_> = diags.iter().filter(|d| matches!(d.kind, DiagnosticKind::GradualUntyped { .. })).collect();
+    assert!(!gradual.iter().any(|d| packets.contains(&d.span)), "{diags:?}");
+    assert!(gradual.iter().any(|d| yields.contains(&d.span)), "{diags:?}");
+
+    let script = "puts Article.new.relay(11,3)";
+    native_result(&format!("{sink}; class Article; {methods}; end"), script, "8\n");
+    let run = emit_and_run::real_blog()
+        .write("app/lib/sink.rb", sink)
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", &format!("class Article < ApplicationRecord\n {methods}\n"))
+        .run_ruby(script);
+    run.assert_passes();
+    assert_eq!(run.stdout, "8\n");
+}
+
+#[test]
 fn flattened_optional_keyword_callee_is_honestly_unsupported() {
     let source = r#"
 class Sink

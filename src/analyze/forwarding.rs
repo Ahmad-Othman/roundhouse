@@ -75,8 +75,8 @@ pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
         }
     }
     for (span, policy) in keyword_calls_with_index(app, &contracts) {
-        if policy == KeywordPolicy::Refuse {
-            out.push(keyword_refusal(span));
+        if matches!(policy, KeywordPolicy::Refuse | KeywordPolicy::RefuseOrdinarySuper) {
+            out.push(keyword_refusal(span, policy));
         }
     }
     out
@@ -340,9 +340,18 @@ pub(crate) enum KeywordPolicy {
     Native,
     Legacy,
     Refuse,
+    RefuseOrdinarySuper,
 }
 
-pub(crate) fn keyword_refusal(span: Span) -> Diagnostic {
+pub(crate) fn keyword_refusal(span: Span, policy: KeywordPolicy) -> Diagnostic {
+    if policy == KeywordPolicy::RefuseOrdinarySuper {
+        return Diagnostic::unsupported(
+            span,
+            None,
+            "keyword splat in ordinary super",
+            "super destination's native or lowered argument ABI cannot be verified",
+        );
+    }
     Diagnostic::unsupported(
         span,
         None,
@@ -380,11 +389,19 @@ fn keyword_calls_with_index(
                 .any(|a| matches!(&*a.node, ExprNode::KeywordSplat { .. }))
         }) && !(fallback && plans.contains_key(&e.span))
         {
-            let policy = if !possible_full_destination(contracts, e) {
+            let policy = if !possible_full_destination(contracts, context, e) {
                 // Unrelated selectors cannot reach a full contract. Avoid
                 // scanning receiver provenance and hierarchies for each of
                 // their keyword calls in a large application.
-                KeywordPolicy::Legacy
+                if matches!(&*e.node, ExprNode::Super { .. })
+                    && destination(app, contracts, context, e).is_none()
+                {
+                    // An absent full selector does not prove that erasing **
+                    // matches an external parent's native keyword ABI.
+                    KeywordPolicy::RefuseOrdinarySuper
+                } else {
+                    KeywordPolicy::Legacy
+                }
             } else {
                 let resolved = destination(app, contracts, context, e);
                 if resolved.is_some_and(|(m, _)| m.params.iter().any(|p| p.forwarding)) {
@@ -446,9 +463,20 @@ fn keyword_calls_with_index(
     plans
 }
 
-fn possible_full_destination(contracts: &SourceContractIndex<'_>, call: &Expr) -> bool {
-    let ExprNode::Send { method, .. } = &*call.node else {
-        return true;
+fn possible_full_destination(
+    contracts: &SourceContractIndex<'_>,
+    context: Option<(&ClassId, &MethodDef)>,
+    call: &Expr,
+) -> bool {
+    let method = match &*call.node {
+        ExprNode::Send { method, .. } => method,
+        // Super uses the enclosing selector, not every full selector in the
+        // app. Unrelated framework parents keep their ordinary keyword ABI.
+        ExprNode::Super { .. } => match context {
+            Some((_, enclosing)) => &enclosing.name,
+            None => return true,
+        },
+        _ => return true,
     };
     // No declaration proof: refuse if this selector can name a source
     // full forwarder. Unrelated catalog/framework calls keep legacy lowering.

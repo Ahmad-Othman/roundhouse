@@ -229,10 +229,11 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
     // body-typer doesn't annotate `expr.diagnostic` for Untyped — the
     // walker is the natural place since every node's `.ty` already
     // carries the signal.
-    // A `Seq` has its tail's type; the tail reports itself.
+    // A `Seq` has its tail's type; the tail reports itself. ForwardArgs is
+    // an argument-packet marker, not a value escaping the type system.
     if value_used
         && matches!(expr.ty.as_ref(), Some(Ty::Untyped))
-        && !matches!(&*expr.node, ExprNode::Seq { .. })
+        && !matches!(&*expr.node, ExprNode::Seq { .. } | ExprNode::ForwardArgs)
     {
         let kind = DiagnosticKind::GradualUntyped {
             expr_kind: crate::ident::Symbol::new(expr_kind_label(expr)),
