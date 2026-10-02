@@ -306,6 +306,15 @@ impl ConstResolver {
         self.file(span.file)?.references.get(&start).map(Option::as_ref)
     }
 
+    /// Exact source-resolved namespace, also used by ingest admission gates
+    /// that must distinguish lexical namesakes from the activated concern.
+    pub(crate) fn namespace(&self, span: Span, path: &[Symbol]) -> Option<&ClassId> {
+        match self.reference(span, path)?? {
+            ResolvedConstant::Namespace { class, .. } => Some(class),
+            ResolvedConstant::Value { .. } => None,
+        }
+    }
+
     /// The declaration that a constant assignment defines. The IR keeps
     /// the assigned value, and Ruby writes the name just before it, so
     /// the definition is the last one in the file whose name ends at or

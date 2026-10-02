@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use ruby_prism::{CallNode, Node};
 
 use crate::dialect::{MethodDef, MethodVisibility};
+use crate::ident::ClassId;
 
 use super::util::{constant_id_str, flatten_statements, module_name_path, symbol_or_string_value};
 use super::{IngestError, IngestResult};
@@ -48,7 +49,11 @@ pub(super) fn definition<'pr>(node: &Node<'pr>) -> Option<ruby_prism::DefNode<'p
 }
 
 impl Visibility {
-    pub(super) fn resolve(body: Option<&Node<'_>>, file: &str) -> IngestResult<Self> {
+    pub(super) fn resolve(
+        body: Option<&Node<'_>>,
+        file: &str,
+        module_owner: Option<&ClassId>,
+    ) -> IngestResult<Self> {
         let mut out = Self::default();
         if let Some(body) = body {
             let Some(statements) = body.as_statements_node() else {
@@ -57,7 +62,7 @@ impl Visibility {
                     "visibility requires a static declaration body",
                 ));
             };
-            out.walk(Some(statements.as_node()), false, file)?;
+            out.walk(Some(statements.as_node()), false, file, module_owner)?;
         }
         Ok(out)
     }
@@ -157,7 +162,7 @@ impl Visibility {
         // A Concern's ClassMethods module is NOT the concern's own singleton
         // class. Their methods only share a bucket after flattening.
         let mut carrier = Self::default();
-        carrier.walk(body, true, file)?;
+        carrier.walk(body, true, file, None)?;
         self.values.extend(carrier.values);
         Ok(())
     }
@@ -193,7 +198,13 @@ impl Visibility {
         Ok(())
     }
 
-    fn walk(&mut self, body: Option<Node<'_>>, class_side: bool, file: &str) -> IngestResult<()> {
+    fn walk(
+        &mut self,
+        body: Option<Node<'_>>,
+        class_side: bool,
+        file: &str,
+        module_owner: Option<&ClassId>,
+    ) -> IngestResult<()> {
         let Some(body) = body else { return Ok(()) };
         // A new lexical body always starts public. A marker in the enclosing
         // class must not privatize def self.x or leak into class_methods.
@@ -303,7 +314,7 @@ impl Visibility {
                         "visibility of a foreign or nested singleton class is not modeled",
                     ));
                 }
-                self.walk(sc.body(), true, file)?;
+                self.walk(sc.body(), true, file, None)?;
                 continue;
             }
             // Nested classes have their own declaration pass and namespace.
@@ -332,6 +343,15 @@ impl Visibility {
                     file,
                     "module_function on a nested singleton level or class-method carrier is not modeled",
                 ));
+            }
+            // Only collector-owned candidates have a replacement refusal gate:
+            // their unclaimed block context is diagnosed per includer. Do not
+            // exempt candidate-free blocks or singleton/class-method carriers.
+            if name == "included" && module_owner.is_some_and(|owner| {
+                call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body())
+                    .is_some_and(|body| super::library_class::included_has_accessor(body, owner, file))
+            }) {
+                continue;
             }
             if name == "class_methods" {
                 if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
