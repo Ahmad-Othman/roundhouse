@@ -158,7 +158,9 @@ end
 
 DOCTOR_CHECKS = [
   { key: :ruby,   label: 'Ruby',      unlocks: 'always (rh itself)',     min: '3.4' },
-  { key: :rust,   label: 'Rust',      unlocks: 'transpile, site, compare' },
+  { key: :rust,   label: 'Rust',      unlocks: 'transpile, site, compare, verify' },
+  { key: :git,    label: 'Git',       unlocks: 'verify / verify --plan' },
+  { key: :python, label: 'Python 3',  unlocks: 'optional verify hosted-coverage preview' },
   { key: :node,   label: 'Node',      unlocks: 'typescript target' },
   { key: :sqlite, label: 'SQLite',    unlocks: 'ruby/spinel/rust targets' },
   { key: :rails,  label: 'Rails gem', unlocks: 'fixture' },
@@ -175,6 +177,8 @@ def cmd_doctor(argv)
   versions = {
     ruby:   RUBY_VERSION,
     rust:   version_of(probe('cargo', '--version')),
+    git:    version_of(probe('git', '--version')),
+    python: version_of(probe('python3', '--version')),
     node:   version_of(probe('node', '--version')),
     sqlite: version_of(probe('sqlite3', '--version')),
     rails:  version_of(probe('rails', '--version')),
@@ -198,6 +202,8 @@ def cmd_doctor(argv)
 
   puts ''
   available = ['doctor', 'fetch <target>', 'clean <target | fixture>']
+  available << 'verify --plan' if versions[:git]
+  available << 'verify' if versions[:git] && versions[:rust]
   available << 'fixture' if versions[:rails]
   if versions[:rust]
     available << 'transpile <target>'
@@ -227,6 +233,8 @@ end
 def install_hint(key)
   case key
   when :rust   then 'https://rustup.rs'
+  when :git    then 'https://git-scm.com'
+  when :python then 'https://www.python.org (optional for verify)'
   when :node   then 'https://nodejs.org or `brew install node`'
   when :sqlite then 'macOS: preinstalled; Debian/Ubuntu: apt install libsqlite3-dev'
   when :rails  then 'gem install rails'
@@ -283,8 +291,17 @@ def cmd_verify(argv)
     policy = runpy.run_path(sys.argv[1])
     print(json.dumps(policy['select'](json.load(sys.stdin))))
   PYTHON
-  hosted = JSON.parse(verify_capture('python3', '-B', '-c', policy,
-    File.join(ROUNDHOUSE_ROOT, 'scripts', 'ci-plan.py'), input: JSON.generate(changes)))
+  hosted = hosted_error = nil
+  begin
+    hosted = JSON.parse(verify_capture('python3', '-B', '-c', policy,
+      File.join(ROUNDHOUSE_ROOT, 'scripts', 'ci-plan.py'), input: JSON.generate(changes)))
+    unless hosted.is_a?(Hash) && hosted['jobs'].is_a?(Array)
+      raise ArgumentError, 'unsupported hosted coverage format'
+    end
+  rescue ArgumentError, SystemCallError, JSON::ParserError => e
+    hosted = nil
+    hosted_error = e.message
+  end
   commands = [['cargo', 'build', '--locked', '--tests'], ['cargo', 'test', '--locked', '--lib', '--', '--test-threads=1']]
   suites.uniq.each do |name, ignored|
     command = ['cargo', 'test', '--locked', '--test', name, '--']
@@ -302,46 +319,42 @@ def cmd_verify(argv)
     scope: 'partial local verification; hosted coverage is informational, not executed',
     head: head, base: base_sha, changes: changes, build_environment: build_env,
     prerequisites: ['Pinned Rust via rust-toolchain.toml, Ruby and test gems; selected toolchains must be installed'],
-    missing_fixtures: missing, hosted_coverage: hosted,
+    missing_fixtures: missing, hosted_coverage: hosted, hosted_coverage_error: hosted_error,
     checks: commands.map { |command| { command: command, status: 'not-run' } },
     status: plan_only ? 'planned' : 'blocked'
   }
   unless json
     puts "Local verification at #{head} (working tree included); not hosted CI."
-    puts "Hosted selection (not executed): #{hosted.fetch('jobs').join(', ')}"
+    puts(hosted ? "Hosted selection (not executed): #{hosted.fetch('jobs').join(', ')}" : "Hosted selection unavailable: #{hosted_error}")
     puts "Missing fixtures: #{missing.join(', ')} — see bin/rh fixture and scripts/create-store" unless missing.empty?
     commands.each { |command| puts "  #{command.shelljoin}" }
   end
   rc = 0
   unless plan_only
-    if missing.empty?
-      lock_path = verify_capture('git', 'rev-parse', '--git-path', 'rh-verify.lock').strip
-      File.open(File.expand_path(lock_path, ROUNDHOUSE_ROOT), File::RDWR | File::CREAT, 0o600) do |lock|
-        unless lock.flock(File::LOCK_EX | File::LOCK_NB)
-          raise ArgumentError, 'another verify run owns this worktree; wait for it to finish'
+    lock_path = verify_capture('git', 'rev-parse', '--git-path', 'rh-verify.lock').strip
+    File.open(File.expand_path(lock_path, ROUNDHOUSE_ROOT), File::RDWR | File::CREAT, 0o600) do |lock|
+      unless lock.flock(File::LOCK_EX | File::LOCK_NB)
+        raise ArgumentError, 'another verify run owns this worktree; wait for it to finish'
+      end
+      report[:status] = 'passed'
+      report[:checks].each do |check|
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        begin
+          system(build_env, *check[:command], chdir: ROUNDHOUSE_ROOT, out: $stderr, err: $stderr)
+          status = $?
+          rc = status.exitstatus || 128 + status.termsig
+        rescue Errno::ENOENT => e
+          warn e.message
+          rc = 127
         end
-        report[:status] = 'passed'
-        report[:checks].each do |check|
-          started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          begin
-            system(build_env, *check[:command], chdir: ROUNDHOUSE_ROOT, out: $stderr, err: $stderr)
-            status = $?
-            rc = status.exitstatus || 128 + status.termsig
-          rescue Errno::ENOENT => e
-            warn e.message
-            rc = 127
-          end
-          check[:seconds] = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round(3)
-          check[:exit] = rc
-          check[:status] = rc.zero? ? 'passed' : 'failed'
-          unless rc.zero?
-            report[:status] = 'failed'
-            break
-          end
+        check[:seconds] = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).round(3)
+        check[:exit] = rc
+        check[:status] = rc.zero? ? 'passed' : 'failed'
+        unless rc.zero?
+          report[:status] = 'failed'
+          break
         end
       end
-    else
-      rc = 2
     end
   end
   puts(json ? JSON.pretty_generate(report) : "Local checks: #{report[:status]}; unexecuted hosted gates remain unverified.")

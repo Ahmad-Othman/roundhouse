@@ -27,6 +27,10 @@ class RhVerifyTest < Minitest::Test
     File.write(cargo, <<~RUBY)
       #!#{RbConfig.ruby}
       require 'json'
+      if ARGV == ['--version']
+        puts 'cargo 1.98.1'
+        exit 0
+      end
       File.open(ENV.fetch('VERIFY_LOG'), 'a') do |f|
         f.puts JSON.generate(args: ARGV, cwd: Dir.pwd, jobs: ENV['CARGO_BUILD_JOBS'], debug: ENV['CARGO_PROFILE_TEST_DEBUG'])
       end
@@ -110,16 +114,57 @@ class RhVerifyTest < Minitest::Test
     assert calls.all? { |c| c['jobs'] == '3' && c['debug'] == '1' }
   end
 
-  def test_missing_fixtures_block_execution_but_allow_preview
+  def test_missing_fixtures_are_reported_without_blocking_unrelated_checks
     FileUtils.remove_entry(File.join(@root, 'fixtures/store'))
     out, err, status = invoke('--json')
-    assert_equal 2, status.exitstatus, err
-    assert_equal 'blocked', JSON.parse(out)['status']
+    assert status.success?, err
+    assert_equal 'passed', JSON.parse(out)['status']
     assert_equal ['store'], JSON.parse(out)['missing_fixtures']
+    assert_equal 2, calls.length
     out, err, status = invoke('--plan', '--json')
     assert status.success?, err
     assert_equal 'planned', JSON.parse(out)['status']
+    assert_equal 2, calls.length
+  end
+
+  def test_informational_policy_failure_does_not_block_local_execution
+    File.write(File.join(@root, 'scripts/ci-plan.py'), "raise RuntimeError('unavailable policy')\n")
+    out, err, status = invoke('--json')
+    assert status.success?, err
+    report = JSON.parse(out)
+    assert_equal 'passed', report['status']
+    assert_nil report['hosted_coverage']
+    assert_includes report['hosted_coverage_error'], 'unavailable policy'
+    assert_equal 2, calls.length
+  end
+
+  def test_changed_policy_format_remains_informational
+    File.write(File.join(@root, 'scripts/ci-plan.py'), "def select(paths): return []\n")
+    out, err, status = invoke
+    assert status.success?, err
+    assert_includes out, 'Hosted selection unavailable: unsupported hosted coverage format'
+    assert_includes out, 'Local checks: passed'
+    assert_equal 2, calls.length
+  end
+
+  def test_help_human_results_and_doctor_discover_verification
+    out, err, status = invoke('--help')
+    assert status.success?, err
+    assert_includes out, '--plan'
     assert_empty calls
+    out, err, status = invoke
+    assert status.success?, err
+    assert_includes out, 'Local checks: passed'
+    assert_includes out, 'not hosted CI'
+    out, _err, status = invoke(env: { 'VERIFY_FAIL' => '--lib' })
+    assert_equal 17, status.exitstatus
+    assert_includes out, 'Local checks: failed'
+    out, err, status = Open3.capture3({ 'PATH' => "#{@root}/mocks:#{ENV.fetch('PATH')}", 'VERIFY_LOG' => @log },
+      RbConfig.ruby, File.join(@root, 'bin/rh'), 'doctor')
+    assert status.success?, err
+    assert_includes out, 'bin/rh verify --plan'
+    assert_includes out, 'bin/rh verify'
+    assert_includes out, 'optional verify hosted-coverage preview'
   end
 
   def test_invalid_inputs_never_start_cargo

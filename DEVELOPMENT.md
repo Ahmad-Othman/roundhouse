@@ -83,9 +83,12 @@ bin/rh verify --test ingest --test real_blog
 bin/rh verify --toolchain ruby --json > verification.json
 ```
 
-It needs Git, Python 3 (stdlib only), repository-pinned Rust, Ruby/test gems,
-both generated fixtures, and any selected target toolchain. Fixtures and
-dependencies must already be prepared; it never installs them. `--plan`
+It needs Git, repository-pinned Rust, Ruby/test gems and any selected target
+toolchain. Python 3 (stdlib only) is optional for the hosted-coverage preview;
+planner failures are reported as unavailable and do not block local checks.
+Fixtures and dependencies required by the executed tests must already be
+prepared; missing fixtures are listed, but each test owns its prerequisites
+and reports failures itself. The runner never installs them. `--plan`
 only reads Git and the existing `scripts/ci-plan.py` policy; it does not call
 Cargo, create a lock, generate Python bytecode, or execute tests.
 
@@ -110,9 +113,9 @@ Cargo commands. Check disk space with your platform tools before large runs.
 HEAD, changed paths, base, build settings, each command, its exit code/time and
 `passed`, `failed` or `not-run` status. It includes the working tree but is not
 a content fingerprint or reusable execution receipt; do not reuse it merely
-because HEAD matches. A preview is `planned`, missing fixtures block execution
-with exit 2, and a failed child stops subsequent checks and preserves its exit
-code. Invalid arguments/prerequisites are reported on stderr with exit 2.
+because HEAD matches. A preview is `planned`; a failed child stops subsequent
+checks and preserves its exit code. Invalid arguments or missing Git are
+reported on stderr with exit 2; an unavailable Cargo command exits 127.
 
 Cleanup: `bin/rh clean <target | fixture>`.
 
