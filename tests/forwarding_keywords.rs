@@ -102,6 +102,24 @@ end
 }
 
 #[test]
+fn instance_keyword_normalization_uses_the_effective_last_definition() {
+    let flat = "def target(factor: 2); factor*11; end";
+    let full = "def target(...); Leaf.accept(...); end";
+    for (first, last, expected) in [(flat, full, "21\n"), (full, flat, "33\n")] {
+        let source = format!(
+            "class Sink; {first}; {last}; end; class Leaf; def self.accept(factor:); factor*7; end; end; class Probe; def self.run; sink=Sink.new; sink.target(factor:3); end; end"
+        );
+        let script = "puts Probe.run";
+        native_result(&source, script, expected);
+        let run = emit_and_run::real_blog()
+            .write("app/lib/probe.rb", &source)
+            .run_ruby(script);
+        run.assert_passes();
+        assert_eq!(run.stdout, expected);
+    }
+}
+
+#[test]
 fn compiled_keyword_producer_into_forwarding_operator_keeps_call_syntax() {
     let source = "class Sink; def ==(...); 11; end; end; class Probe; def self.run; kw={factor:3}; Sink.new.==(**kw); end; end";
     native_result(source, "puts Probe.run", "11\n");

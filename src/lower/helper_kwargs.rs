@@ -142,14 +142,20 @@ fn apply_to_instance_calls(app: &mut App) {
     let mut params: HashMap<(String, Symbol), Vec<Slot>> = HashMap::new();
     for lc in &app.library_classes {
         for m in &lc.methods {
-            if m.receiver != crate::dialect::MethodReceiver::Instance
-                || m.params.iter().any(|p| p.rest || p.keyword)
+            if m.receiver != crate::dialect::MethodReceiver::Instance {
+                continue;
+            }
+            let key = (lc.name.0.as_str().to_string(), m.name.clone());
+            // A later native definition replaces the earlier flattened ABI,
+            // just as it does for class-method keyword normalization above.
+            params.remove(&key);
+            if m.params.iter().any(|p| p.rest || p.keyword || p.forwarding)
                 || !m.params.iter().any(|p| p.from_keyword)
             {
                 continue;
             }
             params.insert(
-                (lc.name.0.as_str().to_string(), m.name.clone()),
+                key,
                 m.params.iter().map(slot_of).collect(),
             );
         }
