@@ -1,10 +1,80 @@
-# Conservative PR-local CI reuse
+# CI coverage and conservative PR-local reuse
+
+## Compact PR checks and full validation
+
+`.github/workflows/ci.yml` runs a compact floor on PRs and main pushes:
+
+- Fixture generation and `unit` (`cargo test --all-targets`, including emitted
+  Ruby execution tests and the debug-profile bench emission checks).
+- Store analysis, Ruby/Rust/TypeScript comparisons against live Rails.
+- TypeScript SharedWorker browser tests, Campfire conformance, and Campfire
+  comparison including its model/database differential.
+
+These are nine validation executions, plus three small orchestration jobs
+(`plan`, `compact-required`, `ci-required`). Drafts select only fixture and
+unit validation. **`ci-required` is the stable merge-gate status:** it rejects
+missing, skipped, cancelled or failed selected blocking checks. Unselected
+jobs may skip. Advisory failures remain visible, not merge blockers.
+Repository administrators should migrate required-check settings only after
+observing the new status on a real PR; the workflow does not change protection.
+
+The planner compares the actual PR merge tree with its base, not just the last
+commit. Renames/deletions retain both ownership sets. Unknown diff identity
+expands to full validation. Documentation-only PRs still get the required
+status instead of being left pending by workflow-level path filters.
+
+| Changed inputs | Additional coverage |
+|---|---|
+| Target emitter file **or directory**, target runtime, toolchain/framework test | Owning comparison and archive smoke; existing embedded framework/toolchain suites stay intact |
+| Ruby emitter or Spinel adapters | Ruby/JRuby/Spinel family, since interpreted targets also consume Spinel-tree files |
+| Shared analyzer, lowerer, `runtime/ruby/` | Compact floor; reviewers request full validation for broad/risky changes |
+| `wasm/` | WASM build and IDE/playground/studio browser verification |
+| Site/guide sources | Site/archive build and WASM verification, without publishing |
+| Shared compare or archive/E2E harness | Its owning comparisons or archive smokes |
+| CI policy, cross-target packaging, unknown new target | Full validation |
+
+Add **`ci:full`** to a non-draft PR to request the full matrix for its current
+merge tree. Removing the label restores automatic routing. Label/draft/head
+transitions cancel superseded PR runs. A manual **Full validation** dispatch
+validates the chosen ref freshly; a branch-head dispatch is not a replacement
+for the PR merge-tree check. Publication is opt-in for dispatch and is accepted
+only on canonical `rubys/roundhouse` main. No deployment privileges are granted
+to the shared validator or PR jobs.
+
+Targeted archive smokes use `roundhouse --archives rust,go` (selected
+`browse/<target>.{json,tgz,zip}` outputs) and do not build WASM, demos, website
+assets or unrelated archives. The same archive writers power `--site`, which
+keeps the complete developer-facing build. Full publication and smoke consume
+the same producer bytes, without later re-emission.
+
+`.github/workflows/full-ci.yml` checks canonical main at **00:17, 04:17,
+08:17, 12:17, 16:17 and 20:17 UTC**, bundling full validation and publication.
+Its exact completion key includes main SHA, observed Spinel master SHA and UTC
+day. Spinel is resolved once and built at that revision. The daily refresh
+exercises floating Rails/SDK/runner inputs even without repository changes.
+Only an exact successful lookup can skip a scheduled first attempt; lookup
+uncertainty, dispatches and reruns execute. Failed/unavailable advisory work,
+failed required coverage or failed publication prevents saving the marker, so
+the next interval retries. This can mean all six runs execute during upstream
+failure; it does not pretend that failure was validated successfully.
+
+Publication requires the **compact** floor and assembled site, not passing all
+extra-target or advisory lanes: broken-emit archives are also upstream repros.
+The deployment lock rechecks that canonical main still equals the validated
+SHA; lookup failure or a superseded snapshot prevents publication. A new main
+commit racing the final check cannot be made atomic with Pages deployment.
+Started background runs finish; only the newest pending request is retained.
+Extra comparison/smoke matrices use `max-parallel: 2`, GC uses 1. These bound
+fanouts, **not** total repository concurrency or a guaranteed PR runner priority.
+
+## Reuse within selected PR checks
 
 `scripts/ci-reuse.py` can reuse **executed, successful** checks from the same
 pull request. The allowlist is `store-check`, `writebook-inventory`, Rust archive
 smoke, SharedWorker browser smoke, and the Rust inflector framework suite.
 Unit tests, fixture generation, artifact producers, DOM comparisons, other
-toolchain lanes and all main-branch checks still execute freshly.
+selected toolchain lanes and all selected main-branch checks execute freshly.
+Routing changes the required coverage, not the execution-receipt trust rules.
 
 ## What must match
 

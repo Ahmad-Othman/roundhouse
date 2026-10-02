@@ -87,9 +87,11 @@ defect even if the build is green.
   you changed. End commit messages with the standard `Co-Authored-By`
   trailer.
 - **Outside contributors: fork, and open a pull request against `main`.**
-  CI runs the full matrix on a PR — every toolchain lane, the DOM compare
-  against live Rails, the Spinel lanes — so you do not need every
-  toolchain locally; CI is the oracle for the lanes you cannot run.
+  CI runs a compact floor plus targeted lanes; add `ci:full` for the
+  complete PR matrix. Full main validation/publication is scheduled every
+  four hours, with changed-input checks and a daily refresh. `ci-required`
+  gates selected blocking coverage; see [CI coverage](docs/ci-reuse.md).
+  You do not need every toolchain locally; CI covers the missing lanes.
   Before opening one: `bin/rh fixture` (the test fixtures are generated,
   not checked in — see below), `cargo test --lib` plus the targeted
   integration test for what you touched, and a test that pins the fix.
@@ -120,5 +122,5 @@ defect even if the build is green.
 The endpoint is not "does the fixture compile." It is a **per-target ledger of
 how much of Rails transpiles** — the honest unsupported list, driven down over
 time. Don't trade that real goal for a locally reachable one. The proving lanes
-today are the real-blog fixture (every target, DOM-equivalent to Rails on every
-push) and lobsters/Mastodon on the inference + Spinel path (see README).
+today are the real-blog fixture (every target, DOM-equivalent to Rails in full
+validation) and lobsters/Mastodon on the inference + Spinel path (see README).

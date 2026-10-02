@@ -310,10 +310,10 @@ fn pr_archives_remain_tested_without_pages_publication_work() {
     assert_eq!(
         jobs["build-site"]["if"].as_str(),
         Some(
-            "${{ !cancelled() && needs.generate-fixture.result == 'success' && needs.build-wasm.result == 'success' }}"
+            "${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'build-site') && needs.generate-fixture.result == 'success' && (needs.plan.outputs.site != 'true' || needs.build-wasm.result == 'success') }}"
         )
     );
-    assert_eq!(jobs["smoke"]["needs"].as_str(), Some("build-site"));
+    assert_eq!(jobs["smoke"]["needs"][0].as_str(), Some("build-site"));
     let steps = jobs["build-site"]["steps"].as_sequence().unwrap();
     for (id, output, renderer) in [
         ("fetch-bench", "bench_data", "Render bench page"),
@@ -344,7 +344,7 @@ fn pr_archives_remain_tested_without_pages_publication_work() {
             .unwrap();
         assert_eq!(
             fetch["if"].as_str(),
-            Some("github.ref == 'refs/heads/main'")
+            Some("needs.plan.outputs.publish == 'true'")
         );
         let render = steps
             .iter()
@@ -368,23 +368,17 @@ fn pr_archives_remain_tested_without_pages_publication_work() {
         .unwrap();
     assert_eq!(
         pages["if"].as_str(),
-        Some("github.ref == 'refs/heads/main'")
+        Some("needs.plan.outputs.publish == 'true'")
     );
     // Keep the status function: a failed Campfire floor must not suppress
     // its explanatory publication, but cancellation or a bad site must.
     assert_eq!(
         jobs["assemble-site"]["if"].as_str(),
         Some(
-            "${{ !cancelled() && github.ref == 'refs/heads/main' && needs.build-site.result == 'success' }}"
+            "${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.build-site.result == 'success' }}"
         )
     );
-    assert_eq!(
-        jobs["deploy"]["if"].as_str(),
-        Some("github.repository == 'rubys/roundhouse' && github.ref == 'refs/heads/main'")
-    );
-    assert!(jobs["deploy"].get("continue-on-error").is_none(), "production deployment failures must remain visible");
-    assert_eq!(jobs["deploy"]["needs"][0].as_str(), Some("assemble-site"));
-    assert_eq!(jobs["deploy"]["needs"][1].as_str(), Some("unit"));
+    assert!(jobs.get("deploy").is_none(), "PR validation must not carry deployment privileges");
 }
 
 #[test]
@@ -392,13 +386,13 @@ fn draft_transitions_replace_the_previous_pr_run() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let events = ci["on"]["pull_request"]["types"].as_sequence().unwrap();
-    for event in ["ready_for_review", "converted_to_draft"] {
+    for event in ["ready_for_review", "converted_to_draft", "labeled", "unlabeled"] {
         assert!(events.iter().any(|value| value.as_str() == Some(event)));
     }
     assert_eq!(
         ci["concurrency"]["group"].as_str(),
         Some(
-            "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}"
+            "validation-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}"
         )
     );
     assert_eq!(
@@ -809,7 +803,7 @@ fn pr_reuse_never_masks_validation_failures_or_changes_the_job_graph() {
                 &["build", "check"]
             }
             "writebook-inventory" => {
-                assert_eq!(job["needs"].as_str(), Some("unit"));
+                assert_eq!(job["needs"][0].as_str(), Some("unit"));
                 &["inventory", "report"]
             }
             "browser-smoke-typescript" => {
@@ -818,7 +812,7 @@ fn pr_reuse_never_masks_validation_failures_or_changes_the_job_graph() {
                 &["browser"]
             }
             "smoke" => {
-                assert_eq!(job["needs"].as_str(), Some("build-site"));
+                assert_eq!(job["needs"][0].as_str(), Some("build-site"));
                 assert_eq!(
                     probe["if"].as_str(),
                     Some("github.event_name == 'pull_request' && matrix.target == 'rust'")
@@ -986,4 +980,140 @@ fn reused_checks_keep_cargo_dependencies_locked_and_upload_only_execution_receip
         assert_eq!(uploads[0]["continue-on-error"].as_bool(), Some(true));
         assert_eq!(uploads[0]["with"]["retention-days"].as_u64(), Some(7));
     }
+}
+
+#[test]
+fn routing_and_required_results_reject_false_green() {
+    let result = std::process::Command::new("python3")
+        .args(["-B", "tests/ci_plan_test.py", "-v"])
+        .output()
+        .expect("CI routing tests require python3");
+    assert!(result.status.success(), "{}\n{}",
+        String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+}
+
+#[test]
+fn compact_and_extra_compare_share_commands_but_not_results() {
+    let ci: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+        &fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let jobs = &ci["jobs"];
+    assert_eq!(jobs["compare"]["strategy"]["matrix"]["target"],
+        serde_yaml_ng::from_str::<serde_yaml_ng::Value>("[rust, typescript]").unwrap());
+    assert_eq!(jobs["compare"]["steps"], jobs["compare-extra"]["steps"]);
+    assert_eq!(jobs["compare-extra"]["strategy"]["max-parallel"].as_u64(), Some(2));
+    assert_eq!(jobs["smoke"]["strategy"]["max-parallel"].as_u64(), Some(2));
+    let smoke_guard = jobs["smoke"]["if"].as_str().unwrap();
+    for condition in ["!cancelled()", "needs.plan.result == 'success'", "needs.build-site.result == 'success'"] {
+        assert!(smoke_guard.contains(condition), "selected smoke must run after its skipped WASM ancestor: {condition}");
+    }
+    assert_eq!(jobs["campfire-compare-spinel"]["strategy"]["max-parallel"].as_u64(), Some(1));
+    assert!(ci["on"]["pull_request"].get("paths-ignore").is_none(),
+        "required status must run even for documentation-only PRs");
+    for name in ["compact-required", "ci-required"] {
+        assert_eq!(jobs[name]["if"].as_str(), Some("always()"));
+    }
+    let gate = jobs["ci-required"]["needs"].as_sequence().unwrap();
+    for name in jobs.as_mapping().unwrap().keys().filter_map(|v| v.as_str()) {
+        if name != "ci-required" {
+            assert!(gate.iter().any(|v| v.as_str() == Some(name)), "missing result: {name}");
+        }
+    }
+    assert_eq!(ci["permissions"]["contents"].as_str(), Some("read"));
+    assert!(ci["permissions"].get("pages").is_none());
+    assert!(ci["permissions"].get("id-token").is_none());
+}
+
+#[test]
+fn full_scheduler_only_skips_completed_inputs_and_never_grants_pr_deploy_permissions() {
+    let full: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+        &fs::read_to_string(".github/workflows/full-ci.yml").unwrap()).unwrap();
+    assert_eq!(full["on"]["schedule"][0]["cron"].as_str(), Some("17 */4 * * *"));
+    assert!(full["on"].get("push").is_none());
+    assert!(full["on"].get("pull_request").is_none());
+    assert_eq!(full["concurrency"]["cancel-in-progress"].as_bool(), Some(false));
+    let jobs = &full["jobs"];
+    let preflight = &jobs["preflight"];
+    let lookup = preflight["steps"].as_sequence().unwrap().iter()
+        .find(|s| s["id"].as_str() == Some("lookup")).unwrap();
+    assert_eq!(lookup["uses"].as_str(), Some("actions/cache/restore@v4"));
+    assert_eq!(lookup["with"]["lookup-only"].as_bool(), Some(true));
+    assert!(lookup["with"].get("restore-keys").is_none());
+    let skip = preflight["outputs"]["run"].as_str().unwrap();
+    for condition in ["github.event_name != 'schedule'", "github.run_attempt != 1",
+        "steps.lookup.outcome != 'success'", "steps.lookup.outputs.cache-hit != 'true'"] {
+        assert!(skip.contains(condition), "skip must fail open: {condition}");
+    }
+    let checkpoint = jobs["checkpoint"]["if"].as_str().unwrap();
+    for condition in ["!cancelled()", "github.repository == 'rubys/roundhouse'",
+        "github.ref == 'refs/heads/main'", "needs.preflight.outputs.known == 'true'",
+        "needs.validation.result == 'success'", "needs.validation.outputs.complete == 'true'",
+        "needs.deploy.result == 'success'"] {
+        assert!(checkpoint.contains(condition), "unsafe completion marker: {condition}");
+    }
+    assert_eq!(jobs["validation"]["uses"].as_str(), Some("./.github/workflows/ci.yml"));
+    assert_eq!(jobs["validation"]["with"]["full"].as_bool(), Some(true));
+    assert_eq!(jobs["validation"]["permissions"]["contents"].as_str(), Some("read"));
+    assert_eq!(jobs["validation"]["permissions"]["actions"].as_str(), Some("read"));
+    assert_eq!(jobs["validation"]["permissions"].as_mapping().unwrap().len(), 2);
+    assert_eq!(full["permissions"]["contents"].as_str(), Some("read"));
+    let deploy = &jobs["deploy"];
+    let guard = deploy["if"].as_str().unwrap();
+    assert!(guard.contains("needs.validation.outputs.publication-ready == 'true'"));
+    assert!(!guard.contains("needs.validation.result == 'success'"), "extra failures cannot hide repro publication");
+    assert!(deploy.get("continue-on-error").is_none());
+    assert_eq!(deploy["permissions"]["pages"].as_str(), Some("write"));
+    assert!(deploy["steps"][0]["run"].as_str().unwrap().contains("$VALIDATED_SHA"));
+}
+
+#[cfg(unix)]
+#[test]
+fn scheduler_preflight_executes_publication_guards_and_unknown_input_fallback() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let full: serde_yaml_ng::Value = serde_yaml_ng::from_str(
+        &fs::read_to_string(".github/workflows/full-ci.yml").unwrap()).unwrap();
+    let body = full["jobs"]["preflight"]["steps"][0]["run"].as_str().unwrap();
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let root = std::env::temp_dir().join(format!("full-preflight-{}-{unique}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    for (name, script) in [
+        ("gh", "#!/bin/sh\n[ \"$MOCK_SPINEL\" != unavailable ] || exit 1\nprintf '%s\\n' \"$MOCK_SPINEL\"\n"),
+        ("date", "#!/bin/sh\nprintf '2026-10-02\\n'\n"),
+    ] {
+        let path = root.join(name);
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let main_sha = "1234567890123456789012345678901234567890";
+    let spinel_sha = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+    for (event, repo, reference, publish, revision, expected) in [
+        ("schedule", "rubys/roundhouse", "refs/heads/main", "false", spinel_sha, Some(("true", "true", spinel_sha))),
+        ("schedule", "rubys/roundhouse", "refs/heads/main", "false", "unavailable", Some(("true", "false", "master"))),
+        ("schedule", "rubys/roundhouse", "refs/heads/main", "false", "malformed", Some(("true", "false", "master"))),
+        ("workflow_dispatch", "contributor/roundhouse", "refs/heads/topic", "false", spinel_sha, Some(("false", "true", spinel_sha))),
+        ("workflow_dispatch", "rubys/roundhouse", "refs/heads/main", "true", spinel_sha, Some(("true", "true", spinel_sha))),
+        ("schedule", "contributor/roundhouse", "refs/heads/main", "false", spinel_sha, None),
+        ("workflow_dispatch", "rubys/roundhouse", "refs/heads/topic", "true", spinel_sha, None),
+    ] {
+        let outputs = root.join("outputs");
+        fs::write(&outputs, "").unwrap();
+        let result = Command::new("bash")
+            .args(["-e", "-o", "pipefail", "-c", body])
+            .env("PATH", format!("{}:{}", root.display(), std::env::var("PATH").unwrap()))
+            .env("EVENT", event).env("GITHUB_REPOSITORY", repo)
+            .env("GITHUB_REF", reference).env("REQUEST_PUBLISH", publish)
+            .env("GITHUB_SHA", main_sha).env("MOCK_SPINEL", revision)
+            .env("GITHUB_OUTPUT", &outputs).output().unwrap();
+        assert_eq!(result.status.success(), expected.is_some(), "{event} {repo} {reference}: {result:?}");
+        let actual = fs::read_to_string(outputs).unwrap();
+        if let Some((published, known, resolved)) = expected {
+            assert_eq!(actual, format!(
+                "spinel={resolved}\nknown={known}\npublish={published}\nkey=full-ci-v1-{main_sha}-{resolved}-2026-10-02\n"));
+        } else {
+            assert!(actual.is_empty(), "rejected publication must not issue a cache key");
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
 }
