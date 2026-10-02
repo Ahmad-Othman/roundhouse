@@ -985,6 +985,9 @@ impl Vfs for OverlayVfs<'_> {
     fn is_dir(&self, path: &Path) -> bool {
         self.disk.is_dir(path)
     }
+    fn is_symlink(&self, path: &Path) -> bool {
+        self.disk.is_symlink(path)
+    }
 }
 
 #[cfg(test)]

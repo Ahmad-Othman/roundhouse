@@ -148,16 +148,96 @@ fn overlapping_and_repeated_roots_do_not_duplicate_modules() {
 }
 
 #[test]
-fn missing_directories_and_file_paths_add_no_test_roots() {
+fn missing_directories_add_no_test_roots() {
     let mut files = default_and_custom_tests();
     files.push(ruby_file("test/not_a_directory.rb", "NotADirectoryTest"));
     files.push(text_file(
         "roundhouse.yml",
-        "test_paths:\n  - test/unit/missing\n  - test/not_a_directory.rb\n",
+        "test_paths:\n  - test/unit/missing\n",
     ));
 
     let app = ingest_files(files).expect("ingest tree");
     assert_modules(&app, DEFAULT_MODULES);
+}
+
+#[test]
+fn configured_file_path_is_a_configuration_error() {
+    let error = ingest_files([
+        ruby_file("test/unit.rb", "UnitTest"),
+        text_file("roundhouse.yml", "test_paths: [test/unit.rb]\n"),
+    ])
+    .expect_err("a configured file must not be treated as a directory");
+
+    let IngestError::Parse { file, message } = error else {
+        panic!("expected a config parse error, got {error:?}");
+    };
+    assert_eq!(file, "roundhouse.yml");
+    assert!(message.contains("directories"), "{message}");
+}
+
+#[cfg(unix)]
+#[test]
+fn configured_symlink_root_is_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let root = unique_tmp_dir("test_paths_symlink_root");
+    let app_root = root.join("app");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(app_root.join("test")).expect("create app test directory");
+    std::fs::create_dir_all(&outside).expect("create outside directory");
+    std::fs::write(
+        outside.join("outside_test.rb"),
+        test_source("OutsideRootTest"),
+    )
+    .expect("write outside test");
+    symlink(&outside, app_root.join("test/external")).expect("create external directory link");
+    std::fs::write(
+        app_root.join("roundhouse.yml"),
+        "test_paths: [test/external]\n",
+    )
+    .expect("write config");
+
+    let error = ingest_app(&app_root).expect_err("external symlink root must fail");
+    let IngestError::Parse { file, message } = error else {
+        panic!("expected a config parse error, got {error:?}");
+    };
+    assert_eq!(file, app_root.join("roundhouse.yml").display().to_string());
+    assert!(message.contains("symbolic link"), "{message}");
+    std::fs::remove_dir_all(root).expect("remove temp app");
+}
+
+#[cfg(unix)]
+#[test]
+fn recursive_discovery_skips_symlinks_outside_the_app() {
+    use std::os::unix::fs::symlink;
+
+    let root = unique_tmp_dir("test_paths_recursive_symlinks");
+    let app_root = root.join("app");
+    let test_root = app_root.join("quality/specs");
+    let outside_dir = root.join("outside_dir");
+    let outside_file = root.join("outside_file.rb");
+    std::fs::create_dir_all(&test_root).expect("create test root");
+    std::fs::create_dir_all(&outside_dir).expect("create outside directory");
+    std::fs::write(test_root.join("local_test.rb"), test_source("LocalTest"))
+        .expect("write local test");
+    std::fs::write(
+        outside_dir.join("outside_dir_test.rb"),
+        test_source("OutsideDirTest"),
+    )
+    .expect("write outside directory test");
+    std::fs::write(&outside_file, test_source("OutsideFileTest")).expect("write outside file test");
+    symlink(&outside_dir, test_root.join("external_dir")).expect("create external directory link");
+    symlink(&outside_file, test_root.join("external_file_test.rb"))
+        .expect("create external file link");
+    std::fs::write(
+        app_root.join("roundhouse.yml"),
+        "test_paths: [quality/specs]\n",
+    )
+    .expect("write config");
+
+    let app = ingest_app(&app_root).expect("ingest app");
+    assert_modules(&app, &["LocalTest"]);
+    std::fs::remove_dir_all(root).expect("remove temp app");
 }
 
 #[test]

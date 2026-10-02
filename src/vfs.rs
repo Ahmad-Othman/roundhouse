@@ -23,6 +23,13 @@ pub trait Vfs {
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>>;
     fn exists(&self, path: &Path) -> bool;
     fn is_dir(&self, path: &Path) -> bool;
+    /// Return whether `path` is a symbolic link, without following it.
+    ///
+    /// VFS implementations with symbolic links must override this method.
+    /// VFS implementations without symbolic links can use this default.
+    fn is_symlink(&self, _path: &Path) -> bool {
+        false
+    }
 }
 
 /// Real-filesystem-backed `Vfs`. Used by the CLI and tests.
@@ -63,6 +70,9 @@ impl Vfs for FsVfs {
 
     fn is_dir(&self, path: &Path) -> bool {
         path.is_dir()
+    }
+    fn is_symlink(&self, path: &Path) -> bool {
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
     }
 }
 

@@ -54,6 +54,8 @@ test_paths:
 value must name a literal directory relative to the app root. Roundhouse
 does not expand globs, environment variables, or `~`. A configuration
 error stops ingestion.
+Roundhouse rejects a configured path with a symbolic link. It does not
+follow symbolic links below selected folders.
 
 Roundhouse reads `test/test_helper.rb`, `test/test_helpers/`, and
 `test/fixtures/` outside this folder list.

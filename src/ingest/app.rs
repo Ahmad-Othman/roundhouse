@@ -228,6 +228,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     }
     super::sources::reset();
     let additional_test_paths = additional_test_paths(vfs, dir)?;
+    validate_additional_test_paths(vfs, dir, &additional_test_paths)?;
     let mut app = App::new();
     // `enum` columns declared inside a concern's `included do`, keyed by
     // the module. Local rather than a field on `App`: they exist only
@@ -1269,8 +1270,8 @@ end
     let mut test_files = Vec::new();
     for root in test_roots {
         let tests_dir = dir.join(root);
-        if vfs.is_dir(&tests_dir) {
-            test_files.extend(read_rb_files(vfs, &tests_dir)?);
+        if !path_has_symlink_component(vfs, dir, &tests_dir) && vfs.is_dir(&tests_dir) {
+            test_files.extend(read_test_rb_files(vfs, dir, &tests_dir)?);
         }
     }
     test_files.sort();
@@ -3597,6 +3598,91 @@ pub(super) fn read_rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResul
     collect(vfs, dir, &mut out)?;
     out.sort();
     Ok(out)
+}
+
+/// Check configured roots before directory checks, which follow symbolic links.
+fn validate_additional_test_paths<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    paths: &[PathBuf],
+) -> IngestResult<()> {
+    let config_path = dir.join("roundhouse.yml");
+    for path in paths {
+        let tests_dir = dir.join(path);
+        if path_has_symlink_component(vfs, dir, &tests_dir) {
+            return Err(IngestError::Parse {
+                file: config_path.display().to_string(),
+                message: format!(
+                    "test_paths entries must not contain symbolic links: {path:?}"
+                ),
+            });
+        }
+        if vfs.exists(&tests_dir) && !vfs.is_dir(&tests_dir) {
+            return Err(IngestError::Parse {
+                file: config_path.display().to_string(),
+                message: format!("test_paths entries must name directories: {path:?}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Return true when a path component below `root` is a symbolic link.
+fn path_has_symlink_component<V: Vfs + ?Sized>(vfs: &V, root: &Path, path: &Path) -> bool {
+    let relative = if root.as_os_str().is_empty() {
+        path
+    } else if let Ok(relative) = path.strip_prefix(root) {
+        relative
+    } else {
+        return true;
+    };
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => {
+                current.push(segment);
+                if vfs.is_symlink(&current) {
+                    return true;
+                }
+            }
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return true,
+        }
+    }
+    false
+}
+
+/// Collect Ruby test files without following symbolic links.
+fn read_test_rb_files<V: Vfs + ?Sized>(
+    vfs: &V,
+    app_root: &Path,
+    test_root: &Path,
+) -> IngestResult<Vec<PathBuf>> {
+    fn collect<V: Vfs + ?Sized>(
+        vfs: &V,
+        app_root: &Path,
+        dir: &Path,
+        out: &mut Vec<PathBuf>,
+    ) -> IngestResult<()> {
+        if path_has_symlink_component(vfs, app_root, dir) {
+            return Ok(());
+        }
+        for entry in vfs.read_dir(dir)? {
+            if path_has_symlink_component(vfs, app_root, &entry) {
+                continue;
+            }
+            if vfs.is_dir(&entry) {
+                collect(vfs, app_root, &entry, out)?;
+            } else if entry.extension().and_then(|extension| extension.to_str()) == Some("rb") {
+                out.push(entry);
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    collect(vfs, app_root, test_root, &mut files)?;
+    Ok(files)
 }
 
 /// Additional test roots from the app's `roundhouse.yml`.
