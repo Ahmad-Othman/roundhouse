@@ -718,12 +718,52 @@ fn report_unsupported_keys(app: &App, target: BuildTarget) {
     }
 }
 
+/// A unique index whose `where:` SQLite can't be trusted to run as
+/// written — a Postgres dump's `((kind)::text = 'initial'::text)` or
+/// `= ANY (ARRAY[…])` — is unique over every row in the SQLite DDL, as
+/// it was before predicates were kept (`Dialect::index_predicate`). It
+/// rejects rows Rails accepts, so each one is named. A warning, not an
+/// error: the tree still runs, with a stricter index than the app's.
+fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
+    // The Roda conversion writes Sequel migrations, which carry no
+    // predicate at all.
+    if target == BuildTarget::Roda {
+        return;
+    }
+    for table in app.schema.tables.values() {
+        for index in &table.indexes {
+            let Some(predicate) = index.predicate.as_deref() else { continue };
+            if !index.unique
+                || crate::emit::shared::schema_sql::Dialect::Sqlite
+                    .index_predicate(table, index)
+                    .is_some()
+            {
+                continue;
+            }
+            let mut d = crate::diagnostic::Diagnostic::unsupported(
+                crate::span::Span::synthetic(),
+                None,
+                "partial_unique_index",
+                format!(
+                    "table {}: `{predicate}`, the `where:` of unique index `{}`, is not \
+                     one SQLite reads alike, so its SQLite index is unique over every row",
+                    table.name.as_str(),
+                    index.name.as_str()
+                ),
+            );
+            d.severity = crate::diagnostic::Severity::Warning;
+            emit::diagnostics::push(d);
+        }
+    }
+}
+
 pub fn target_files(
     app: &App,
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
     report_unsupported_keys(app, target);
+    report_sqlite_index_predicates(app, target);
     // Full forwarding currently has a native Ruby contract only. A
     // declaration must be gated even when its body never forwards.
     if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
