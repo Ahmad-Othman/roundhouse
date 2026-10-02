@@ -1598,6 +1598,26 @@ end
 }
 
 #[test]
+fn safe_navigation_comparisons_execute_for_nil_and_string_values() {
+    emit_and_run::real_blog()
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", r#"class Article < ApplicationRecord
+  def title_long?
+    ((title && title.length) || 0) > 1
+  end
+  def title_short?
+    (title&.length || 0) < 1
+  end
+"#)
+        .run_ruby(r#"
+article = Article.new(title: "long")
+raise "truthy chain" unless article.title_long? && !article.title_short?
+article.title = nil
+raise "nil chain" unless !article.title_long? && article.title_short?
+"#)
+        .assert_passes();
+}
+
+#[test]
 fn multiple_erb_openers_execute_inside_an_output_block() {
     on_the_index(emit_and_run::real_blog(), r#"<span class="multi-opener"><%= capture do %>
 <% [1, 2].each do |number|
