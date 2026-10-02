@@ -1052,8 +1052,9 @@ fn library_class_from_module_node_with_scope(
     full_path.extend(name_path);
     let owner = ClassId(Symbol::from(full_path.join("::")));
 
+    let visibility = Visibility::resolve(module.body().as_ref(), file, Some(&owner))?;
     let (includes, methods, constants, unknown_calls) =
-        walk_decl_body(module.body(), &owner, file, false)?;
+        walk_decl_body_with_visibility(module.body(), &owner, file, false, &visibility)?;
     Ok(LibraryClass {
         name: owner,
         is_module: true,
@@ -1254,7 +1255,7 @@ fn walk_decl_body<'pr>(
     file: &str,
     force_class_receiver: bool,
 ) -> IngestResult<DeclBody> {
-    let visibility = Visibility::resolve(body.as_ref(), file)?;
+    let visibility = Visibility::resolve(body.as_ref(), file, None)?;
     walk_decl_body_with_visibility(body, owner, file, force_class_receiver, &visibility)
 }
 
@@ -2755,26 +2756,40 @@ pub type ConcernModelItems = (
     Vec<(ClassId, Vec<(Symbol, Vec<(String, crate::expr::Literal)>)>)>,
 );
 
-pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItems {
-    use crate::dialect::ModelBodyItem;
-
-    fn walk_dsl_stmts<'pr>(body: ruby_prism::Node<'pr>, out: &mut Vec<ruby_prism::Node<'pr>>) {
-        for stmt in flatten_statements(body) {
-            if let Some(call) = stmt.as_call_node() {
-                if call.receiver().is_none()
-                    && constant_id_str(&call.name()) == "with_options"
-                {
-                    if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
-                        if let Some(inner) = block.body() {
-                            walk_dsl_stmts(inner, out);
-                        }
-                        continue;
+fn walk_dsl_stmts<'pr>(body: ruby_prism::Node<'pr>, out: &mut Vec<ruby_prism::Node<'pr>>) {
+    for stmt in flatten_statements(body) {
+        if let Some(call) = stmt.as_call_node() {
+            if call.receiver().is_none()
+                && constant_id_str(&call.name()) == "with_options"
+            {
+                if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
+                    if let Some(inner) = block.body() {
+                        walk_dsl_stmts(inner, out);
                     }
+                    continue;
                 }
             }
-            out.push(stmt);
         }
+        out.push(stmt);
     }
+}
+
+/// Only blocks with a retained candidate have a per-includer refusal gate.
+/// Reuse the collector's traversal and IR recognizer, not a broader AST search.
+pub(super) fn included_has_accessor(body: ruby_prism::Node<'_>, owner: &ClassId, file: &str) -> bool {
+    let mut stmts = Vec::new();
+    walk_dsl_stmts(body, &mut stmts);
+    super::survey::without_recording(|| {
+        stmts.iter().any(|stmt| {
+            super::model::ingest_model_body_items(stmt, owner, file, Vec::new())
+                .is_ok_and(|items| items.iter().any(super::concern_accessors::is_candidate))
+        })
+    })
+}
+
+pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItems {
+    use super::concern_accessors::{decline, is_candidate, is_supported};
+    use crate::dialect::ModelBodyItem;
 
     let result = parse(source);
     let root = result.node();
@@ -2796,8 +2811,11 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
             }
             let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
             let Some(block_body) = block.body() else { continue };
+            let direct = flatten_statements(block_body);
+            let block_start = items.len();
+            let mut unclaimed = false;
             let mut stmts = Vec::new();
-            walk_dsl_stmts(block_body, &mut stmts);
+            walk_dsl_stmts(block.body().unwrap(), &mut stmts);
             for inner in stmts {
                 // `enum` inside `included do` belongs to every includer
                 // exactly like an association does — campfire declares
@@ -2816,6 +2834,7 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
                         Ok(None) => {}
                         Err(err) => {
                             super::survey::record(&err);
+                            unclaimed = true;
                             continue;
                         }
                     }
@@ -2827,7 +2846,7 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
                 // one field of several.
                 match super::model::ingest_model_body_items(&inner, &id, file, Vec::new()) {
                     Ok(parsed) => {
-                        for item in parsed {
+                        for mut item in parsed {
                             match item {
                                 ModelBodyItem::Association { .. }
                                 | ModelBodyItem::Scope { .. }
@@ -2843,17 +2862,42 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
                                 // includer. Other Unknowns stay with the
                                 // module.
                                 ModelBodyItem::Unknown { .. } => {
+                                    if is_candidate(&item) {
+                                        if !is_supported(&item) {
+                                            decline(&mut item, "unsupported accessor shape: only direct, nonempty, literal-Symbol attr_accessor is modeled");
+                                        } else if !direct.iter().any(|stmt| stmt.location().start_offset() == inner.location().start_offset()) {
+                                            decline(&mut item, "inside with_options is not modeled");
+                                        }
+                                    }
                                     if unknown_is_block_callback(&item)
                                         || unknown_is_model_macro(&item)
+                                        || is_candidate(&item)
                                     {
                                         items.push(item);
+                                    } else if !matches!(&item, ModelBodyItem::Unknown { expr, .. }
+                                        if matches!(&*expr.node, crate::expr::ExprNode::Lit { .. }))
+                                    {
+                                        unclaimed = true;
                                     }
                                 }
-                                _ => {}
+                                _ => unclaimed = true,
                             }
                         }
                     }
-                    Err(err) => super::survey::record(&err),
+                    Err(err) => {
+                        super::survey::record(&err);
+                        unclaimed = true;
+                    }
+                }
+            }
+            // A dropped statement can alter a carried accessor's
+            // visibility or definition. Defer the refusal until a
+            // model actually includes it; dormant blocks stay inert.
+            if unclaimed && items[block_start..].iter().any(is_candidate) {
+                for item in &mut items[block_start..] {
+                    if is_candidate(item) {
+                        decline(item, "alongside unmodeled included-block statements is not supported");
+                    }
                 }
             }
         }

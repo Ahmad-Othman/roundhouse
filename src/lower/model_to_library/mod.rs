@@ -21,6 +21,7 @@
 //! that haven't migrated.
 
 mod adapter_emit;
+pub(crate) mod accessor_surface;
 pub(crate) mod schema;
 pub use schema::col_storage_name;
 pub use schema::shakeable_synthesized_names;
@@ -95,6 +96,23 @@ use self::adapter_emit::push_adapter_methods;
 use self::schema::push_schema_methods;
 use self::validations::push_validate_method;
 
+/// Probe bodies expose framework ownership hidden by source overrides,
+/// but register the ordinary production definitions for faithful typing.
+/// Selection bounds retained bodies, never registry or demand inputs.
+pub(crate) enum Materialization<'a> {
+    Emit,
+    AccessorProbe(&'a HashSet<ClassId>),
+}
+
+impl Materialization<'_> {
+    fn retains(&self, id: &ClassId) -> bool {
+        match self {
+            Self::Emit => true,
+            Self::AccessorProbe(selected) => selected.contains(id),
+        }
+    }
+}
+
 /// Bulk entry point: lower every model in `models` against `schema`,
 /// sharing one class registry so cross-model dispatch (`Article` calling
 /// `Comment.where(...)`) types correctly. Use this for whole-app emit;
@@ -120,6 +138,7 @@ pub fn lower_models_with_registry(
         extra_class_infos,
         &Default::default(),
         &Default::default(),
+        Materialization::Emit,
     );
     (lcs, classes)
 }
@@ -136,7 +155,7 @@ pub fn lower_models_with_registry_and_params(
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
-    lower_models_inner(models, schema, extra_class_infos, params_specs, &Default::default())
+    lower_models_inner(models, schema, extra_class_infos, params_specs, &Default::default(), Materialization::Emit)
 }
 
 pub fn lower_models_to_library_classes(
@@ -150,6 +169,7 @@ pub fn lower_models_to_library_classes(
         extra_class_infos,
         &Default::default(),
         &Default::default(),
+        Materialization::Emit,
     )
     .0
 }
@@ -160,7 +180,7 @@ pub fn lower_models_to_library_classes_with_params(
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> Vec<LibraryClass> {
-    lower_models_inner(models, schema, extra_class_infos, params_specs, &Default::default()).0
+    lower_models_inner(models, schema, extra_class_infos, params_specs, &Default::default(), Materialization::Emit).0
 }
 
 /// As above, plus the class methods whose bodies must NOT be arel-folded
@@ -180,42 +200,66 @@ pub fn lower_models_to_library_classes_unfolding(
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
     unfolded: &std::collections::HashSet<(ClassId, Symbol)>,
 ) -> Vec<LibraryClass> {
-    lower_models_inner(models, schema, extra_class_infos, params_specs, unfolded).0
+    lower_models_inner(models, schema, extra_class_infos, params_specs, unfolded, Materialization::Emit).0
 }
 
-fn lower_models_inner(
+pub(crate) fn lower_models_inner(
     models: &[Model],
     schema: &Schema,
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
     unfolded: &std::collections::HashSet<(ClassId, Symbol)>,
+    materialization: Materialization<'_>,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
-    // Synthesize per-model `<Model>Row` LibraryClasses up front. These
-    // need to appear in the class registry before model body-typing so
-    // calls to `<Model>.from_row(row)` and `<Model>Row.from_raw(hash)`
-    // resolve correctly.
-    let row_classes = self::row::synthesize_row_classes(models, schema);
-
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
+    let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
     for model in models {
         let methods = build_methods(model, models, schema, params_specs);
         let table = schema.tables.get(&model.table.0);
+        // Register actual production definitions, even for unselected
+        // models and when source overrides hide framework ownership.
+        classes.insert(model.name.clone(), build_class_info(model, &methods, table));
+        if !materialization.retains(&model.name) {
+            continue;
+        }
+        let methods = match materialization {
+            Materialization::Emit => methods,
+            Materialization::AccessorProbe(_) => {
+                let mut definitions = model.clone();
+                definitions.body.retain(|item| match item {
+                    crate::dialect::ModelBodyItem::Method { method, .. } => method.name_span.is_synthetic(),
+                    crate::dialect::ModelBodyItem::Unknown { expr, .. } => !matches!(&*expr.node,
+                        ExprNode::Send { recv: None, method, .. }
+                            if matches!(method.as_str(), "attr_accessor" | "attr_reader" | "attr_writer")),
+                    _ => true,
+                });
+                let mut methods = build_methods(&definitions, models, schema, params_specs);
+                // Preserve original source inputs for late derivations
+                // (e.g. raw helpers) without treating them as framework
+                // claims. Both kinds traverse the canonical Arel/typer.
+                methods.extend(model.methods().filter(|m| !m.name_span.is_synthetic()).cloned());
+                methods
+            }
+        };
         all_methods.push((methods, model.name.clone(), table, model));
     }
 
-    let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
-    for (methods, name, table, model) in &all_methods {
-        let info = build_class_info(model, methods, *table);
-        classes.insert(name.clone(), info);
-    }
     // Register framework runtime stubs (Sqlite primitive surface, etc.)
     // so model bodies that call into them — `Sqlite.prepare/step?/...` in
     // the lowerer-emitted `_adapter_*` primitives — type cleanly.
     crate::lower::view_to_library::insert_framework_stubs(&mut classes);
     // Register synthesized Row classes so dispatch on `Article.from_row(r)`
     // / `ArticleRow.from_raw(h)` resolves through the body-typer.
-    for row_lc in &row_classes {
-        classes.insert(row_lc.name.clone(), self::row::row_class_info(row_lc));
+    // Stream unselected rows: their registry metadata is needed, but
+    // retaining every row's bodies would defeat bounded observation.
+    let mut row_classes = Vec::new();
+    for model in models {
+        for row_lc in self::row::synthesize_row_classes(std::slice::from_ref(model), schema) {
+            classes.insert(row_lc.name.clone(), self::row::row_class_info(&row_lc));
+            if materialization.retains(&model.name) {
+                row_classes.push(row_lc);
+            }
+        }
     }
     // Register synthesized Params classes (info-only — the actual class
     // is emitted by the controller lowerer). Needed so the model's
@@ -302,23 +346,7 @@ fn lower_models_inner(
             }
             type_method_body(method, &classes, table, Some(model));
         }
-        out.push(LibraryClass {
-            name: model.name.clone(),
-            is_module: false,
-            parent: model.parent.clone(),
-            // Concern mixins (`include UsernameAttribute`) thread through
-            // to the emitted class: the emitters render the `include` line
-            // and a load-time require, so module constants reached through
-            // the includer (`User::VALID_USERNAME` from markdowner.rb) and
-            // concern instance methods resolve under plain Ruby.
-            includes: crate::analyze::model_includes(model),
-            methods,
-            nullable_columns: nullable_column_names(table),
-            origin: None,
-            constants: collect_model_constants(model),
-            unknown_calls: Vec::new(),
-            class_ivar_initializers: Vec::new(),
-        });
+        out.push(model_class(model, methods, table));
     }
     // Type-check Row class method bodies too so the strict typing residual
     // check doesn't blow up. The Row class shares its column shape with
@@ -468,11 +496,17 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
     for method in &mut methods {
         type_method_body(method, &classes, table, Some(model));
     }
+    model_class(model, methods, table)
+}
+
+/// Canonical class envelope for both production lowering and ownership
+/// observation. Typing and method selection remain the caller's job.
+fn model_class(model: &Model, methods: Vec<MethodDef>, table: Option<&Table>) -> LibraryClass {
     LibraryClass {
         name: model.name.clone(),
         is_module: false,
         parent: model.parent.clone(),
-        // Same concern-mixin threading as the bulk entry point above.
+        // Mixins and constants must survive in every model projection.
         includes: crate::analyze::model_includes(model),
         methods,
         nullable_columns: nullable_column_names(table),
