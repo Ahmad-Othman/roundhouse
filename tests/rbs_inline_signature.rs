@@ -9,7 +9,15 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use roundhouse::analyze::{diagnose, Analyzer, DiagnosticKind};
+use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ingest::ingest_app_from_tree;
+use roundhouse::ty::{ParamKind, Ty};
+
+fn inline_params(source: &str) -> Vec<(String, ParamKind, Ty)> {
+    let signatures = roundhouse::ingest::sorbet_sig::ingest_sorbet_signatures(source.as_bytes());
+    let Ty::Fn { params, .. } = &signatures[&ClassId(Symbol::new("Example"))][&Symbol::new("call")] else { panic!() };
+    params.iter().map(|p| (p.name.as_str().to_string(), p.kind.clone(), p.ty.clone())).collect()
+}
 
 fn unresolved_ivars(provider: &str) -> Vec<String> {
     let files = [
@@ -96,6 +104,18 @@ end
 "#,
     );
     assert_eq!(names, vec!["a".to_string()]);
+}
+
+#[test]
+fn keyword_parameters_pair_by_name_with_asymmetric_types() {
+    for (source, expected) in [
+        ("class Example\n  #: (a: String, ?b: Integer) -> void\n  def call(b: 1, a:); end\nend\n", vec![("b", ParamKind::Keyword { required: false }, Ty::Int), ("a", ParamKind::Keyword { required: true }, Ty::Str)]),
+        ("class Example\n  #: (b: Integer, ?a: String) -> void\n  def call(a: \"x\", b:); end\nend\n", vec![("a", ParamKind::Keyword { required: false }, Ty::Str), ("b", ParamKind::Keyword { required: true }, Ty::Int)]),
+        ("class Example\n  #: (second: Integer, first: String) -> void\n  def call(first:, second:); end\nend\n", vec![("first", ParamKind::Keyword { required: true }, Ty::Str), ("second", ParamKind::Keyword { required: true }, Ty::Int)]),
+    ] {
+        let expected: Vec<_> = expected.into_iter().map(|(name, kind, ty)| (name.to_string(), kind, ty)).collect();
+        assert_eq!(inline_params(source), expected, "{source}");
+    }
 }
 
 #[test]

@@ -655,16 +655,29 @@ fn rbs_comment_signature(
     if def_params.len() != declared.len() {
         return None;
     }
+    let mut declared: Vec<Option<Param>> = declared.into_iter().map(Some).collect();
+    let mut next_positional = 0;
     let mut params = Vec::new();
-    for ((name, kind), decl) in def_params.into_iter().zip(declared) {
+    for (name, kind) in def_params {
+        let index = if matches!(kind, ParamKind::Keyword { .. }) {
+            declared.iter().position(|candidate| candidate.as_ref().is_some_and(|param| {
+                matches!(param.kind, ParamKind::Keyword { .. }) && param.name.as_str() == name
+            }))?
+        } else {
+            let index = (next_positional..declared.len()).find(|&index| {
+                declared[index].as_ref().is_some_and(|param| !matches!(param.kind, ParamKind::Keyword { .. }))
+            })?;
+            next_positional = index + 1;
+            index
+        };
+        let decl = declared[index].take()?;
         if *kind != decl.kind {
             return None;
         }
-        // Keywords are named by the RBS itself; they must agree.
-        if matches!(kind, ParamKind::Keyword { .. }) && decl.name.as_str() != name {
-            return None;
-        }
         params.push(Param { name: Symbol::new(name), ty: decl.ty, kind: kind.clone() });
+    }
+    if declared.into_iter().any(|param| param.is_some()) {
+        return None;
     }
     if let Some((name, _)) = def_block {
         let ty = declared_block.into_iter().next().map(|p| p.ty).unwrap_or(Ty::Untyped);
