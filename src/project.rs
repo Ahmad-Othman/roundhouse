@@ -1001,7 +1001,7 @@ pub fn target_files(
             return Err(format!("class-instance-variable initialization is not supported ({})", target.as_str()));
         }
     }
-    let files = match target {
+    let files = crate::timings::phase(format_args!("emit {}: assemble", target.as_str()), || match target {
         BuildTarget::Blog => blog_files(fixture),
         BuildTarget::Spinel => spinel_files(app, fixture).and_then(spin_shape),
         // The ruby family gets the bundled-library requires too: the
@@ -1024,7 +1024,7 @@ pub fn target_files(
             app,
             &crate::profile::DeploymentProfile::worker(),
         ))),
-    }?;
+    })?;
 
     // Ruby-family trees ship the framework runtime as verbatim text, so
     // their tree-shake runs here, on the finished file set (after
@@ -1043,7 +1043,9 @@ pub fn target_files(
             .map(|s| s.as_str().to_string())
             .collect();
         let mut files = files;
-        emit::ruby::shake::shake_tree(&mut files, &synth_shakeable, target.as_str());
+        crate::timings::phase(format_args!("emit {}: tree shake", target.as_str()), || {
+            emit::ruby::shake::shake_tree(&mut files, &synth_shakeable, target.as_str());
+        });
         files
     } else {
         files
