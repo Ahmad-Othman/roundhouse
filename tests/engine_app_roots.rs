@@ -163,9 +163,14 @@ fn path_sources_outside_the_tree_or_at_its_root_add_nothing() {
 /// with that prefix is not an engine.
 #[test]
 fn a_superclass_that_only_starts_with_rails_engine_is_not_an_engine() {
-    for parent in ["Rails::EngineStub", "Rails::Engine::Configuration"] {
+    // The last one names its superclass only in a comment.
+    for header in [
+        "class Engine < Rails::EngineStub",
+        "class Engine < Rails::Engine::Configuration",
+        "class Engine # < Rails::Engine",
+    ] {
         let lock = lockfile("lib/billing");
-        let source = format!("module Billing\n  class Engine < {parent}\n  end\nend\n");
+        let source = format!("module Billing\n  {header}\n  end\nend\n");
         let app = tree_app(&[
             ("Gemfile.lock", &lock),
             ("db/schema.rb", SCHEMA),
@@ -173,7 +178,7 @@ fn a_superclass_that_only_starts_with_rails_engine_is_not_an_engine() {
             ("lib/billing/lib/billing/engine.rb", &source),
             ("lib/billing/app/controllers/invoices_controller.rb", INVOICES_CONTROLLER),
         ]);
-        assert_eq!(app.app_roots, vec!["app".to_string()], "superclass: {parent}");
+        assert_eq!(app.app_roots, vec!["app".to_string()], "{header}");
     }
 }
 

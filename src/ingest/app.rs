@@ -3937,7 +3937,9 @@ fn declares_rails_engine<V: Vfs + ?Sized>(vfs: &V, lib_dir: &Path) -> bool {
     files.iter().any(|file| {
         vfs.read_to_string(file).is_ok_and(|source| {
             source.lines().any(|line| {
-                let line = line.trim_start();
+                // Code only: `class Billing # < Rails::Engine` has no
+                // superclass.
+                let line = line.split_once('#').map_or(line, |(code, _)| code).trim_start();
                 // The whole constant: `Rails::EngineStub` and
                 // `Rails::Engine::Configuration` are other classes.
                 line.starts_with("class ")
