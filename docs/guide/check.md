@@ -40,6 +40,8 @@ that has an `app/` directory and a `Rails::Engine` subclass under its
 walked. An engine's own `config/routes.rb` is not read yet, so the
 host's `mount` of it is still a dropped route.
 
+Roundhouse identifies the engine superclass from the Ruby syntax tree.
+
 One thing the walk carries that no emitted tree can: a class extending
 a Rails base the runtime does not port. `ApplicationMailbox <
 ActionMailbox::Base` (and every mailbox under it), an

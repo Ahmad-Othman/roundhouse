@@ -33,6 +33,7 @@ const INVOICES_INDEX_VIEW: &str = "<%= @invoices.length %>\n";
 const INVOICE_TOTALS: &str = "class InvoiceTotals\n  def self.sum(invoices)\n    invoices\n  end\nend\n";
 const ENGINE: &str = "module Billing\n  class Engine < ::Rails::Engine\n    isolate_namespace Billing\n  end\nend\n";
 
+/// Construct the lockfile metadata that selects one local engine.
 fn lockfile(remote: &str) -> String {
     format!(
         "PATH\n  remote: {remote}\n  specs:\n    billing (0.1.0)\n      rails\n\n\
@@ -41,6 +42,7 @@ fn lockfile(remote: &str) -> String {
     )
 }
 
+/// Exercise the same ingest entry point as the in-memory application frontend.
 fn tree_app(files: &[(&str, &str)]) -> roundhouse::App {
     let tree: HashMap<PathBuf, Vec<u8>> = files
         .iter()
@@ -49,6 +51,7 @@ fn tree_app(files: &[(&str, &str)]) -> roundhouse::App {
     ingest_app_from_tree(tree).expect("ingest tree")
 }
 
+/// Collect model identities so the tests detect classification and duplicate errors.
 fn model_names(app: &roundhouse::App) -> Vec<&str> {
     app.models.iter().map(|m| m.name.0.as_str()).collect()
 }
@@ -182,6 +185,32 @@ fn a_superclass_that_only_starts_with_rails_engine_is_not_an_engine() {
     }
 }
 
+#[test]
+fn a_multiline_engine_superclass_is_an_app_root() {
+    let lock = lockfile("components/billing");
+    let app = tree_app(&[
+        ("Gemfile.lock", &lock),
+        ("db/schema.rb", SCHEMA),
+        ("app/models/application_record.rb", APPLICATION_RECORD),
+        ("components/billing/lib/billing/engine.rb", "module Billing\n  class Engine <\n    ::Rails::Engine\n  end\nend\n"),
+        ("components/billing/app/models/invoice.rb", INVOICE_MODEL),
+    ]);
+    assert_eq!(app.app_roots, vec!["app", "components/billing/app"]);
+    assert!(model_names(&app).contains(&"Invoice"));
+}
+
+#[test]
+fn engine_declarations_inside_a_heredoc_do_not_add_roots() {
+    let lock = lockfile("components/billing");
+    let app = tree_app(&[
+        ("Gemfile.lock", &lock),
+        ("components/billing/lib/example.rb", "module Billing\n  EXAMPLE = <<~RUBY\n    class Engine < Rails::Engine\n    end\n  RUBY\nend\n"),
+        ("components/billing/app/models/invoice.rb", INVOICE_MODEL),
+    ]);
+    assert_eq!(app.app_roots, vec!["app"]);
+    assert!(!model_names(&app).contains(&"Invoice"));
+}
+
 /// (f) A Ruby file directly in the engine's `app/` has no layer pass
 /// of its own, so the root `lib/` walk that reaches it keeps it.
 #[test]
@@ -214,6 +243,7 @@ mod on_disk {
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// Create an isolated application root without host-system path aliases.
     fn unique_tmp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "roundhouse_{name}_{}_{}",
@@ -226,6 +256,7 @@ mod on_disk {
         dir.canonicalize().expect("canonicalize temp dir")
     }
 
+    /// Populate one application tree with the source files that the case needs.
     fn write(root: &Path, files: &[(&str, &str)]) {
         for (path, content) in files {
             let path = root.join(path);

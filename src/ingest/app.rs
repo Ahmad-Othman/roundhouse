@@ -3934,25 +3934,40 @@ fn declares_rails_engine<V: Vfs + ?Sized>(vfs: &V, lib_dir: &Path) -> bool {
         return false;
     }
     let Ok(files) = read_rb_files(vfs, lib_dir) else { return false };
+    struct EngineVisitor {
+        found: bool,
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for EngineVisitor {
+        fn visit_class_node(&mut self, class: &ruby_prism::ClassNode<'pr>) {
+            if self.found {
+                return;
+            }
+            self.found = class.superclass()
+                .and_then(|parent| parent.as_constant_path_node())
+                .is_some_and(|parent| {
+                    parent.name().is_some_and(|name| super::util::constant_id_str(&name) == "Engine")
+                        && parent.parent().is_some_and(|namespace| {
+                            if let Some(name) = namespace.as_constant_read_node() {
+                                super::util::constant_id_str(&name.name()) == "Rails"
+                            } else {
+                                namespace.as_constant_path_node().is_some_and(|name| {
+                                    name.parent().is_none()
+                                        && name.name().is_some_and(|id| super::util::constant_id_str(&id) == "Rails")
+                                })
+                            }
+                        })
+                });
+            if !self.found {
+                ruby_prism::visit_class_node(self, class);
+            }
+        }
+    }
     files.iter().any(|file| {
-        vfs.read_to_string(file).is_ok_and(|source| {
-            source.lines().any(|line| {
-                // Code only: `class Billing # < Rails::Engine` has no
-                // superclass.
-                let line = line.split_once('#').map_or(line, |(code, _)| code).trim_start();
-                // The whole constant: `Rails::EngineStub` and
-                // `Rails::Engine::Configuration` are other classes.
-                line.starts_with("class ")
-                    && line.split_once('<').is_some_and(|(_, parent)| {
-                        parent
-                            .trim()
-                            .trim_start_matches("::")
-                            .strip_prefix("Rails::Engine")
-                            .is_some_and(|rest| {
-                                !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == ':')
-                            })
-                    })
-            })
+        vfs.read(file).is_ok_and(|source| {
+            let parsed = ruby_prism::parse(&source);
+            let mut visitor = EngineVisitor { found: false };
+            ruby_prism::Visit::visit(&mut visitor, &parsed.node());
+            visitor.found
         })
     })
 }
