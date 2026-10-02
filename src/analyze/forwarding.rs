@@ -380,27 +380,32 @@ fn keyword_calls_with_index(
                 .any(|a| matches!(&*a.node, ExprNode::KeywordSplat { .. }))
         }) && !(fallback && plans.contains_key(&e.span))
         {
-            let resolved = destination(app, contracts, context, e);
-            let policy = if resolved.is_some_and(|(m, _)| m.params.iter().any(|p| p.forwarding)) {
-                if contract_error(context, e, resolved, contracts).is_none() {
-                    KeywordPolicy::Native
-                } else {
-                    KeywordPolicy::Refuse
-                }
-            } else if resolved.is_none() && possible_full_destination(contracts, e) {
-                KeywordPolicy::Refuse
-            } else if possible_full_destination(contracts, e)
-                && virtual_destinations(contracts, context, e).map_or(true, |v| {
-                    v.iter().any(|(m, _)| m.params.iter().any(|p| p.forwarding))
-                })
-            {
-                // Ordinary lexical method, full virtual override: neither
-                // legacy expansion nor native-only admission proves both.
-                KeywordPolicy::Refuse
-            } else {
-                // Deliberately preserve the old ordinary-callee lowering;
-                // this prerequisite does not fix its missing/extra-key paths.
+            let policy = if !possible_full_destination(contracts, e) {
+                // Unrelated selectors cannot reach a full contract. Avoid
+                // scanning receiver provenance and hierarchies for each of
+                // their keyword calls in a large application.
                 KeywordPolicy::Legacy
+            } else {
+                let resolved = destination(app, contracts, context, e);
+                if resolved.is_some_and(|(m, _)| m.params.iter().any(|p| p.forwarding)) {
+                    if contract_error(context, e, resolved, contracts).is_none() {
+                        KeywordPolicy::Native
+                    } else {
+                        KeywordPolicy::Refuse
+                    }
+                } else if resolved.is_none()
+                    || virtual_destinations(contracts, context, e).map_or(true, |v| {
+                        v.iter().any(|(m, _)| m.params.iter().any(|p| p.forwarding))
+                    })
+                {
+                    // Ordinary lexical method, full virtual override: neither
+                    // legacy expansion nor native-only admission proves both.
+                    KeywordPolicy::Refuse
+                } else {
+                    // Deliberately preserve the old ordinary-callee lowering;
+                    // this prerequisite does not fix its missing/extra-key paths.
+                    KeywordPolicy::Legacy
+                }
             };
             plans
                 .entry(e.span)
@@ -614,8 +619,27 @@ impl<'a> SourceContractIndex<'a> {
                 .map(|(_, method)| method.name.clone()),
         );
         if !index.full_selectors.is_empty() {
-            let names: HashSet<_> = index.instance.keys().chain(index.class.keys())
-                .map(|(_, name)| name.clone()).collect();
+            // Ordinary inherited contracts matter only when a packet is sent
+            // to them. Looking up every unrelated selector for every model
+            // makes large-app transpilation quadratic in the source inventory.
+            let mut names = index.full_selectors.clone();
+            fn collect(e: &Expr, names: &mut HashSet<Symbol>) {
+                if let ExprNode::Send { method, args, .. } = &*e.node
+                    && has_forwarding(args)
+                {
+                    names.insert(method.clone());
+                    if method.as_str() == "new" {
+                        names.insert(Symbol::from("initialize"));
+                    }
+                }
+                e.node.for_each_child(&mut |child| collect(child, names));
+            }
+            for (_, method) in methods(app) {
+                collect(&method.body, &mut names);
+                for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
+                    collect(default, &mut names);
+                }
+            }
             index.unretained = crate::lower::model_to_library::unretained_model_contracts(app, |model| {
                 let mut inherited = Vec::new();
                 for name in &names {

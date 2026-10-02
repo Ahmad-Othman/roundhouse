@@ -443,6 +443,39 @@ fn full_mixin_forwarder_refuses_an_ordinary_destination_shadowed_by_model_synthe
 }
 
 #[test]
+fn packet_constructor_checks_the_inherited_initializer_not_only_new() {
+    let api = "module ConstructorAPI; def initialize(a,b); @proof=a-b; end; def proof; @proof; end; end";
+    let probe = "class Probe; def self.run(...); article=Article.new(...); article.proof; end; end";
+    let native = Command::new("ruby")
+        .args([
+            "-e",
+            &format!("{api}; class Article; include ConstructorAPI; end; {probe}; puts Probe.run(11,3)"),
+        ])
+        .output()
+        .unwrap();
+    assert!(native.status.success());
+    assert_eq!(String::from_utf8_lossy(&native.stdout), "8\n");
+    let run = emit_and_run::real_blog()
+        .write("app/lib/constructor_api.rb", api)
+        .write("app/lib/probe.rb", probe)
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n include ConstructorAPI\n",
+        )
+        .run_ruby("puts Probe.run(11,3)");
+    // A selector-only survey would miss `initialize` behind `new(...)` and
+    // admit the generated model constructor instead of the source contract.
+    assert!(
+        run.errors.iter().any(|e| e.contains("model method synthesis")),
+        "{:?}; actual={}; stderr={}",
+        run.errors,
+        run.stdout,
+        run.stderr
+    );
+}
+
+#[test]
 fn effective_ordinary_override_is_not_mistaken_for_an_inherited_full_collision() {
     let parent = "class ForwardingRecord < ApplicationRecord; self.abstract_class = true; def self.title(...); 11; end; end";
     let run = emit_and_run::real_blog()
