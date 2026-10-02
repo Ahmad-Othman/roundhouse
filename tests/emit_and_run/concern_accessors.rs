@@ -329,3 +329,32 @@ puts "survey reader=from callback ivar=stored writer=absent"
     let src = std::fs::read_to_string(run.emitted.join("app/models/article.rb")).unwrap();
     assert!(!src.contains("def scratch"), "refused getter/writer must not shadow the callback: {src}");
 }
+
+/// A primary base made concrete again must synthesize the methods
+/// admission promises, without changing intermediate-base inheritance.
+#[test]
+fn a_concretized_primary_record_emits_its_admitted_accessors() {
+    let source = "module Virtual\n  extend ActiveSupport::Concern\n  included { attr_accessor :scratch }\nend\n";
+    let values = "first = Article.new\nsecond = Article.new\nraise 'initial accessor not nil' unless first.scratch.nil?\nfirst.scratch = 'draft'\nraise 'lost accessor' unless first.scratch == 'draft'\nraise 'shared storage' unless second.scratch.nil?\nfirst.reviewed = '0'\nsecond.reviewed = '1'\nraise 'lost false cast' unless first.reviewed == false\nraise 'lost true cast' unless second.reviewed == true\nputs 'concrete primary scratch=draft reviewed=false second_reviewed=true'\n";
+    let native = std::process::Command::new("ruby")
+        .args(["-e", &format!(r#"
+require 'active_record'
+require 'active_support/concern'
+ActiveRecord::Base.establish_connection(adapter: 'sqlite3', database: ':memory:')
+ActiveRecord::Schema.define {{ create_table(:articles) {{ |t| t.string :title }} }}
+class ApplicationRecord < ActiveRecord::Base; self.abstract_class = true; end
+{source}
+class Article < ApplicationRecord; primary_abstract_class; self.abstract_class = false; include Virtual; attribute :reviewed, :boolean; end
+{values}
+"#)])
+        .output().unwrap();
+    assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+    assert!(String::from_utf8_lossy(&native.stdout).contains("concrete primary scratch=draft reviewed=false second_reviewed=true"));
+    let run = emit_and_run::real_blog()
+        .edit("app/models/application_record.rb", "primary_abstract_class", "self.abstract_class = true")
+        .write("app/models/concerns/virtual.rb", source)
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  primary_abstract_class\n  self.abstract_class = false\n  include Virtual\n  attribute :reviewed, :boolean\n")
+        .run_ruby(values);
+    run.assert_passes();
+    assert!(run.stdout.contains("concrete primary scratch=draft reviewed=false second_reviewed=true"));
+}

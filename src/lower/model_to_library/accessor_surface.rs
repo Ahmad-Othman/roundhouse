@@ -11,8 +11,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::App;
-use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, Model, ModelBodyItem};
-use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, Model};
+use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
 
@@ -147,32 +147,6 @@ fn observe(
     inherit_surfaces(app, requested, surfaces)
 }
 
-/// Admission requires a concrete includer, with literal abstract markers
-/// evaluated in declaration order. This must not change production's
-/// primary-only guards: intermediate abstract bases still emit methods
-/// that their concrete children inherit.
-fn is_abstract_class(model: &Model) -> bool {
-    let mut abstract_class = false;
-    for item in &model.body {
-        if let ModelBodyItem::Unknown { expr, .. } = item {
-            if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
-                if args.is_empty() && method.as_str() == "primary_abstract_class" {
-                    abstract_class = true;
-                }
-            } else if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node {
-                if matches!(&*recv.node, ExprNode::SelfRef) && method.as_str() == "abstract_class=" {
-                    if let [arg] = args.as_slice() {
-                        if let ExprNode::Lit { value: Literal::Bool { value } } = &*arg.node {
-                            abstract_class = *value;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    abstract_class
-}
-
 fn inherit_surfaces(
     app: &App,
     requested: &HashSet<ClassId>,
@@ -219,7 +193,7 @@ fn inherit_surfaces(
         .filter(|model| requested.contains(&model.name))
         .map(|model| {
             let names = surfaces.remove(&model.name).unwrap();
-            let eligible = !is_abstract_class(model)
+            let eligible = !super::markers::is_abstract_class(model)
                 && app.schema.tables.contains_key(&model.table.0);
             (model.name.clone(), eligible.then_some(names))
         })
