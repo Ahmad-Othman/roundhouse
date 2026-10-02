@@ -4041,16 +4041,25 @@ fn parse_package_paths(bytes: &[u8]) -> Option<Vec<String>> {
 
 /// Directories under `dir` matching a `package_paths:` glob that
 /// actually carry a `package.yml` — the candidates for
-/// [`app_roots`]. Supports `*` (one directory level) and `**` (any
-/// depth, capped at 4 levels beyond the match point); a trailing `/`
-/// is insignificant. Not a general glob engine — Packwerk's own
-/// globs are this small.
+/// [`app_roots`]. Supports comma-separated brace alternatives, `*`
+/// (one directory level), and `**` (any depth, capped at 4 levels
+/// beyond the match point); a trailing `/` is insignificant.
 fn expand_package_glob<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,
     glob: &str,
     out: &mut Vec<PathBuf>,
 ) {
+    if let Some(open) = glob.find('{') {
+        if let Some(close) = glob[open + 1..].find('}').map(|offset| open + 1 + offset) {
+            for alternative in glob[open + 1..close].split(',') {
+                let expanded = format!("{}{}{}", &glob[..open], alternative, &glob[close + 1..]);
+                expand_package_glob(vfs, dir, &expanded, out);
+            }
+            return;
+        }
+    }
+
     let segments: Vec<&str> = glob.split('/').filter(|s| !s.is_empty()).collect();
     let mut candidates = Vec::new();
     expand_glob_segments(vfs, dir, &segments, 4, &mut candidates);

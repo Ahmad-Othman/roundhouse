@@ -42,6 +42,9 @@ host's `mount` of it is still a dropped route.
 
 Roundhouse identifies the engine superclass from the Ruby syntax tree.
 
+Roundhouse expands brace alternatives in `package_paths`, such as
+`"{,components,components/*/,components/*/*/}"`.
+
 One thing the walk carries that no emitted tree can: a class extending
 a Rails base the runtime does not port. `ApplicationMailbox <
 ActionMailbox::Base` (and every mailbox under it), an
