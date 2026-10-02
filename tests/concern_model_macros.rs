@@ -533,6 +533,33 @@ fn shadowed_framework_does_not_supply_model_accessors() {
 }
 
 #[test]
+fn framework_overrides_cannot_manufacture_accessor_support() {
+    for (before, after) in [
+        ("", "def self.append_features(base); nil; end"),
+        ("def self.included(base = nil, &block); nil; end", ""),
+    ] {
+        let source = format!("module Virtual\n  extend ActiveSupport::Concern\n  {before}\n  included {{ attr_accessor :scratch }}\n  {after}\nend\n");
+        let native = std::process::Command::new("ruby").args(["-e", &format!("require 'active_support/concern'\n{source}\nclass NativeOwner; include Virtual; end\nabort 'unexpected native accessor' if NativeOwner.instance_methods.include?(:scratch=)")]).output().unwrap();
+        assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+        let files = tree(&[
+            ("db/schema.rb", "ActiveRecord::Schema.define { create_table(:messages) { |t| t.string :body } }"),
+            ("app/models/concerns/virtual.rb", &source),
+            ("app/models/message.rb", "class Message < ApplicationRecord; include Virtual; end"),
+        ]);
+        let error = ingest_app_from_tree(files.clone()).unwrap_err().to_string();
+        assert!(error.contains("unconsumed included hook"), "{error}");
+        roundhouse::ingest::survey::activate();
+        let result = ingest_app_from_tree(files);
+        let gaps = roundhouse::ingest::survey::drain();
+        let app = result.unwrap();
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert_eq!(gaps[0].to_string(), error);
+        let lowered = roundhouse::lower::lower_model_to_library_class(&app.models[0], &app.schema);
+        assert!(!lowered.methods.iter().any(|m| ["scratch", "scratch="].contains(&m.name.as_str())));
+    }
+}
+
+#[test]
 fn deferred_concern_dependencies_stay_dormant_and_use_lexical_names() {
     let files = tree(&[
         ("db/schema.rb", "ActiveRecord::Schema.define { create_table(:messages) { |t| t.string :body } }"),

@@ -98,17 +98,7 @@ fn verified_concerns(
                 .iter()
                 .filter(|lc| &lc.name == owner)
                 .any(|lc| {
-                    let overrides_api = lc.methods.iter().any(|m| {
-                        m.receiver == MethodReceiver::Class
-                            && matches!(
-                                m.name.as_str(),
-                                "class_methods"
-                                    | "append_features"
-                                    | "included"
-                                    | "extended"
-                                    | "prepend_features"
-                            )
-                    });
+                    let overrides_api = lc.methods.iter().any(overrides_framework_api);
                     overrides_api
                         || lc.unknown_calls.iter().any(|expr| match &*expr.node {
                             ExprNode::Send {
@@ -133,6 +123,15 @@ fn verified_concerns(
                 })
         })
         .collect()
+}
+
+/// Source singleton definitions that replace the Concern protocol.
+pub(super) fn overrides_framework_api(method: &MethodDef) -> bool {
+    method.receiver == MethodReceiver::Class
+        && matches!(
+            method.name.as_str(),
+            "class_methods" | "append_features" | "included" | "extended" | "prepend_features"
+        )
 }
 
 /// Shared identity/installation proof. Consumers separately admit API

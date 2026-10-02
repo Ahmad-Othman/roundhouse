@@ -110,9 +110,9 @@ fn uncertain_visibility(expr: &Expr, name: &Symbol, writer: &Symbol, nested: boo
 }
 
 /// Retained singleton hooks run during the emitted include. Consumed
-/// class-method carriers have no hook left here. Only literal bodies
-/// and defaults prove that an unconsumed hook cannot mutate accessors;
-/// do not guess effects from a method-name blacklist.
+/// class-method carriers have no hook left here. Only literal included
+/// callbacks/defaults after block registration are inert; overriding the
+/// rest of the framework protocol can prevent that registration/execution.
 fn unconsumed_included_hook(model: &crate::dialect::Model, app: &App) -> Option<crate::ClassId> {
     fn inert(expr: &Expr) -> bool {
         match &*expr.node {
@@ -131,9 +131,16 @@ fn unconsumed_included_hook(model: &crate::dialect::Model, app: &App) -> Option<
         }
         for class in app.library_classes.iter().filter(|class| class.name == id) {
             for method in &class.methods {
-                if method.receiver == MethodReceiver::Class
-                    && method.name.as_str() == "included"
-                    && (!inert(&method.body)
+                let intercepts_registration = app.concern_model_items.get(&id)
+                    .into_iter().flatten().any(|item| {
+                        matches!(item, ModelBodyItem::Unknown { expr, .. } if is_candidate(item)
+                            && (method.name_span.file != expr.span.file
+                                || method.name_span.start < expr.span.start))
+                    });
+                if super::class_configuration::overrides_framework_api(method)
+                    && (method.name.as_str() != "included"
+                        || intercepts_registration
+                        || !inert(&method.body)
                         || method
                             .params
                             .iter()
@@ -420,7 +427,7 @@ pub(super) fn validate(
                 unwrap_or_record::<()>(Err(IngestError::Unsupported {
                     file: file.clone(),
                     message: format!(
-                        "concern attr_accessor on {} cannot be carried alongside an unconsumed included hook on {hook}",
+                        "concern attr_accessor on {} cannot be carried alongside an unconsumed included hook or overridden framework API on {hook}",
                         model.name.0
                     ),
                 }))?;
