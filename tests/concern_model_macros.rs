@@ -198,8 +198,14 @@ fn literal_accessors_keep_their_source_and_lower_on_each_direct_includer() {
     }
 }
 
+/// Unsupported shapes are contextual refusals, not executable accessors
+/// or global errors for dormant concerns. Survey must record each includer
+/// and remove the entire declaration, including its otherwise-valid names.
 #[test]
-fn unsupported_accessor_shapes_are_not_partially_carried() {
+fn unsupported_accessor_shapes_are_reported_only_for_includers() {
+    use roundhouse::dialect::ModelBodyItem;
+    use roundhouse::ingest::survey;
+
     for declaration in [
         "attr_accessor",
         "attr_accessor \"scratch\"",
@@ -208,16 +214,59 @@ fn unsupported_accessor_shapes_are_not_partially_carried() {
         "attr_accessor :scratch, name",
         "attr_accessor *FIELDS",
         "attr_accessor :scratch, *FIELDS",
-        "self.attr_accessor :scratch",
-        "Other.attr_accessor :scratch",
         "attr_accessor(:scratch) { nil }",
         "attr_reader :scratch",
         "attr_writer :scratch",
         "attr_accessor :scratch if false",
+        "attr_accessor :scratch if true",
+        "attr_reader :scratch unless false",
+        "if false\n      attr_accessor :scratch\n    else\n      attr_writer :flag\n    end",
     ] {
         let source = format!("module DraftState\n  extend ActiveSupport::Concern\n  FIELDS = %i[scratch flag]\n  included do\n    {declaration}\n  end\nend\n");
         let (items, enums) = roundhouse::ingest::library_class::ingest_concern_model_items(source.as_bytes(), "draft_state.rb");
-        assert!(items.is_empty(), "must not carry {declaration}: {items:?}");
+        assert_eq!(items.len(), 1, "recognized declaration must be retained: {declaration}");
+        let [ModelBodyItem::Unknown { expr, .. }] = items[0].1.as_slice() else { panic!("{items:?}") };
+        assert!(expr.diagnostic.is_some(), "unsupported declaration needs a contextual refusal: {declaration}");
+        assert!(enums.is_empty());
+
+        let files = [
+            ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :messages do |t|\n    t.string :body\n  end\n  create_table :notes do |t|\n    t.string :body\n  end\nend\n"),
+            ("app/models/concerns/draft_state.rb", source.as_str()),
+            ("app/models/message.rb", "class Message < ApplicationRecord\nend\n"),
+        ];
+        ingest_app_from_tree(tree(&files)).expect("dormant unsupported accessor must remain inert");
+        let mut included = tree(&files);
+        included.insert("app/models/message.rb".into(), b"class Message < ApplicationRecord\n  include DraftState\nend\n".to_vec());
+        included.insert("app/models/note.rb".into(), b"class Note < ApplicationRecord\n  include DraftState\nend\n".to_vec());
+        let error = ingest_app_from_tree(included.clone()).expect_err("unsupported included accessor must fail strict ingest");
+        assert!(error.to_string().contains("unsupported accessor shape"), "{declaration}: {error}");
+        survey::activate();
+        let result = ingest_app_from_tree(included);
+        let gaps = survey::drain();
+        let app = result.expect("survey retains both includers");
+        assert_eq!(gaps.len(), 2, "one refusal per includer: {declaration}: {gaps:?}");
+        let declaration_span = app.concern_model_items.values().flatten().find_map(|item| {
+            let ModelBodyItem::Unknown { expr, .. } = item else { return None };
+            expr.diagnostic.as_ref().map(|_| expr.span)
+        }).expect("original refused declaration retains its source span");
+        for name in ["Message", "Note"] {
+            assert!(gaps.iter().any(|gap| gap.to_string().contains(&format!("on {name}"))), "{gaps:?}");
+            let model = app.models.iter().find(|model| model.name.0.as_str() == name).unwrap();
+            assert!(model.body.iter().all(|item| !matches!(item, ModelBodyItem::Unknown { expr: carried, .. } if carried.span == declaration_span)));
+            let lowered = roundhouse::lower::lower_model_to_library_class(model, &app.schema);
+            assert!(lowered.methods.iter().all(|method| !["scratch", "scratch=", "flag", "flag="].contains(&method.name.as_str())), "must not partially synthesize {declaration}");
+        }
+    }
+}
+
+/// Receiver-bearing calls and unrelated DSL keep their existing path;
+/// recognizing attr_* must not start treating arbitrary calls as macros.
+#[test]
+fn unrelated_calls_are_not_accessor_candidates() {
+    for declaration in ["self.attr_accessor :scratch", "Other.attr_accessor :scratch", "unknown_macro :scratch"] {
+        let source = format!("module DraftState\n  extend ActiveSupport::Concern\n  included {{ {declaration} }}\nend\n");
+        let (items, enums) = roundhouse::ingest::library_class::ingest_concern_model_items(source.as_bytes(), "draft_state.rb");
+        assert!(items.is_empty(), "must not claim unrelated {declaration}: {items:?}");
         assert!(enums.is_empty());
     }
 }

@@ -13,9 +13,25 @@ use crate::App;
 use super::survey::unwrap_or_record;
 use super::{IngestError, IngestResult};
 
+/// Retain recognized attr_* declarations, including conditional ones,
+/// so refusal is attributed to each includer rather than silently dropped.
+pub(super) fn is_candidate(item: &ModelBodyItem) -> bool {
+    fn accessor(expr: &Expr) -> bool {
+        match &*expr.node {
+            ExprNode::Send { recv: None, method, .. } =>
+                matches!(method.as_str(), "attr_accessor" | "attr_reader" | "attr_writer"),
+            ExprNode::If { cond, then_branch, else_branch } =>
+                accessor(cond) || accessor(then_branch) || accessor(else_branch),
+            ExprNode::Seq { exprs } => exprs.iter().any(accessor),
+            _ => false,
+        }
+    }
+    matches!(item, ModelBodyItem::Unknown { expr, .. } if accessor(expr))
+}
+
 /// Computed/splat names retain concern lexical scope, and one-sided
 /// accessors need a separate analyzer fix. Neither is admitted here.
-pub(super) fn is_candidate(item: &ModelBodyItem) -> bool {
+pub(super) fn is_supported(item: &ModelBodyItem) -> bool {
     let ModelBodyItem::Unknown { expr, .. } = item else {
         return false;
     };

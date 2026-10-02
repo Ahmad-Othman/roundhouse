@@ -2556,7 +2556,7 @@ pub type ConcernModelItems = (
 );
 
 pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItems {
-    use super::concern_accessors::{decline, is_candidate};
+    use super::concern_accessors::{decline, is_candidate, is_supported};
     use crate::dialect::ModelBodyItem;
 
     fn walk_dsl_stmts<'pr>(body: ruby_prism::Node<'pr>, out: &mut Vec<ruby_prism::Node<'pr>>) {
@@ -2648,10 +2648,12 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
                                 // includer. Other Unknowns stay with the
                                 // module.
                                 ModelBodyItem::Unknown { .. } => {
-                                    if is_candidate(&item)
-                                        && !direct.iter().any(|stmt| stmt.location().start_offset() == inner.location().start_offset())
-                                    {
-                                        decline(&mut item, "inside with_options is not modeled");
+                                    if is_candidate(&item) {
+                                        if !is_supported(&item) {
+                                            decline(&mut item, "unsupported accessor shape: only direct, nonempty, literal-Symbol attr_accessor is modeled");
+                                        } else if !direct.iter().any(|stmt| stmt.location().start_offset() == inner.location().start_offset()) {
+                                            decline(&mut item, "inside with_options is not modeled");
+                                        }
                                     }
                                     if unknown_is_block_callback(&item)
                                         || unknown_is_model_macro(&item)
