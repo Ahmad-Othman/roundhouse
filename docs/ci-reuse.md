@@ -10,6 +10,14 @@
 - TypeScript SharedWorker browser tests, Campfire conformance, and Campfire
   comparison including its model/database differential.
 
+The unit job compiles with `cargo test --locked --all-targets --no-run --timings`
+and then executes `cargo test --locked --all-targets` against those binaries.
+Separate step durations distinguish build/link cost from test execution; the
+`unit-build-timings` artifact retains Cargo's per-target HTML build report,
+including on failures when a report is available. Test results are never reused.
+The test profile keeps file/line backtraces with `line-tables-only` debug info;
+the independent dev-profile bench emission gate remains unchanged.
+
 These are nine validation executions, plus three small orchestration jobs
 (`plan`, `compact-required`, `ci-summary`). Drafts select only fixture and
 unit validation. **`CI summary` is informational:** it reports missing,

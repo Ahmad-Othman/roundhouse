@@ -1,6 +1,49 @@
 use std::fs;
 
 #[test]
+fn unit_separates_build_timing_without_reducing_coverage() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let unit = &ci["jobs"]["unit"];
+    assert!(unit.get("if").is_none());
+    assert!(unit.get("continue-on-error").is_none());
+    let steps = unit["steps"].as_sequence().unwrap();
+    let build = steps
+        .iter()
+        .position(|step| {
+            step["run"].as_str() == Some("cargo test --locked --all-targets --no-run --timings")
+        })
+        .expect("compile every target with timings");
+    let run = steps
+        .iter()
+        .position(|step| step["run"].as_str() == Some("cargo test --locked --all-targets"))
+        .expect("execute every non-ignored test, not just compile it");
+    assert!(build < run);
+    for index in [build, run] {
+        assert!(steps[index].get("if").is_none());
+        assert!(steps[index].get("continue-on-error").is_none());
+    }
+    let timings = steps
+        .iter()
+        .find(|step| step["with"]["name"].as_str() == Some("unit-build-timings"))
+        .expect("retain build timings for investigation");
+    assert_eq!(timings["if"].as_str(), Some("always()"));
+    assert_eq!(
+        timings["with"]["path"].as_str(),
+        Some("target/cargo-timings/")
+    );
+    let bench = steps
+        .iter()
+        .find(|step| {
+            step["name"].as_str()
+                == Some("Emit every bench lane in the debug profile (scripts/bench's shape)")
+        })
+        .expect("retain the independent dev-profile stack-overflow gate");
+    assert!(bench.get("if").is_none());
+    assert!(bench.get("continue-on-error").is_none());
+}
+
+#[test]
 fn routing_and_required_results_reject_false_green() {
     for test in ["tests/ci_plan_test.py", "tests/ci_archive_evidence_test.py"] {
         let result = std::process::Command::new("python3")

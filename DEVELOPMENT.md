@@ -38,7 +38,12 @@ cargo test --test framework_tests_ruby -- --ignored # framework runtime's
 ```
 
 The default test suite is the forcing function and must pass before
-any commit. Toolchain and framework tests are `#[ignore]`-gated so a
+any commit. The test profile uses `line-tables-only` debug information:
+backtraces retain file/line locations without repeating module metadata in
+hundreds of integration-test binaries. Code stays unoptimized. For full
+debugger information, use `CARGO_PROFILE_TEST_DEBUG=2 cargo test`.
+
+Toolchain and framework tests are `#[ignore]`-gated so a
 local `cargo test` doesn't require every target runtime installed —
 CI covers them via per-target jobs and the `smoke` matrix (which
 executes each published archive's README verbatim; several toolchain

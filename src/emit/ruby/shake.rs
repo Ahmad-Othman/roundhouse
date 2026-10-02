@@ -141,16 +141,14 @@ fn sig_line_name(line: &str) -> Option<String> {
 }
 
 /// Identifier tokens (with a trailing `?`/`!` when present) on a line.
-fn tokens(line: &str, out: &mut HashSet<String>) {
+fn tokens<'a>(line: &'a str, out: &mut HashSet<&'a str>) {
     let bytes = line.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         let b = bytes[i];
         if b.is_ascii_alphabetic() || b == b'_' {
             let start = i;
-            while i < bytes.len()
-                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
-            {
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                 i += 1;
             }
             let mut end = i;
@@ -162,7 +160,7 @@ fn tokens(line: &str, out: &mut HashSet<String>) {
                     end = i + 1;
                 }
             }
-            out.insert(line[start..end].to_string());
+            out.insert(&line[start..end]);
         } else {
             i += 1;
         }
@@ -300,7 +298,10 @@ pub fn shake_tree(
     for _pass in 0..10 {
         // Usage universe: every token on every line of every file,
         // EXCEPT the name being introduced on a def/sig line itself.
-        let mut usage: HashMap<String, usize> = HashMap::new();
+        // Borrow tokens from the current files; the drop sets own their
+        // names, so these borrows end before any file is rewritten.
+        let mut usage: HashMap<&str, usize> = HashMap::new();
+        let mut toks = HashSet::new();
         for (path, content) in files.iter() {
             let is_rb = path.ends_with(".rb");
             let is_rbs = path.ends_with(".rbs");
@@ -313,12 +314,13 @@ pub fn shake_tree(
                 } else {
                     sig_line_name(line)
                 };
-                let mut toks = HashSet::new();
                 tokens(line, &mut toks);
                 if let Some(d) = defined {
-                    toks.remove(&d);
+                    toks.remove(d.as_str());
                 }
-                for t in toks {
+                // Drain keeps the allocation for the next line, but not
+                // its tokens: usages are counted once per distinct line.
+                for t in toks.drain() {
                     *usage.entry(t).or_default() += 1;
                 }
             }
@@ -344,7 +346,7 @@ pub fn shake_tree(
                     if model && !synth_shakeable.contains(&name) {
                         continue;
                     }
-                    if usage.get(&name).copied().unwrap_or(0) == 0 {
+                    if usage.get(name.as_str()).copied().unwrap_or(0) == 0 {
                         dead.insert(name);
                     }
                 }
@@ -383,5 +385,42 @@ pub fn shake_tree(
             "roundhouse: treeshake ({label}): dropped {total_runtime} runtime defs + \
              {total_synth} synthesized model defs (text-level, whole-tree name scan)"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_tokens_preserve_suffixes_operator_boundaries_and_line_deduplication() {
+        let mut found = HashSet::new();
+        tokens("ready! ready!=other next? next? _keep", &mut found);
+        assert_eq!(
+            found,
+            HashSet::from(["ready!", "ready", "other", "next?", "_keep"])
+        );
+    }
+
+    #[test]
+    fn rewritten_files_are_rescanned_until_orphans_and_their_signatures_disappear() {
+        let mut files = vec![
+            ("runtime/active_record/probe.rb".into(),
+             "module Probe\n  def dead; leaf; end\n  def leaf; 9; end\n  def live!; 3; end\n  def mentioned?; 4; end\n  def initialize; 7; end\nend\n".into()),
+            ("sig/runtime/active_record/probe.rbs".into(),
+             "module Probe\n  def dead: () -> Integer\n          | () -> String\n  def leaf: () -> Integer\n  def live!: () -> Integer\n  def mentioned?: () -> Integer\n  def initialize: () -> Integer\nend\n".into()),
+            ("app/entry.rb".into(), "Probe.live!\ndeadly\n# mentioned? is a textual root\n".into()),
+        ];
+        let entry = files[2].clone();
+        shake_tree(&mut files, &HashSet::new(), "test");
+        assert_eq!(
+            files[0].1,
+            "module Probe\n  def live!; 3; end\n  def mentioned?; 4; end\n  def initialize; 7; end\nend\n"
+        );
+        assert_eq!(
+            files[1].1,
+            "module Probe\n  def live!: () -> Integer\n  def mentioned?: () -> Integer\n  def initialize: () -> Integer\nend\n"
+        );
+        assert_eq!(files[2], entry);
     }
 }

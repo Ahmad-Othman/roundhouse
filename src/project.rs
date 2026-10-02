@@ -5463,6 +5463,11 @@ fn trim_gemfile(content: &str, has_js: bool, has_cable: bool) -> String {
 /// comments are skipped: the cookie jar explains a `Set.new` rewrite in
 /// one, and that is not a use.
 fn names_constant(src: &str, konst: &str) -> bool {
+    // Most files never mention this name. Reject those with the optimized
+    // substring search before walking/decoding every line of the runtime.
+    if !src.contains(konst) {
+        return false;
+    }
     src.lines().any(|line| {
         if line.trim_start().starts_with('#') {
             return false;
@@ -5502,6 +5507,9 @@ fn names_constant(src: &str, konst: &str) -> bool {
 /// True where the emitted program defines the constant itself, in which
 /// case the bundled library is not what the name refers to.
 fn defines_constant(src: &str, konst: &str) -> bool {
+    if !src.contains(konst) {
+        return false;
+    }
     src.lines().any(|line| {
         let trimmed = line.trim_start();
         ["class ", "module "].iter().any(|kw| {
@@ -5525,6 +5533,9 @@ fn defines_constant(src: &str, konst: &str) -> bool {
 /// `packages/erb` (a `class`) collided with the shim (a `module`). The
 /// lobsters AOT lane was red for ten days on that comment.
 fn requires_feature(src: &str, require_line: &str) -> bool {
+    if !src.contains(require_line) {
+        return false;
+    }
     src.lines().any(|line| {
         let trimmed = line.trim_start();
         trimmed
