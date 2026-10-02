@@ -79,6 +79,32 @@ and shared wrapper-local frames are outside this correction. CRuby regression
 tests cover helper-name shadowing, private dispatch and single evaluation;
 this is not a general wrapper-inlining or compiled Spinel compatibility claim.
 
+### Static concern method macros
+
+Concern-provided class methods such as Writebook's `positioned_within`
+can specialize parameterless `define_method` blocks into ordinary model
+methods before inference. Required positional and required/optional
+keyword arguments must bind immutable Symbols. Named visibility applies
+only to methods defined in that invocation. Each includer gets its own
+bindings; the supplying include must precede the call.
+
+This is not general metaprogramming support. Ambiguous providers,
+repeated/nested invocations, synthesized/inherited method collisions,
+overridden macro primitives, mutable captures, splats/destructuring,
+block parameters, constant references with unproven lexical binding,
+control flow, and effects outside definitions remain unsupported.
+Recognized but unrepresentable macros fail strict ingestion; survey mode
+records the gap and retains the original model body without partial expansion.
+Literal reflection is grounded only on public generated association/scope
+APIs without app-owned dispatcher/target/reader overrides. The shared
+Ruby/Spinel emission path then threads these calls through Relations.
+
+CRuby emit-and-run tests prove the parent binding, filtering, ordering,
+self-exclusion and reflective privacy of the generated helpers, not the
+whole Positionable concern (locking/rebalancing/callbacks), strict-target
+execution or compiled Writebook compatibility. Writebook remains a
+diagnostic corpus until its independent framework and Spinel gaps close.
+
 ## Active Record
 
 | | Blog tier (all targets) | Campfire tier (ruby, spinel) |

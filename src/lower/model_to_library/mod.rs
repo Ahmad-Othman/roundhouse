@@ -893,7 +893,7 @@ pub(crate) fn unretained_model_contracts<'a>(
     }).0
 }
 
-fn build_methods(
+pub(crate) fn build_methods(
     model: &Model,
     models: &[Model],
     schema: &Schema,
@@ -1318,7 +1318,7 @@ pub(crate) fn relation_new_self() -> Expr {
 /// synthesized `MethodDef.signature`s and an ApplicationRecord
 /// baseline (save / destroy / persisted? / errors / find / all /
 /// where / count / exists? / find_by / destroy_all).
-fn build_class_info(
+pub(crate) fn build_class_info(
     model: &Model,
     methods: &[MethodDef],
     table: Option<&Table>,
@@ -1342,7 +1342,9 @@ fn build_class_info(
         info.attributes = row;
     }
 
-    // Synthesized method signatures + kinds.
+    // Explicit signatures are authoritative. Precise source-body returns
+    // are filled below, after semantic scope/relation classification has
+    // had first refusal for otherwise unsigned methods.
     for m in methods {
         if let Some(sig) = &m.signature {
             match m.receiver {
@@ -1403,6 +1405,55 @@ fn build_class_info(
                 .or_insert(crate::dialect::AccessorKind::Method);
             info.relation_derived.insert(method.name.clone());
         }
+    }
+
+    // Last-resort record returns from the source analyzer. Keep this
+    // after semantic seeding: a body's stale annotation must not prevent
+    // scope_return_seed from recording Relation (or a terminal result).
+    // Preserve parent-helper record identity, not arbitrary container
+    // annotations: retyping a raw Hash can repeat already-lowered key
+    // coercions. A raw Fn would likewise be mistaken by unwrap_fn_ret
+    // for this method's own signature instead of its returned callable.
+    for m in methods {
+        if m.signature.is_some() || contains_return(&m.body) {
+            continue;
+        }
+        let Some(inferred) = m
+            .body
+            .ty
+            .as_ref()
+            .filter(|ty| match ty {
+                Ty::Class { .. } => true,
+                Ty::Union { variants } => variants.iter().any(|ty| matches!(ty, Ty::Class { .. }))
+                    && variants.iter().all(|ty| matches!(ty, Ty::Class { .. } | Ty::Nil)),
+                _ => false,
+            })
+        else {
+            continue;
+        };
+        let (method_map, kind_map) = match m.receiver {
+            MethodReceiver::Instance => {
+                (&mut info.instance_methods, &mut info.instance_method_kinds)
+            }
+            MethodReceiver::Class => (&mut info.class_methods, &mut info.class_method_kinds),
+        };
+        method_map
+            .entry(m.name.clone())
+            .or_insert_with(|| Ty::Fn {
+                // Retain the calling convention too: a positional Hash
+                // default must still normalize keyword syntax into a Hash.
+                // Unsigned methods retain default types, not call-site seeds.
+                params: m.params.iter().map(|p| crate::ty::Param {
+                    name: p.name.clone(),
+                    ty: p.default.as_ref().and_then(|d| d.ty.clone()).unwrap_or(Ty::Untyped),
+                    kind: p.ty_kind(),
+                }).collect(),
+                block: (m.block_param.is_some() || m.has_anonymous_block)
+                    .then(|| Box::new(Ty::Untyped)),
+                ret: Box::new(inferred.clone()),
+                effects: m.effects.clone(),
+            });
+        kind_map.entry(m.name.clone()).or_insert(m.kind);
     }
 
     // ApplicationRecord baseline (subset of runtime/ruby/active_record/base.rb's
@@ -2093,4 +2144,143 @@ pub(crate) fn nullable_column_names(table: Option<&Table>) -> Vec<Symbol> {
         .filter(|c| c.nullable && !c.primary_key)
         .map(|c| c.name.clone())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{collections::HashMap, path::PathBuf};
+
+    fn app(model_body: &str) -> crate::App {
+        let files = [
+            ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :articles do |t|\n    t.integer :book_id\n  end\n  create_table :books do |t|\n    t.string :title\n  end\nend\n".to_string()),
+            ("app/models/article.rb", format!("class Article < ApplicationRecord\n{model_body}\nend\n")),
+            ("app/models/book.rb", "class Book < ApplicationRecord\nend\n".to_string()),
+        ];
+        crate::ingest::ingest_app_from_tree(
+            files
+                .into_iter()
+                .map(|(path, text)| (PathBuf::from(path), text.into_bytes()))
+                .collect::<HashMap<_, _>>(),
+        )
+        .expect("ingest test app")
+    }
+
+    fn article_methods(app: &crate::App) -> Vec<MethodDef> {
+        let model = app
+            .models
+            .iter()
+            .find(|m| m.name.0.as_str() == "Article")
+            .unwrap();
+        build_methods(model, &app.models, &app.schema, &Default::default())
+    }
+
+    fn article_info(app: &crate::App, methods: &[MethodDef]) -> crate::analyze::ClassInfo {
+        let model = app
+            .models
+            .iter()
+            .find(|m| m.name.0.as_str() == "Article")
+            .unwrap();
+        build_class_info(model, methods, app.schema.tables.get(&model.table.0))
+    }
+
+    #[test]
+    fn class_info_keeps_precise_parent_helper_return() {
+        let app = app("  belongs_to :book\n  def positioning_parent\n    book\n  end");
+        let mut methods = article_methods(&app);
+        methods
+            .iter_mut()
+            .find(|m| m.name.as_str() == "positioning_parent")
+            .unwrap()
+            .body
+            .ty = Some(Ty::Class {
+            id: ClassId(Symbol::from("Book")),
+            args: vec![],
+        });
+        let info = article_info(&app, &methods);
+        assert_eq!(
+            info.instance_methods
+                .get(&Symbol::from("positioning_parent")),
+            Some(&fn_sig(vec![], Ty::Class {
+                id: ClassId(Symbol::from("Book")),
+                args: vec![]
+            }))
+        );
+    }
+
+    #[test]
+    fn inferred_record_return_keeps_positional_hash_and_keyword_call_shapes() {
+        for (formal, positional) in [("options = {}", true), ("options: {}", false)] {
+            let app = app(&format!(
+                "  belongs_to :book\n  def parent_for({formal})\n    book\n  end\n  def probe\n    parent_for(title: 'asymmetric')\n  end"
+            ));
+            let mut methods = article_methods(&app);
+            let record = Ty::Class { id: ClassId(Symbol::from("Book")), args: vec![] };
+            let parent = methods.iter_mut().find(|m| m.name.as_str() == "parent_for").unwrap();
+            parent.body.ty = Some(record.clone());
+            parent.params[0].default.as_mut().unwrap().ty = Some(Ty::Hash {
+                key: Box::new(Ty::Sym), value: Box::new(Ty::Str),
+            });
+            let classes = HashMap::from([
+                (ClassId(Symbol::from("Article")), article_info(&app, &methods)),
+            ]);
+            let probe = methods.iter_mut().find(|m| m.name.as_str() == "probe").unwrap();
+            probe.enclosing_class = Some(Symbol::from("Article"));
+            type_method_body(probe, &classes, None, None);
+            assert_eq!(probe.body.ty, Some(record), "{formal}");
+            let ExprNode::Send { args, .. } = &*probe.body.node else { panic!("probe call") };
+            assert!(matches!(&*args[0].node, ExprNode::Hash { kwargs, .. } if *kwargs != positional),
+                "lost call convention for {formal}: {:?}", probe.body);
+        }
+    }
+
+    #[test]
+    fn semantic_relation_seed_precedes_raw_body_fallback() {
+        let app = app("  def self.recent\n    where(book_id: 1)\n  end");
+        let mut methods = article_methods(&app);
+        let recent = methods
+            .iter_mut()
+            .find(|m| m.name.as_str() == "recent")
+            .unwrap();
+        recent.signature = None;
+        recent.body.ty = Some(Ty::Class { id: ClassId(Symbol::from("Book")), args: vec![] });
+        let info = article_info(&app, &methods);
+        assert_eq!(
+            info.class_methods.get(&Symbol::from("recent")),
+            Some(&Ty::Relation {
+                of: ClassId(Symbol::from("Article"))
+            })
+        );
+    }
+
+    #[test]
+    fn raw_container_and_fn_body_types_are_excluded() {
+        let app = app("  def callable\n    1\n  end");
+        let mut methods = article_methods(&app);
+        for ty in [fn_sig(vec![], Ty::Int), Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Int) }, Ty::Untyped] {
+            let callable = methods.iter_mut().find(|m| m.name.as_str() == "callable").unwrap();
+            callable.signature = None;
+            callable.body.ty = Some(ty);
+            assert!(!article_info(&app, &methods).instance_methods.contains_key(&Symbol::from("callable")));
+        }
+    }
+
+    #[test]
+    fn explicit_signature_precedes_raw_body_type() {
+        let app = app("  def answer\n    'wrong'\n  end");
+        let mut methods = article_methods(&app);
+        let answer = methods
+            .iter_mut()
+            .find(|m| m.name.as_str() == "answer")
+            .unwrap();
+        let explicit = fn_sig(vec![], Ty::Int);
+        answer.signature = Some(explicit.clone());
+        answer.body.ty = Some(Ty::Class { id: ClassId(Symbol::from("Book")), args: vec![] });
+        assert_eq!(
+            article_info(&app, &methods)
+                .instance_methods
+                .get(&Symbol::from("answer")),
+            Some(&explicit)
+        );
+    }
 }
