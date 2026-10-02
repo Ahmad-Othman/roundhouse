@@ -1206,13 +1206,14 @@ impl Analyzer {
         let declaration_id = |name: &Symbol, value: &Expr| {
             self.const_resolver.constant_declaration(value.span, name.as_str())
         };
-        // (defining class, last-segment name, Rubydex ID, value).
-        let mut entries: Vec<(Ty, Symbol, Option<DeclarationId>, Expr)> = Vec::new();
+        // (defining class, last-segment name, Rubydex ID, value,
+        // eligible for the production generated-expression fallback).
+        let mut entries: Vec<(Ty, Symbol, Option<DeclarationId>, Expr, bool)> = Vec::new();
         let mut push_const = |self_ty: Ty, expr: &Expr| {
             if let ExprNode::Assign { target: LValue::Const { path }, value } = &*expr.node {
                 if let Some(last) = path.last() {
                     let id = declaration_id(last, value);
-                    entries.push((self_ty, last.clone(), id, value.clone()));
+                    entries.push((self_ty, last.clone(), id, value.clone(), true));
                 }
             }
         };
@@ -1244,7 +1245,20 @@ impl Analyzer {
         for lc in &app.library_classes {
             for (name, value) in &lc.constants {
                 let self_ty = Ty::Class { id: lc.name.clone(), args: vec![] };
-                entries.push((self_ty, name.clone(), declaration_id(name, value), value.clone()));
+                entries.push((self_ty, name.clone(), declaration_id(name, value), value.clone(), true));
+            }
+        }
+        // Original source tests use the same DeclarationId contract.
+        // Their constants participate in the value fixpoint, but must
+        // not change the bare-name fallback used by production views.
+        for module in &app.test_modules {
+            for (owner, constants) in std::iter::once((&module.name, &module.constants))
+                .chain(module.inner_classes.iter().map(|inner| (&inner.name, &inner.constants)))
+            {
+                for (name, value) in constants {
+                    let self_ty = Ty::Class { id: owner.clone(), args: vec![] };
+                    entries.push((self_ty, name.clone(), declaration_id(name, value), value.clone(), false));
+                }
             }
         }
 
@@ -1264,7 +1278,7 @@ impl Analyzer {
                 .with_inquirers(&self.inquirers)
                 .with_const_resolver(self.const_resolver.clone())
                 .with_typed_constants(&resolved);
-            for (self_ty, name, id, value) in entries.iter_mut() {
+            for (self_ty, name, id, value, production) in entries.iter_mut() {
                 let ctx = Ctx {
                     self_ty: Some(self_ty.clone()),
                     ivar_bindings: HashMap::new(),
@@ -1280,7 +1294,7 @@ impl Analyzer {
                 if let Some(id) = id {
                     next_resolved.insert(*id, ty.clone());
                 }
-                if ambiguous.contains(name) {
+                if !*production || ambiguous.contains(name) {
                     continue;
                 }
                 match next.get(name) {
