@@ -39,14 +39,13 @@ pub(super) fn push_schema_methods(
     // AT THE IR LEVEL: the stored ISO-8601 text lives in a `<col>_raw`
     // String accessor pair (an ordinary field on every target), and the
     // public `<col>` reader is a computed getter parsing that text into
-    // a native `Time`. Every synthesized internal reference (hydration,
+    // a native Date or Time. Every synthesized internal reference (hydration,
     // predicate, attributes, `[]`/`[]=`, fill_timestamps, `_adapter_*`)
     // targets `<col>_raw` — so per-target emitters render what they see
     // instead of each re-deriving a storage/accessor redirect. The
-    // public `<col>=` writer normalizes through the `format_db_time`
-    // intrinsic (the write-side sibling of `parse_db_time`/`db_now`,
-    // native in every target runtime); hydration keeps writing stored
-    // text via `<col>_raw=` directly.
+    // public `<col>=` writer normalizes through the column's selected
+    // format intrinsic; hydration writes stored text via `<col>_raw=`
+    // directly. Date seams are native-Ruby-only for now.
     let mut demanded: Option<std::collections::HashSet<Symbol>> = None;
     for col in &table.columns {
         methods.push(synth_attr_reader(owner, col, model));
@@ -219,8 +218,8 @@ pub(super) fn push_schema_methods(
             block_param: None,
     });
 
-    // def self.schema_time_columns — the temporal subset of the above.
-    // JSON serialization is the consumer: Rails renders a temporal
+    // def self.schema_time_columns — the timestamp subset of the above.
+    // JSON serialization is the consumer: Rails renders a timestamp
     // attribute as ISO8601-with-offset while every other column renders
     // as its raw value, and the `[]` indexer hands back the STORED text
     // for both. Only the schema knows which is which, so the fact is
@@ -232,7 +231,7 @@ pub(super) fn push_schema_methods(
                 elements: table
                     .columns
                     .iter()
-                    .filter(|c| is_temporal_col(c))
+                    .filter(|c| matches!(c.col_type, crate::schema::ColumnType::DateTime | crate::schema::ColumnType::Time))
                     .map(|c| lit_sym(c.name.clone()))
                     .collect(),
                 style: ArrayStyle::Brackets,
@@ -822,23 +821,19 @@ fn and_bool(left: Expr, right: Expr) -> Expr {
 
 fn synth_attr_reader(owner: &ClassId, col: &Column, model: &Model) -> MethodDef {
     // Temporal columns store ISO-8601 TEXT (`ty_of_column` → Str) but
-    // read back as a real `Time`: the reader parses the stored text so
-    // `record.created_at` is a native `Time` for callers / analyze /
-    // Rails-canonical JSON. This is the shared, all-target home of what
-    // used to be Ruby's emit-only `apply_datetime_lowering`. Each backend
-    // renders `parse_db_time` (a stored-text→Time intrinsic) natively; a
-    // target that hasn't wired one yet surfaces the honest not-supported
-    // gap on this reader's `Ty::Time` return type.
+    // read back as Date or Time. This shared lowering selects the
+    // native seam; the target boundary rejects unsupported Date seams
+    // before an emitter can silently substitute a timestamp carrier.
     let (body, ret_ty) = if let Some(label) = enum_label_read(model, col) {
         (label, Ty::Union { variants: vec![Ty::Str, Ty::Nil] })
     } else if is_temporal_col(col) {
         // Nilable: a stored value can be absent (NULL / unset), so the
-        // parse short-circuits to nil. `Time?` is the honest static type
+        // parse short-circuits to nil. Date?/Time? is the honest static type
         // and matches what a strict-null target infers from the nilable
         // storage ivar.
         (
             temporal_reader_body(col),
-            Ty::Union { variants: vec![Ty::Time, Ty::Nil] },
+            Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil] },
         )
     } else if is_generic_json_col(col, model) {
         (json_reader_body(col), Ty::Untyped)
@@ -941,8 +936,7 @@ fn synth_before_type_cast(owner: &ClassId, col: &Column) -> MethodDef {
     }
 }
 
-/// True for a Date/DateTime/Time column — a stored-text column whose
-/// reader parses to a native `Time`.
+/// True for a stored-text column with native Date or Time accessors.
 fn is_temporal_col(col: &Column) -> bool {
     matches!(
         col.col_type,
@@ -952,13 +946,20 @@ fn is_temporal_col(col: &Column) -> bool {
     )
 }
 
-/// `ActiveSupport.parse_db_time(@col_raw)` — reader body for a temporal
-/// column. `parse_db_time` is nil-safe (nil / empty stored value → nil)
-/// and reads a zone-less stored value as UTC, so no explicit `&&` guard
-/// is needed — this renders cleanly on strict-null targets, where a
-/// guard would force a nil-raising `.not_nil!`. Typed `Time | Nil`.
-/// Every target (Ruby included) renders this same shape; each maps
-/// `parse_db_time` to its native parse.
+/// One authority for the logical value, parser and formatter. Storage
+/// stays String. The legacy hand-written Ruby accessor path uses this
+/// too; it must not independently decide that a Date is a timestamp.
+pub(crate) fn temporal_seam(col: &Column) -> (Ty, &'static str, &'static str) {
+    if col.col_type == crate::schema::ColumnType::Date {
+        (Ty::Date, "parse_db_date", "format_db_date")
+    } else {
+        (Ty::Time, "parse_db_time", "format_db_time")
+    }
+}
+
+/// Nil-safe native Date/Time parsing over the raw storage text. Dates
+/// have no zone; timestamps read zone-less storage as UTC. Backends
+/// without the selected native seam must report unsupported.
 fn temporal_reader_body(col: &Column) -> Expr {
     let ivar = with_ty(
         Expr::new(Span::synthetic(), ExprNode::Ivar { name: col_storage_name(col) }),
@@ -972,13 +973,13 @@ fn temporal_reader_body(col: &Column) -> Expr {
                     Span::synthetic(),
                     ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
                 )),
-                method: Symbol::from("parse_db_time"),
+                method: Symbol::from(temporal_seam(col).1),
                 args: vec![ivar],
                 block: None,
                 parenthesized: true,
             },
         ),
-        Ty::Union { variants: vec![Ty::Time, Ty::Nil] },
+        Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil] },
     )
 }
 
@@ -1015,6 +1016,9 @@ fn synth_raw_reader(owner: &ClassId, col: &Column) -> MethodDef {
 /// column: normalize the value to canonical storage text and store it
 /// through the raw field.
 ///
+/// Date uses `format_db_date`: YYYY-MM-DD with no zone or clock.
+/// The timestamp example and strict-target behavior below stay Time-only.
+///
 ///   def banned_at=(value)
 ///     self.banned_at_raw = ActiveSupport.format_db_time(value)
 ///   end
@@ -1049,11 +1053,11 @@ fn synth_temporal_writer(owner: &ClassId, col: &Column) -> MethodDef {
     let value_param = Symbol::from("value");
     let (value_ty, text_ty) = if col.nullable {
         (
-            Ty::Union { variants: vec![Ty::Time, Ty::Nil] },
+            Ty::Union { variants: vec![temporal_seam(col).0, Ty::Nil] },
             Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
         )
     } else {
-        (Ty::Time, Ty::Str)
+        (temporal_seam(col).0, Ty::Str)
     };
     let normalize = with_ty(
         Expr::new(
@@ -1063,7 +1067,7 @@ fn synth_temporal_writer(owner: &ClassId, col: &Column) -> MethodDef {
                     Span::synthetic(),
                     ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
                 )),
-                method: Symbol::from("format_db_time"),
+                method: Symbol::from(temporal_seam(col).2),
                 args: vec![with_ty(var_ref(value_param.clone()), value_ty.clone())],
                 block: None,
                 parenthesized: true,
@@ -2236,7 +2240,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
         }
 
         if is_temporal_col(col) {
-            // Temporal columns: callers pass native `Time` values
+            // Temporal columns: callers pass native Date or Time values
             // (`Username.create!(created_at: user.created_at)` in
             // lobsters), so the attrs value can't be stuffed into the
             // raw ISO-text slot directly. First the STANDARD
@@ -2244,7 +2248,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
             // exact pre-existing shape every target compiles (a Time
             // value transiently lands in the raw slot; nothing reads
             // between the two statements) — then a nil-guarded
-            // normalize through the `format_db_time` intrinsic, the
+            // normalize through the selected format intrinsic, the
             // same funnel `synth_temporal_writer` uses, called
             // directly because several emitters render the public
             // `<col>=` MethodDef without a property-setter
@@ -2283,7 +2287,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
             // unwraps it to the inner value.
             let time_value = Expr::new(
                 Span::synthetic(),
-                ExprNode::Cast { value: lookup.clone(), target_ty: Ty::Time },
+                ExprNode::Cast { value: lookup.clone(), target_ty: temporal_seam(col).0 },
             );
             let normalized = with_ty(
                 Expr::new(
@@ -2293,7 +2297,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
                             Span::synthetic(),
                             ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
                         )),
-                        method: Symbol::from("format_db_time"),
+                        method: Symbol::from(temporal_seam(col).2),
                         args: vec![time_value],
                         block: None,
                         parenthesized: true,
@@ -2817,8 +2821,10 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
     let name = Symbol::from("name");
 
     // Patterns match the PUBLIC column symbol; bodies read the storage
-    // ivar (`@col_raw` for temporal) — `record[:created_at]` yields the
-    // stored text, same as `attributes`. JSON columns are the exception: a
+    // ivar (`@col_raw` for timestamps). Date instead uses its native
+    // reader, matching literal-key analysis and Rails' []/read_attribute.
+    // `attributes` and the raw Date reader still expose stored text.
+    // JSON columns are another exception: a
     // `has_json` declaration builds its typed Hash from the flat readers; a
     // schema-less column decodes through `JsonColumn.load`.
     let arms: Vec<crate::expr::Arm> = table
@@ -2838,6 +2844,7 @@ fn synth_index_read(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
             // `&self`.
             body: crate::lower::has_json::column_hash_read(model, &c.name)
                 .or_else(|| enum_label_read(model, c))
+                .or_else(|| (c.col_type == crate::schema::ColumnType::Date).then(|| temporal_reader_body(c)))
                 .or_else(|| is_generic_json_col(c, model).then(|| json_reader_body(c)))
                 .unwrap_or_else(|| {
                 let read = Expr::new(
@@ -3562,7 +3569,7 @@ fn synth_update_hash(
             // line (`if a: if b: …`), which is a syntax error.
             let time_value = Expr::new(
                 Span::synthetic(),
-                ExprNode::Cast { value: lookup(&col.name), target_ty: Ty::Time },
+                ExprNode::Cast { value: lookup(&col.name), target_ty: temporal_seam(col).0 },
             );
             let normalized = with_ty(
                 Expr::new(
@@ -3572,7 +3579,7 @@ fn synth_update_hash(
                             Span::synthetic(),
                             ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
                         )),
-                        method: Symbol::from("format_db_time"),
+                        method: Symbol::from(temporal_seam(col).2),
                         args: vec![time_value],
                         block: None,
                         parenthesized: true,
