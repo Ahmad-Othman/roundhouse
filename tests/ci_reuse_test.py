@@ -834,6 +834,41 @@ class InputTests(unittest.TestCase):
                 "local", json.loads((root / "bundle/receipt.json").read_text())
             )
 
+    def test_source_recording_rejects_external_source_and_environment_drift(self):
+        with (
+            patch.dict(os.environ, self.pr_env(), clear=True),
+            patch.object(
+                reuse, "environment_inputs", return_value={"rustc": "before"}
+            ) as environment,
+        ):
+            source = self.root / "source"
+            original = (source / "app.rb").read_text()
+            for job in ("store-check", "writebook-inventory"):
+                with self.subTest(job=job):
+                    root = reuse.state_dir(job)
+                    root.mkdir(parents=True)
+                    state = {
+                        "inputs": reuse.execution_inputs(job, source),
+                        "reused": False,
+                        "local": {"input": str(source)},
+                    }
+                    (root / "state.json").write_text(json.dumps(state))
+                    outcomes = ["success"] * len(reuse.JOBS[job]["checks"])
+                    (source / "app.rb").write_text("different validated source")
+                    with self.assertRaises(ValueError):
+                        reuse.record(job, outcomes)
+                    self.assertFalse((root / "bundle").exists())
+                    (source / "app.rb").write_text(original)
+                    environment.return_value = {"rustc": "changed during validation"}
+                    with self.assertRaises(ValueError):
+                        reuse.record(job, outcomes)
+                    self.assertFalse((root / "bundle").exists())
+                    environment.return_value = {"rustc": "before"}
+                    for report in reuse.JOBS[job]["reports"]:
+                        Path(report).write_text("actual successful report")
+                    reuse.record(job, outcomes)
+                    self.assertTrue((root / "bundle/receipt.json").is_file())
+
     def test_archive_resolution_never_prepares_the_validation_extraction_and_rejects_changed_readme(
         self,
     ):
@@ -866,6 +901,12 @@ class InputTests(unittest.TestCase):
             if args[0] == "tar":
                 with tarfile.open(args[2]) as tar:
                     tar.extractall(args[-1], filter="data")
+            elif Path(args[0]).name == "smoke":
+                # Exercise the real canonical parser, not a Python imitation.
+                with subprocess.Popen(args, stdout=subprocess.PIPE) as process:
+                    result, _ = process.communicate()
+                    self.assertEqual(process.returncode, 0)
+                    return result
             return b""
 
         with (

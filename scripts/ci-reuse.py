@@ -328,6 +328,16 @@ def consumer_inputs(job, input_path, resolved=None):
     return result
 
 
+def execution_inputs(job, input_path, resolved=None):
+    if "consumer" in JOBS[job]:
+        return consumer_inputs(job, input_path, resolved)
+    return {
+        "repository": repository_inputs(job),
+        "source": tree_digest(input_path),
+        "environment": environment_inputs(),
+    }
+
+
 def prepare_archive(input_path, destination):
     # A SEPARATE extraction resolves the inputs. Never copy its locks/modules
     # into the pristine extraction that must prove the README actually works.
@@ -336,28 +346,23 @@ def prepare_archive(input_path, destination):
     root = destination / "rust"
     import re
 
-    blocks = []
-    section = ""
-    collecting = False
-    lines = []
-    for line in (root / "README.md").read_text().splitlines():
-        if line.startswith("## "):
-            section = line[3:]
-        if line == "```sh":
-            collecting = True
-            lines = []
-        elif line == "```":
-            if collecting and section not in ("Run", "Regenerate"):
-                blocks.append((section, "\n".join(lines).strip()))
-            collecting = False
-        elif collecting:
-            lines.append(line)
+    blocks_dir = destination / ".smoke-blocks"
+    # The same parser extracts the blocks that pristine smoke executes.
+    command(
+        str(Path(__file__).with_name("smoke")),
+        "--extract-blocks",
+        str(root / "README.md"),
+        str(blocks_dir),
+    )
+    blocks = [
+        (path.name, path.read_text().strip()) for path in sorted(blocks_dir.iterdir())
+    ]
     if blocks != [
-        ("Build", "cargo build --release"),
-        ("Setup", "sqlite3 storage/development.sqlite3 < db/seed.sql"),
-        ("Test", "cargo test"),
+        ("01--Build.sh", "cargo build --release"),
+        ("02--Setup.sh", "sqlite3 storage/development.sqlite3 < db/seed.sql"),
+        ("03--Test.sh", "cargo test"),
         (
-            "End-to-end",
+            "04--End-to-end.sh",
             "cd e2e\nnpm install\nnpx playwright install chromium\nnpx playwright test",
         ),
     ]:
@@ -568,15 +573,7 @@ def probe(job, input_dir):
     resolved = (
         prepare_archive(input_dir, root / "resolver") if job == "smoke-rust" else None
     )
-    inputs = (
-        consumer_inputs(job, input_dir, resolved)
-        if "consumer" in JOBS[job]
-        else {
-            "repository": repository_inputs(job),
-            "source": tree_digest(input_dir),
-            "environment": environment_inputs(),
-        }
-    )
+    inputs = execution_inputs(job, input_dir, resolved)
     current = {
         "schema": SCHEMA,
         "repository": os.environ["GITHUB_REPOSITORY"],
@@ -622,15 +619,12 @@ def record(job, outcomes, validation_dir=None):
     receipt = json.loads((root / "state.json").read_text())
     if receipt["reused"]:
         raise ValueError("reused validation cannot mint execution evidence")
-    # A locked build must not have changed source inputs since the probe.
-    if receipt["inputs"]["repository"] != repository_inputs(job):
-        raise ValueError("repository input changed during validation")
-    if "consumer" in JOBS[job]:
-        if job == "smoke-rust" and not validation_dir:
-            raise ValueError("missing pristine validation witness")
-        current = consumer_inputs(job, receipt["local"]["input"], validation_dir)
-        if current != receipt["inputs"]:
-            raise ValueError("consumer inputs changed during validation")
+    if job == "smoke-rust" and not validation_dir:
+        raise ValueError("missing pristine validation witness")
+    # Every contract re-witnesses source, environment AND repository inputs.
+    current = execution_inputs(job, receipt["local"]["input"], validation_dir)
+    if current != receipt["inputs"]:
+        raise ValueError("inputs changed during validation")
     del receipt["local"]
     bundle = root / "bundle"
     bundle.mkdir()

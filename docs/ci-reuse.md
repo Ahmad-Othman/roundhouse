@@ -57,7 +57,8 @@ and the complete explicitly selected browser payload. Only root-level browser
 installation markers remain inputs. Source symlinks still disable reuse;
 installed tools may contain only witnessed, internal file symlinks.
 
-Before issuing a consumer receipt, recompute its complete witness. Rust smoke
+Before issuing any receipt, recompute its complete witness, including external
+source trees and the environment for Store and Writebook. Rust smoke
 compares the **pristine validation extraction's** resulting locks, modules and
 source against the resolver extraction, never copying prepared dependencies
 into validation. Resolution drift or unexpected source changes suppress the
@@ -67,7 +68,9 @@ this proves README execution with prepared system/browser prerequisites, not a
 completely cold browser install.
 
 Rust smoke accepts only the audited Build/Setup/Test/E2E command shape and
-pinned Playwright manifest. Unknown README commands, external/path Cargo
+pinned Playwright manifest. Dependency preparation uses `scripts/smoke
+--extract-blocks` so it audits the same parser as real README execution.
+Unknown README commands, external/path Cargo
 sources, global Cargo configuration, external database/server overrides,
 browser/test-selection overrides or unsupported file types execute normally.
 Dependency preparation remains real work even on a hit; the saved work is
@@ -120,6 +123,34 @@ tokens or credentials and are not accepted across PRs or into main.
 
 This is ordinary GitHub CI provenance, not cryptographic attestation against
 an author who can modify the PR's workflow itself.
+
+## Further load reductions and cancellation
+
+Superseded PR runs still cancel; main runs that have started still finish.
+Completed successful jobs with receipts remain reusable even if another job
+later fails or the overall run is cancelled. An unfinished or cancelled job is
+not proof of successful validation. Keeping old full runs alive indiscriminately
+would add concurrent work without proving the newest merge-tree inputs.
+Stage-aware cancellation needs a separate controller to inspect the previous
+run; GitHub's concurrency expression cannot inspect that run's job progress.
+This PR does not add privileged cancellation machinery.
+
+The next substantial opportunity is sharing **current-run** native compiler
+builds, not declaring more outputs unchanged without a dependency witness.
+In [run 36998514579](https://github.com/rubys/roundhouse/actions/runs/36998514579),
+the unit Cargo step took 309 seconds and the two TypeScript toolchain/framework
+steps took 210 seconds together. Those are whole-step timings, not measurements
+of compiler cost alone. A shared build needs consistent profiles/toolchains,
+native-library ABI, current commit provenance and coverage of each consumer's
+actual build flags. It should be measured and proved separately.
+
+Matrix `fail-fast: false` still preserves cross-target diagnostic coverage;
+advisory lanes remain signals rather than reasons to cancel independent checks.
+Existing `needs` gates and normal step failure handling are unchanged. The
+Campfire Docker recipe no longer downloads a separate Dockerfile frontend:
+its ordinary multi-stage instructions use the bundled frontend and COPY
+preserves the archive's executable boot mode. Base images and apt packages
+still resolve freshly, and the real Docker smoke remains enabled.
 
 ## Forcing a fresh check and extending the allowlist
 
