@@ -24,12 +24,7 @@ pub trait Vfs {
     fn exists(&self, path: &Path) -> bool;
     fn is_dir(&self, path: &Path) -> bool;
     /// Return whether `path` is a symbolic link, without following it.
-    ///
-    /// VFS implementations with symbolic links must override this method.
-    /// VFS implementations without symbolic links can use this default.
-    fn is_symlink(&self, _path: &Path) -> bool {
-        false
-    }
+    fn is_symlink(&self, path: &Path) -> bool;
 }
 
 /// Real-filesystem-backed `Vfs`. Used by the CLI and tests.
@@ -140,5 +135,10 @@ impl Vfs for MapVfs {
         self.files
             .keys()
             .any(|f| f.starts_with(path) && f != path)
+    }
+
+    fn is_symlink(&self, _path: &Path) -> bool {
+        // A flat map of file contents has no symbolic links.
+        false
     }
 }
