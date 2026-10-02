@@ -3091,3 +3091,19 @@ end
         )
         .assert_passes();
 }
+
+/// A routed action with a template and no method behind it: Rails runs
+/// `show` whether or not `def show` exists, so `before_action
+/// :set_article, only: %i[show …]` still feeds `articles/show`. `check`
+/// reported every `@article` in that template as having no known type.
+#[test]
+fn a_template_only_action_is_fed_by_its_before_action() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "  # GET /articles/1 or /articles/1.json\n  def show\n  end\n\n",
+            "",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
