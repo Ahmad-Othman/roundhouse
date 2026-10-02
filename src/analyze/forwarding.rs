@@ -16,6 +16,7 @@ use crate::ty::Ty;
 pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let contracts = SourceContractIndex::new(app);
+    let unretained = crate::lower::model_to_library::unretained_full_model_methods(app);
     let scoped = if app
         .models
         .iter()
@@ -55,6 +56,8 @@ pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
                         .any(|d| &d.model == owner && d.method == method.name))
             {
                 Some("full forwarding cannot use the relation-threading argument ABI")
+            } else if unretained.contains(&(owner.clone(), method.name_span)) {
+                Some("model method synthesis does not preserve this source declaration")
             } else {
                 None
             };

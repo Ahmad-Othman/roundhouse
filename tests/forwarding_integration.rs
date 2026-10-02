@@ -304,3 +304,162 @@ fn copied_constructor_result_and_local_cannot_prove_the_base_contract() {
         );
     }
 }
+
+#[test]
+fn synthesized_model_method_does_not_silently_replace_a_full_source_contract() {
+    let method = "def self._conflict_predicate(...); 11; end";
+    let probe =
+        "class Probe; def self.run; kw={factor:3}; Article._conflict_predicate(7,**kw); end; end";
+    let native = Command::new("ruby")
+        .args([
+            "-e",
+            &format!("class Article; {method}; end; {probe}; puts Probe.run"),
+        ])
+        .output()
+        .unwrap();
+    assert!(native.status.success());
+    assert_eq!(String::from_utf8_lossy(&native.stdout), "11\n");
+    for partial_index in [false, true] {
+        let mut overlay = emit_and_run::real_blog()
+            .edit(
+                "app/models/article.rb",
+                "class Article < ApplicationRecord\n",
+                &format!("class Article < ApplicationRecord\n {method}\n"),
+            )
+            .write("app/lib/probe.rb", probe);
+        if partial_index {
+            overlay = overlay.edit(
+                "db/schema.rb",
+                "    t.string \"title\"",
+                "    t.string \"title\"\n    t.index [\"title\"], name: \"index_articles_live_title\", unique: true, where: \"(id > 0)\"",
+            );
+        }
+        let run = overlay.run_ruby("puts Probe.run");
+        if partial_index {
+            assert!(
+                run.errors
+                    .iter()
+                    .any(|e| e.contains("model method synthesis")),
+                "errors={:?}; actual={}; stderr={}",
+                run.errors,
+                run.stdout,
+                run.stderr
+            );
+        } else {
+            run.assert_passes();
+            assert_eq!(run.stdout, "11\n");
+        }
+    }
+}
+
+#[test]
+fn check_surveys_effective_model_declarations_without_lowering_or_diagnostic_leaks() {
+    use roundhouse::analyze::{diagnose, Analyzer};
+    use roundhouse::diagnostic::{Diagnostic, Severity};
+    use roundhouse::emit::diagnostics::{push, scope};
+    use roundhouse::ingest::ingest_app_from_tree;
+    use roundhouse::span::Span;
+
+    let permit_only = "class ArticlesController < ApplicationController; def article_params; params.require(:article).permit(:title); end; end";
+    let create_demand = "class ArticlesController < ApplicationController; def create; @article=Article.create(article_params); end; def article_params; params.require(:article).permit(:title); end; end";
+    // Same names and even identical `...` formals are not proof that the
+    // effective source declaration survives. Receiver sides are independent;
+    // controller-dependent factories must use the actual permit/demand survey.
+    let cases: &[(&str, &str, &[bool])] = &[
+        ("def self.call(n); 17; end", "", &[]),
+        ("def self.call(...); 11; end", "", &[false]),
+        (
+            "def self.call(...); 11; end; def self.call(n); 17; end",
+            "",
+            &[true],
+        ),
+        (
+            "def self.call(n); 17; end; def self.call(...); 29; end",
+            "",
+            &[true],
+        ),
+        (
+            "def self.call(...); 11; end; def self.call(...); 29; end",
+            "",
+            &[true, true],
+        ),
+        (
+            "def self.call(...); 11; end; def self.call(n); 17; end; def self.call(...); 29; end",
+            "",
+            &[true, true],
+        ),
+        (
+            "def self.call(...); 11; end; def call(...); 29; end",
+            "",
+            &[false, false],
+        ),
+        (
+            "def self.title(...); 11; end; def title(...); 29; end",
+            "",
+            &[false, true],
+        ),
+        ("def self.create_from_params(...); 11; end", "", &[false]),
+        (
+            "def self.create_from_params(...); 11; end",
+            permit_only,
+            &[false],
+        ),
+        (
+            "def self.create_from_params(...); 11; end",
+            create_demand,
+            &[true],
+        ),
+    ];
+    for (methods, controller, refused) in cases {
+        // This unknown DSL statement makes synthesis emit a warning, allowing
+        // the enclosing sink assertions to detect a survey that leaks it.
+        let model =
+            format!("class Article < ApplicationRecord\n unclaimed_macro :flag\n {methods}\nend");
+        let tree = [
+            ("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do; create_table :articles do |t|; t.string :title; end; end"),
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base; self.abstract_class = true; end"),
+            ("app/models/article.rb", model.as_str()),
+            ("app/controllers/articles_controller.rb", controller),
+        ].into_iter().map(|(p, c)| (std::path::PathBuf::from(p), c.as_bytes().to_vec())).collect();
+        let mut app = ingest_app_from_tree(tree).unwrap();
+        Analyzer::new(&app).analyze(&mut app);
+        let spans: Vec<_> = app
+            .models
+            .iter()
+            .find(|m| m.name.0.as_str() == "Article")
+            .unwrap()
+            .methods()
+            .filter(|m| m.params.iter().any(|p| p.forwarding))
+            .map(|m| m.name_span)
+            .collect();
+        assert_eq!(spans.len(), refused.len(), "{methods}");
+        let before = Diagnostic::unsupported(Span::synthetic(), None, "before survey", "sentinel");
+        let after = Diagnostic::unsupported(Span::synthetic(), None, "after survey", "sentinel");
+        let (diags, emitted) = scope(|| {
+            push(before.clone());
+            let diags = diagnose(&app); // Deliberately no post-lowering pass.
+            push(after.clone());
+            diags
+        });
+        assert_eq!(emitted, vec![before, after], "{methods}");
+        let missing: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("model method synthesis"))
+            .collect();
+        assert_eq!(
+            missing.len(),
+            refused.iter().filter(|r| **r).count(),
+            "{methods}: {diags:?}"
+        );
+        for (span, refused) in spans.iter().zip(*refused) {
+            assert!(!span.is_synthetic());
+            assert_eq!(
+                missing
+                    .iter()
+                    .any(|d| d.span == *span && d.severity == Severity::Error),
+                *refused,
+                "{methods}: {diags:?}"
+            );
+        }
+    }
+}

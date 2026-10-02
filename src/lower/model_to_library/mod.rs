@@ -30,7 +30,7 @@ pub(crate) mod broadcasts;
 pub(crate) mod markers;
 pub mod row;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Model, Param};
 use crate::expr::{Expr, ExprNode, Literal};
@@ -822,6 +822,45 @@ pub fn writable_field_set(
 pub(crate) fn model_defines_writer(model: &Model, field: &crate::ident::Symbol) -> bool {
     let writer = crate::ident::Symbol::from(format!("{}=", field.as_str()));
     model_defines_instance_method(model, &writer)
+}
+
+/// Survey the same untyped synthesis used by emission: a native `...`
+/// contract is sound only if its effective source declaration survives.
+/// Run before lowering so `check` cannot admit a contract emission replaces.
+pub(crate) fn unretained_full_model_methods(app: &crate::App) -> HashSet<(ClassId, Span)> {
+    let mut candidates = app.models.iter()
+        .filter(|model| model.methods().any(|m| m.params.iter().any(|p| p.forwarding)))
+        .peekable();
+    if candidates.peek().is_none() {
+        return HashSet::new();
+    }
+    // Synthesis can report incidental emit warnings. A survey must neither
+    // publish those nor consume an enclosing transpile's diagnostic buffer.
+    crate::emit::diagnostics::scope(|| {
+        let mut specs = crate::lower::controller_to_library::params::collect_specs(&app.controllers);
+        specs.mark_file_fields(&app.models);
+        let mut missing = HashSet::new();
+        for model in candidates {
+            let built = build_methods(model, &app.models, &app.schema, &specs);
+            for source in model.methods().filter(|m| m.params.iter().any(|p| p.forwarding)) {
+                let matches = |m: &&MethodDef| {
+                    m.name == source.name && m.receiver == source.receiver
+                };
+                let effective = model.methods().filter(matches).last().unwrap();
+                let retained = built.iter().rev().find(matches);
+                if effective.name_span != source.name_span
+                    || retained.is_none_or(|m| {
+                        m.name_span != source.name_span
+                            || m.params != source.params
+                            || m.block_param != source.block_param
+                    })
+                {
+                    missing.insert((model.name.clone(), source.name_span));
+                }
+            }
+        }
+        missing
+    }).0
 }
 
 fn build_methods(
