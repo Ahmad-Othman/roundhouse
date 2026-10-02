@@ -227,6 +227,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         return super::roda_app::ingest_roda_app_with_vfs(vfs, dir);
     }
     super::sources::reset();
+    let path_gems = path_gem_dirs(vfs, dir);
+    let source_vfs = PathGemVfs { inner: vfs, root: dir, dirs: &path_gems };
+    let vfs = &source_vfs;
     let additional_test_paths = additional_test_paths(vfs, dir)?;
     validate_additional_test_paths(vfs, dir, &additional_test_paths)?;
     let mut app = App::new();
@@ -327,11 +330,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         }
     }
 
-    // App-layer roots: `app`, plus `<pkg>/app` for every Packwerk
-    // package that has one. Every layer walk below loops over these
-    // instead of a single hardwired `app/…` — see `app_roots`'s doc
-    // comment for why a Packwerk app needs more than one.
-    let roots = app_roots(vfs, dir);
+    // Packwerk packages and in-repository engines share the root app's passes.
+    let roots = app_roots(vfs, dir, &path_gems);
     app.app_roots = roots.iter().map(|r| r.display().to_string()).collect();
     // A namespace's `table_name_prefix` has to be known BEFORE the model
     // it prefixes is ingested, and file order does not guarantee that
@@ -387,7 +387,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // package under `lib/`, or in whatever the app adds to its
     // autoload paths. Collected before anything is classified, so a
     // model in either tree resolves against a base in either tree.
-    for sub in support_roots(vfs, dir, &roots, &lib_ignores) {
+    for sub in support_roots(vfs, dir, &roots, &path_gems, &lib_ignores) {
         let support_dir = dir.join(sub.as_str());
         if !vfs.is_dir(&support_dir) {
             continue;
@@ -537,7 +537,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     };
     let nested_app_roots: Vec<PathBuf> = roots.iter().skip(1).map(|root| dir.join(root)).collect();
     let mut support_seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    for sub in support_roots(vfs, dir, &roots, &lib_ignores) {
+    for sub in support_roots(vfs, dir, &roots, &path_gems, &lib_ignores) {
         let sub = sub.as_str();
         let support_dir = dir.join(sub);
         if !vfs.is_dir(&support_dir) {
@@ -3794,10 +3794,9 @@ fn nested_under(
 
 /// The support roots to walk for library classes: every `app/*`
 /// subdirectory that has no ingest pass of its own, plus `extras` and
-/// `lib`, plus whatever `config/application.rb` puts on the autoload or
-/// eager-load paths — minus the `autoload_lib(ignore:)` set. Paths are
-/// relative to the app root, deduplicated, and sorted so the walk order
-/// does not depend on directory-entry order.
+/// `lib`, each in-repository path gem's `lib/`, and the autoload or
+/// eager-load paths from `config/application.rb`. The app's ignore
+/// list removes roots. Paths are app-relative, deduplicated, and sorted.
 ///
 /// Rails autoloads *every* `app/*` subdirectory, so a fixed list was a
 /// guess about what an app calls its layers. An app whose use cases live
@@ -3815,6 +3814,7 @@ fn support_roots<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,
     roots: &[PathBuf],
+    path_gems: &[PathBuf],
     lib_ignores: &[String],
 ) -> Vec<String> {
     // Directories under an app root that another pass already ingests
@@ -3824,6 +3824,12 @@ fn support_roots<V: Vfs + ?Sized>(
         &["models", "controllers", "views", "helpers", "assets", "javascript"];
 
     let mut out: Vec<String> = vec!["extras".to_string(), "lib".to_string()];
+    for gem in path_gems {
+        let lib = gem.join("lib");
+        if vfs.is_dir(&lib) {
+            out.push(lib.strip_prefix(dir).expect("path gems are inside the app").display().to_string());
+        }
+    }
     for root in roots {
         if let Ok(entries) = vfs.read_dir(&dir.join(root)) {
             for entry in entries {
@@ -3872,17 +3878,116 @@ fn support_roots<V: Vfs + ?Sized>(
 /// engine's `lib/<name>/app/*` get the same
 /// models/controllers/views/helpers passes the root `app/` does.
 ///
-/// An app with neither (no `packwerk.yml` or `packs.yml` at the root,
-/// no path-sourced engine in `Gemfile.lock`) gets exactly `["app"]` —
-/// zero behavior change, which the fixtures' zero-diagnostic gates
-/// depend on.
-pub(super) fn app_roots<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
+/// Apps without Packwerk packages or in-repository engines retain the
+/// `["app"]` app-root list. Library-only path gems contribute support
+/// roots instead.
+pub(super) fn app_roots<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    path_gems: &[PathBuf],
+) -> Vec<PathBuf> {
     let mut roots = vec![PathBuf::from("app")];
     packwerk_app_roots(vfs, dir, &mut roots);
-    engine_app_roots(vfs, dir, &mut roots);
+    engine_app_roots(vfs, dir, path_gems, &mut roots);
     roots[1..].sort();
     roots.dedup();
     roots
+}
+
+/// In-repository `PATH` sources, normalized once for app and library discovery.
+fn path_gem_dirs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
+    let Ok(lock) = vfs.read_to_string(&dir.join("Gemfile.lock")) else { return Vec::new() };
+    let mut dirs = Vec::new();
+    for remote in crate::gems::lock_path_remotes(&lock) {
+        let remote = Path::new(&remote);
+        let remote = remote.strip_prefix(dir).unwrap_or(remote);
+        let mut relative = PathBuf::new();
+        let mut inside = true;
+        for component in remote.components() {
+            match component {
+                Component::CurDir => {}
+                Component::Normal(part) => relative.push(part),
+                _ => inside = false,
+            }
+        }
+        // The app itself already contributes its app/ and lib/ trees.
+        if !inside || relative.as_os_str().is_empty() {
+            continue;
+        }
+        let gem = dir.join(relative);
+        if !path_has_symlink_component(vfs, dir, &gem) && vfs.is_dir(&gem) {
+            dirs.push(gem);
+        }
+    }
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+/// Exclude symbolic links throughout selected path gems, without changing other sources.
+struct PathGemVfs<'a, V: Vfs + ?Sized> {
+    inner: &'a V,
+    root: &'a Path,
+    dirs: &'a [PathBuf],
+}
+
+impl<V: Vfs + ?Sized> PathGemVfs<'_, V> {
+    /// Apply the path-gem boundary to direct reads as well as directory walks.
+    fn linked(&self, path: &Path) -> bool {
+        self.dirs.iter().any(|dir| path.starts_with(dir))
+            && path_has_symlink_component(self.inner, self.root, path)
+    }
+
+    /// Treat excluded paths as absent, as directory discovery does.
+    fn check(&self, path: &Path) -> std::io::Result<()> {
+        if self.linked(path) {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "symbolic link excluded from path gem sources",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl<V: Vfs + ?Sized> Vfs for PathGemVfs<'_, V> {
+    /// Read source bytes only after the path-gem link check.
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        self.check(path)?;
+        self.inner.read(path)
+    }
+
+    /// Read source text only after the path-gem link check.
+    fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
+        self.check(path)?;
+        self.inner.read_to_string(path)
+    }
+
+    /// Omit linked children from directory listings inside selected path gems.
+    fn read_dir(&self, path: &Path) -> std::io::Result<Vec<PathBuf>> {
+        self.check(path)?;
+        let mut entries = self.inner.read_dir(path)?;
+        if self.dirs.iter().any(|dir| path.starts_with(dir)) {
+            entries.retain(|entry| !self.inner.is_symlink(entry));
+        }
+        Ok(entries)
+    }
+
+    /// Report an excluded path-gem path as absent.
+    fn exists(&self, path: &Path) -> bool {
+        !self.linked(path) && self.inner.exists(path)
+    }
+
+    /// Exclude linked path-gem directories from source discovery.
+    fn is_dir(&self, path: &Path) -> bool {
+        !self.linked(path) && self.inner.is_dir(path)
+    }
+
+    /// Inspect link metadata without opening the target.
+    fn is_symlink(&self, path: &Path) -> bool {
+        self.inner.is_symlink(path)
+    }
 }
 
 /// `<engine>/app` for every Rails engine the app carries in its own
@@ -3893,37 +3998,20 @@ pub(super) fn app_roots<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
 /// is the app's code. A path gem without an engine class is a plain
 /// library whose `app/` Rails never loads, and one outside the tree
 /// (`path: "../shared"`) is not this app's source — neither is a root.
-fn engine_app_roots<V: Vfs + ?Sized>(vfs: &V, dir: &Path, roots: &mut Vec<PathBuf>) {
-    let Ok(lock) = vfs.read_to_string(&dir.join("Gemfile.lock")) else { return };
-    for remote in crate::gems::lock_path_remotes(&lock) {
-        // An absolute remote (the Gemfile gave an absolute path) that
-        // names a directory under `dir` is the same engine spelled the
-        // long way.
-        let remote = Path::new(&remote);
-        let remote = remote.strip_prefix(dir).unwrap_or(remote);
-        let mut rel = PathBuf::new();
-        let mut inside = true;
-        for component in remote.components() {
-            match component {
-                Component::CurDir => {}
-                Component::Normal(part) => rel.push(part),
-                _ => inside = false,
-            }
-        }
-        // An empty path is the app itself (`gemspec` / `path: "."`),
-        // whose `app` is already the first root.
-        if !inside || rel.as_os_str().is_empty() {
-            continue;
-        }
-        let engine_dir = dir.join(&rel);
-        // `app` included: a linked `app/` would walk someone else's tree.
-        if path_has_symlink_component(vfs, dir, &engine_dir.join("app"))
-            || !vfs.is_dir(&engine_dir.join("app"))
+fn engine_app_roots<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    path_gems: &[PathBuf],
+    roots: &mut Vec<PathBuf>,
+) {
+    for engine_dir in path_gems {
+        if !vfs.is_dir(&engine_dir.join("app"))
             || !declares_rails_engine(vfs, &engine_dir.join("lib"))
         {
             continue;
         }
-        roots.push(rel.join("app"));
+        let relative = engine_dir.strip_prefix(dir).expect("path gems are inside the app");
+        roots.push(relative.join("app"));
     }
 }
 
