@@ -1815,6 +1815,18 @@ fn bundled_uri_and_http_exception_constants_run() {
     end
   end
 
+  def self.construct
+    URI::HTTP.new("http", nil, "example.test", 80, nil, "/", nil, nil, nil).to_s
+  end
+
+  def self.invalid_constructor
+    begin
+      URI::HTTP.new
+    rescue ArgumentError
+      "arity"
+    end
+  end
+
   def self.timeout(kind)
     begin
       if kind == "open"
@@ -1835,6 +1847,8 @@ end
             r#"raise unless HttpConstantProbe.http?("https://example.test/")
 raise if HttpConstantProbe.http?("ftp://example.test/")
 raise unless HttpConstantProbe.invalid_uri == "invalid"
+raise unless HttpConstantProbe.construct == "http://example.test/"
+raise unless HttpConstantProbe.invalid_constructor == "arity"
 raise unless HttpConstantProbe.timeout("open") == "open"
 raise unless HttpConstantProbe.timeout("read") == "read"
 "#,

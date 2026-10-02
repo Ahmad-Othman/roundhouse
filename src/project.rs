@@ -724,6 +724,7 @@ pub fn target_files(
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
     report_unsupported_keys(app, target);
+    report_unsupported_bundled_constants(app, target);
     // A keyword parameter is carried by the ruby family and by nothing
     // else yet. No other emitter reads `Param::keyword`, so a `def`
     // that declares one renders POSITIONALLY while its call site
@@ -3217,6 +3218,100 @@ fn report_keyword_params(app: &App, target: &str) {
                         action.name.as_str()
                     ),
                 );
+            }
+        }
+    }
+}
+
+/// These class objects are supplied by Ruby/Spinel's bundled libraries,
+/// not by the transpiled runtimes. Recognizing them during inference
+/// must not turn a missing target implementation into a clean emit.
+fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda) {
+        return;
+    }
+    fn visit(expr: &crate::expr::Expr, app: &App, target: &str) {
+        if matches!(&*expr.node, crate::expr::ExprNode::Const { .. }) {
+            if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
+                if matches!(id.0.as_str(), "URI::HTTP" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout")
+                    && !app.library_classes.iter().any(|class| class.name == *id)
+                    && !app.models.iter().any(|model| model.name == *id)
+                    && !app.controllers.iter().any(|controller| controller.name == *id)
+                    && !app.rails_application.as_ref().is_some_and(|class| class.name == *id)
+                    && !app.test_modules.iter().any(|module| module.inner_classes.iter().any(|class| class.name == *id))
+                {
+                    emit::diagnostics::report_unsupported(
+                        expr.span,
+                        target,
+                        "bundled_constant",
+                        format!("{} is provided by a bundled library only on the Ruby-family targets", id.0.as_str()),
+                    );
+                }
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, app, target));
+    }
+    let mut visit = |expr: &crate::expr::Expr| visit(expr, app, target.as_str());
+    crate::lower::for_each_hook_body_ref(app, &mut visit);
+    // The app-body survey intentionally excludes views and tests.
+    // Their constants need the same target-capability check.
+    for view in &app.views {
+        visit(&view.body);
+        for param in view.strict_locals.iter().flatten() {
+            if let Some(default) = &param.default {
+                visit(default);
+            }
+        }
+    }
+    for module in &app.test_modules {
+        if let Some(setup) = &module.setup {
+            visit(setup);
+        }
+        for test in &module.tests {
+            visit(&test.body);
+        }
+        for helper in &module.helpers {
+            visit(&helper.body);
+            for param in &helper.params {
+                if let Some(default) = &param.default {
+                    visit(default);
+                }
+            }
+        }
+        for (_, value) in &module.constants {
+            visit(value);
+        }
+        for class in &module.inner_classes {
+            for method in &class.methods {
+                visit(&method.body);
+                for param in &method.params {
+                    if let Some(default) = &param.default {
+                        visit(default);
+                    }
+                }
+            }
+            for (_, value) in &class.constants {
+                visit(value);
+            }
+            for call in &class.unknown_calls {
+                visit(call);
+            }
+        }
+    }
+    // The immutable app-body survey also excludes association extensions.
+    for model in &app.models {
+        for item in &model.body {
+            if let crate::dialect::ModelBodyItem::Association {
+                assoc: crate::dialect::Association::HasMany { extension, .. }, ..
+            } = item {
+                for method in extension {
+                    visit(&method.body);
+                    for param in &method.params {
+                        if let Some(default) = &param.default {
+                            visit(default);
+                        }
+                    }
+                }
             }
         }
     }
