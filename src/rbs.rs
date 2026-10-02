@@ -651,6 +651,7 @@ fn is_builtin_class_name(name: &str) -> bool {
             | "Float"
             | "String"
             | "Symbol"
+            | "Date"
             | "TrueClass"
             | "FalseClass"
             | "NilClass"
@@ -887,6 +888,7 @@ fn map_class_instance(name: &str, args: Vec<Ty>) -> Ty {
         ("Float", []) => Ty::Float,
         ("String", []) => Ty::Str,
         ("Symbol", []) => Ty::Sym,
+        ("Date", []) => Ty::Date,
         ("TrueClass" | "FalseClass", []) => Ty::Bool,
         ("NilClass", []) => Ty::Nil,
         ("Array", [elem]) => Ty::Array {
@@ -973,6 +975,7 @@ pub fn print_ty(ty: &Ty) -> String {
         Ty::Bool => "bool".to_string(),
         Ty::Str => "String".to_string(),
         Ty::Sym => "Symbol".to_string(),
+        Ty::Date => "Date".to_string(),
         Ty::Time => "Time".to_string(),
         Ty::Nil => "nil".to_string(),
         Ty::Array { elem } => format!("Array[{}]", print_ty(elem)),
