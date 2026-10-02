@@ -33,7 +33,7 @@
 //!
 //! Kill switch: `ROUNDHOUSE_NO_TREESHAKE=1` skips the pass entirely.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// Methods Ruby (or the runtime idiom) dispatches without a textual
 /// call site: constructors via `.new`, `to_s` via interpolation,
@@ -90,7 +90,7 @@ fn is_framework_runtime(path: &str) -> bool {
 /// identifier (operator defs like `def [](k)` return None and are
 /// never candidates). Handles `def self.name` and both `def name(...)`
 /// and `def name;`/bare forms.
-fn def_line_name(line: &str) -> Option<String> {
+fn def_line_name(line: &str) -> Option<&str> {
     let t = line.trim_start();
     let rest = t.strip_prefix("def ")?;
     let rest = rest.strip_prefix("self.").unwrap_or(rest);
@@ -113,35 +113,35 @@ fn def_line_name(line: &str) -> Option<String> {
     if name_end < bytes.len() && bytes[name_end] == b'=' {
         return None;
     }
-    Some(rest[..name_end].to_string())
+    Some(&rest[..name_end])
 }
 
 /// `.rbs` sig line → declared method name (`def name: ...`).
-fn sig_line_name(line: &str) -> Option<String> {
+fn sig_line_name(line: &str) -> Option<&str> {
     def_line_name(line.trim_end_matches(|c| c != ':').trim_end_matches(':'))
         .or_else(|| {
             let t = line.trim_start();
             let rest = t.strip_prefix("def ")?;
             let rest = rest.strip_prefix("self.").unwrap_or(rest);
-            let name: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect();
-            if name.is_empty() {
+            let end = rest
+                .bytes()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == b'_')
+                .count();
+            if end == 0 {
                 None
             } else {
-                let rest_after = &rest[name.len()..];
-                let name = match rest_after.chars().next() {
-                    Some('?') | Some('!') => format!("{name}{}", &rest_after[..1]),
-                    _ => name,
+                let end = match rest.as_bytes().get(end) {
+                    Some(b'?') | Some(b'!') => end + 1,
+                    _ => end,
                 };
-                Some(name)
+                Some(&rest[..end])
             }
         })
 }
 
-/// Identifier tokens (with a trailing `?`/`!` when present) on a line.
-fn tokens<'a>(line: &'a str, out: &mut HashSet<&'a str>) {
+/// Add identifier tokens, except the name introduced on this def/sig line.
+/// Exclusion must not erase a usage already found on another line.
+fn tokens<'a>(line: &'a str, out: &mut HashSet<&'a str>, defined: Option<&str>) {
     let bytes = line.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -160,7 +160,10 @@ fn tokens<'a>(line: &'a str, out: &mut HashSet<&'a str>) {
                     end = i + 1;
                 }
             }
-            out.insert(&line[start..end]);
+            let token = &line[start..end];
+            if Some(token) != defined {
+                out.insert(token);
+            }
         } else {
             i += 1;
         }
@@ -185,7 +188,7 @@ fn delete_defs(content: &str, names: &HashSet<&str>) -> (String, usize) {
                 continue;
             }
         };
-        if !names.contains(name.as_str()) {
+        if !names.contains(name) {
             i += 1;
             continue;
         }
@@ -270,7 +273,7 @@ fn delete_sigs(content: &str, names: &HashSet<&str>) -> String {
             skipping = false;
         }
         if let Some(name) = sig_line_name(line) {
-            if names.contains(name.as_str()) {
+            if names.contains(name) {
                 skipping = true;
                 continue;
             }
@@ -300,8 +303,9 @@ pub fn shake_tree(
         // EXCEPT the name being introduced on a def/sig line itself.
         // Borrow tokens from the current files; the drop sets own their
         // names, so these borrows end before any file is rewritten.
-        let mut usage: HashMap<&str, usize> = HashMap::new();
-        let mut toks = HashSet::new();
+        // Only membership matters: occurrence counts and per-line
+        // deduplication do not affect whether a method is unreachable.
+        let mut usage = HashSet::new();
         for (path, content) in files.iter() {
             let is_rb = path.ends_with(".rb");
             let is_rbs = path.ends_with(".rbs");
@@ -314,15 +318,7 @@ pub fn shake_tree(
                 } else {
                     sig_line_name(line)
                 };
-                tokens(line, &mut toks);
-                if let Some(d) = defined {
-                    toks.remove(d.as_str());
-                }
-                // Drain keeps the allocation for the next line, but not
-                // its tokens: usages are counted once per distinct line.
-                for t in toks.drain() {
-                    *usage.entry(t).or_default() += 1;
-                }
+                tokens(line, &mut usage, defined);
             }
         }
 
@@ -340,14 +336,14 @@ pub fn shake_tree(
             let mut dead: HashSet<String> = HashSet::new();
             for line in content.lines() {
                 if let Some(name) = def_line_name(line) {
-                    if EXEMPT.contains(&name.as_str()) {
+                    if EXEMPT.contains(&name) {
                         continue;
                     }
-                    if model && !synth_shakeable.contains(&name) {
+                    if model && !synth_shakeable.contains(name) {
                         continue;
                     }
-                    if usage.get(name.as_str()).copied().unwrap_or(0) == 0 {
-                        dead.insert(name);
+                    if !usage.contains(name) {
+                        dead.insert(name.to_owned());
                     }
                 }
             }
@@ -395,11 +391,42 @@ mod tests {
     #[test]
     fn borrowed_tokens_preserve_suffixes_operator_boundaries_and_line_deduplication() {
         let mut found = HashSet::new();
-        tokens("ready! ready!=other next? next? _keep", &mut found);
+        tokens("ready! ready!=other next? next? _keep", &mut found, None);
         assert_eq!(
             found,
             HashSet::from(["ready!", "ready", "other", "next?", "_keep"])
         );
+    }
+
+    #[test]
+    fn definition_exclusion_keeps_prior_roots_and_other_calls_on_the_same_line() {
+        let mut found = HashSet::new();
+        tokens("kept", &mut found, None);
+        tokens("def kept; kept; leaf; end", &mut found, Some("kept"));
+        tokens("def orphan; orphan; twig; end", &mut found, Some("orphan"));
+        assert_eq!(found, HashSet::from(["kept", "def", "leaf", "end", "twig"]));
+    }
+
+    #[test]
+    fn borrowed_definition_names_preserve_writer_and_signature_boundaries() {
+        for (line, expected) in [
+            ("  def self.live!(x)", Some("live!")),
+            ("def ready?; true; end", Some("ready?")),
+            ("def value=(x)", None),
+            ("def [](key)", None),
+            ("def café", Some("caf")),
+        ] {
+            assert_eq!(def_line_name(line), expected, "{line}");
+        }
+        for (line, expected) in [
+            ("  def self.live!: () -> Hash[Symbol, Foo::Bar]", Some("live!")),
+            ("def ready?: () -> bool", Some("ready?")),
+            ("def value=: (Integer) -> Integer", Some("value")),
+            ("def bare!", Some("bare!")),
+            ("def []: (String) -> Integer", None),
+        ] {
+            assert_eq!(sig_line_name(line), expected, "{line}");
+        }
     }
 
     #[test]
