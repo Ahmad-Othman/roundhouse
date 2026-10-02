@@ -197,7 +197,7 @@ fn inherit_surfaces(
     // Read the unmerged sets so traversal order cannot affect admission.
     let own = surfaces.clone();
     let models: HashMap<_, _> = app.models.iter().map(|m| (m.name.clone(), m)).collect();
-    for model in app.models.iter().filter(|m| requested.contains(&m.name)) {
+    for model in models.values().filter(|m| requested.contains(&m.name)) {
         let occupied = surfaces.get_mut(&model.name).unwrap();
         occupied.extend(base.iter().cloned());
         let mut seen = HashSet::new();
@@ -214,8 +214,8 @@ fn inherit_surfaces(
     }
     // Eligibility changes the result, never the synthesis inputs or
     // ancestor/demand inventory: abstract bases still own storage.
-    app.models
-        .iter()
+    models
+        .values()
         .filter(|model| requested.contains(&model.name))
         .map(|model| {
             let names = surfaces.remove(&model.name).unwrap();

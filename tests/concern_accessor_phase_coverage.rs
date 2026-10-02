@@ -54,6 +54,46 @@ fn a_post_analysis_json_writer_is_not_fresh_virtual_storage() {
 }
 
 #[test]
+fn reopened_models_do_not_consume_the_same_ownership_surface_twice() {
+    let mut input = files("include Virtual");
+    input.insert(
+        "app/models/widget_extra.rb".into(),
+        b"class Widget < ApplicationRecord\n  def label\n    'reopened'\n  end\nend\n".to_vec(),
+    );
+    let error = ingest_app_from_tree(input)
+        .expect_err("a reopened model must report its collision, not panic");
+    assert!(
+        error.to_string().contains("concern attr_accessor :as_json_str"),
+        "{error}"
+    );
+}
+
+#[test]
+fn lexical_constant_resolution_preserves_post_analysis_ownership() {
+    fn input(include: &str) -> std::collections::HashMap<std::path::PathBuf, Vec<u8>> {
+        let mut input = files("");
+        input.insert("app/services/labels.rb".into(),
+            b"class Label\n  def self.value\n    [1]\n  end\nend\nmodule API\n  class Label\n    def self.value\n      'lexical'\n    end\n  end\nend\n".to_vec());
+        input.insert("app/models/widget.rb".into(), format!(
+            "module API\n  class Widget < ApplicationRecord\n    self.table_name = 'widgets'\n    {include}\n    def as_json(options = {{}})\n      keys = [:title]\n      json = {{}}\n      keys.each {{ |key| json[key] = send(key) }}\n      json[:label] = Label.value\n      json\n    end\n  end\nend\n"
+        ).into_bytes());
+        input.insert("app/controllers/widgets_controller.rb".into(),
+            b"class WidgetsController < ApplicationController\n  def show\n    @widget = API::Widget.find(1)\n    render json: @widget\n  end\nend\n".to_vec());
+        input
+    }
+    let mut control = ingest_app_from_tree(input("")).unwrap();
+    roundhouse::session::analyze_and_lower(&mut control);
+    let widget = control.models.iter().find(|model| model.name.0.as_str() == "API::Widget").unwrap();
+    assert!(
+        widget.methods().any(|method| method.name.as_str() == "as_json_str" && method.name_span.is_synthetic()),
+        "the lexical String value, not the top-level Array value, must enable the writer"
+    );
+    let error = ingest_app_from_tree(input("include Virtual"))
+        .expect_err("admission must observe the same lexical JSON writer as emission");
+    assert!(error.to_string().contains("concern attr_accessor :as_json_str"), "{error}");
+}
+
+#[test]
 fn accessor_typing_must_not_be_replaced_by_an_inherited_reader() {
     fn inherited(include: &str) -> std::collections::HashMap<std::path::PathBuf, Vec<u8>> {
         let mut input = files(include);
