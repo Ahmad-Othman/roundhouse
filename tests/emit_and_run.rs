@@ -17,6 +17,30 @@ fn the_unedited_blog_runs() {
         .assert_passes();
 }
 
+/// A test class that a `module` wraps is emitted and runs. Ingest used
+/// to read only the top-level classes of a test file. It lost this
+/// class, and `check` reported nothing. The emit names the file after
+/// the full class name, as it does for `class Models::ArticleTest`.
+#[test]
+fn a_test_class_inside_a_module_runs() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/models_article_test.rb",
+            r#"require "test_helper"
+
+module Models
+  class ArticleTest < ActiveSupport::TestCase
+    test "reads a fixture" do
+      assert_equal "Getting Started with Rails", articles(:one).title
+    end
+  end
+end
+"#,
+        )
+        .run_test("test/models/models_article_test.rb")
+        .assert_passes();
+}
+
 /// Alba's inherited declarations are executable property reads, not just a
 /// return-type assertion. Boot loads the generated classes without Alba.
 #[test]
