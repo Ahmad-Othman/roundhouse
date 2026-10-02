@@ -29,8 +29,16 @@ plus anything `config/application.rb` adds to `config.autoload_paths`
 or `config.eager_load_paths`. `config.autoload_lib(ignore: %w[assets
 tasks])` is honored: a directory the app takes off its own load path
 is off the walk as well, which is where a RuboCop cop or a test-support
-tree under `app/` goes if you do not want it analyzed. Packwerk's
-`packs/*/app/*` layout is not walked yet.
+tree under `app/` goes if you do not want it analyzed.
+
+An app can have more than one `app/`. A Packwerk app (`packwerk.yml` or
+`packs.yml` at the root) gets each package's `app/` and `lib/` walked
+the same way, and so does a Rails engine kept in the app's own tree: a
+`path:` gem in `Gemfile.lock` (`gem "billing", path: "lib/billing"`)
+that has an `app/` directory and a `Rails::Engine` subclass under its
+`lib/`. When there is more than one, `check` prints the roots it
+walked. An engine's own `config/routes.rb` is not read yet, so the
+host's `mount` of it is still a dropped route.
 
 One thing the walk carries that no emitted tree can: a class extending
 a Rails base the runtime does not port. `ApplicationMailbox <

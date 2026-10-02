@@ -519,6 +519,14 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // files itself, from an initializer — and dropping them lost
     // `String#all_emoji?`, which every message row calls. A subdir some
     // initializer explicitly requires is app code after all.
+    // Support roots can nest: an engine at `lib/billing` puts
+    // `lib/billing/app` and `lib/billing/lib` under the root `lib`.
+    // A file under another app root belongs to that root's own passes
+    // (its `models`/`controllers`/… walks, and one support root per
+    // remaining layer), and a file two support roots both reach is
+    // ingested by the first.
+    let nested_app_roots: Vec<PathBuf> = roots.iter().skip(1).map(|root| dir.join(root)).collect();
+    let mut support_seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for sub in support_roots(vfs, dir, &roots, &lib_ignores) {
         let sub = sub.as_str();
         let support_dir = dir.join(sub);
@@ -528,6 +536,15 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         let Ok(entries) = read_rb_files(vfs, &support_dir) else { continue };
         for entry in entries {
             if sub == "lib" && ignored_lib_file(&entry) {
+                continue;
+            }
+            if nested_app_roots
+                .iter()
+                .any(|root| entry.starts_with(root) && !support_dir.starts_with(root))
+            {
+                continue;
+            }
+            if !support_seen.insert(entry.clone()) {
                 continue;
             }
             let Ok(source) = vfs.read(&entry) else { continue };
@@ -3837,21 +3854,90 @@ fn support_roots<V: Vfs + ?Sized>(
 }
 
 /// App-layer roots for one Rails app: `app` first, then one
-/// `<pkg>/app` per Packwerk package that has an `app/` directory —
-/// sorted (after `app`) and deduplicated. Every other layer walk in
-/// this file loops over these instead of hardwiring `app/…`, so a
-/// Packwerk app's `packs/*/app/*` (or `components/*/app/*`,
-/// `engines/*/app/*`) gets the same models/controllers/views/helpers
-/// passes the root `app/` does.
+/// `<pkg>/app` per Packwerk package that has an `app/` directory and
+/// one `<engine>/app` per in-repo Rails engine — sorted (after `app`)
+/// and deduplicated. Every other layer walk in this file loops over
+/// these instead of hardwiring `app/…`, so a Packwerk app's
+/// `packs/*/app/*` (or `components/*/app/*`, `engines/*/app/*`) and an
+/// engine's `lib/<name>/app/*` get the same
+/// models/controllers/views/helpers passes the root `app/` does.
 ///
-/// Non-Packwerk apps (no `packwerk.yml` or `packs.yml` at the root)
-/// get exactly `["app"]` — zero behavior change, which the fixtures'
-/// zero-diagnostic gates depend on.
+/// An app with neither (no `packwerk.yml` or `packs.yml` at the root,
+/// no path-sourced engine in `Gemfile.lock`) gets exactly `["app"]` —
+/// zero behavior change, which the fixtures' zero-diagnostic gates
+/// depend on.
 pub(super) fn app_roots<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
     let mut roots = vec![PathBuf::from("app")];
+    packwerk_app_roots(vfs, dir, &mut roots);
+    engine_app_roots(vfs, dir, &mut roots);
+    roots[1..].sort();
+    roots.dedup();
+    roots
+}
+
+/// `<engine>/app` for every Rails engine the app carries in its own
+/// tree: a `PATH` source in `Gemfile.lock` (`gem "x", path: "lib/x"`)
+/// whose directory is inside the app, has an `app/` tree, and declares
+/// a `Rails::Engine` subclass under its `lib/`. Rails adds such an
+/// engine's `app/*` to the host's autoload and view paths, so its code
+/// is the app's code. A path gem without an engine class is a plain
+/// library whose `app/` Rails never loads, and one outside the tree
+/// (`path: "../shared"`) is not this app's source — neither is a root.
+fn engine_app_roots<V: Vfs + ?Sized>(vfs: &V, dir: &Path, roots: &mut Vec<PathBuf>) {
+    let Ok(lock) = vfs.read_to_string(&dir.join("Gemfile.lock")) else { return };
+    for remote in crate::gems::lock_path_remotes(&lock) {
+        let mut rel = PathBuf::new();
+        let mut inside = true;
+        for component in Path::new(&remote).components() {
+            match component {
+                Component::CurDir => {}
+                Component::Normal(part) => rel.push(part),
+                _ => inside = false,
+            }
+        }
+        // An empty path is the app itself (`gemspec` / `path: "."`),
+        // whose `app` is already the first root.
+        if !inside || rel.as_os_str().is_empty() {
+            continue;
+        }
+        let engine_dir = dir.join(&rel);
+        if path_has_symlink_component(vfs, dir, &engine_dir)
+            || !vfs.is_dir(&engine_dir.join("app"))
+            || !declares_rails_engine(vfs, &engine_dir.join("lib"))
+        {
+            continue;
+        }
+        roots.push(rel.join("app"));
+    }
+}
+
+/// Whether any Ruby file under `lib_dir` subclasses `Rails::Engine`
+/// (`class Engine < ::Rails::Engine`).
+fn declares_rails_engine<V: Vfs + ?Sized>(vfs: &V, lib_dir: &Path) -> bool {
+    if !vfs.is_dir(lib_dir) {
+        return false;
+    }
+    let Ok(files) = read_rb_files(vfs, lib_dir) else { return false };
+    files.iter().any(|file| {
+        vfs.read_to_string(file).is_ok_and(|source| {
+            source.lines().any(|line| {
+                let line = line.trim_start();
+                line.starts_with("class ")
+                    && line
+                        .split_once('<')
+                        .is_some_and(|(_, parent)| parent.trim().trim_start_matches("::").starts_with("Rails::Engine"))
+            })
+        })
+    })
+}
+
+/// `<pkg>/app` for every Packwerk package that has an `app/`
+/// directory. Nothing without a `packwerk.yml` or `packs.yml` at the
+/// root.
+fn packwerk_app_roots<V: Vfs + ?Sized>(vfs: &V, dir: &Path, roots: &mut Vec<PathBuf>) {
     let has_packwerk = vfs.exists(&dir.join("packwerk.yml")) || vfs.exists(&dir.join("packs.yml"));
     if !has_packwerk {
-        return roots;
+        return;
     }
     let package_paths = vfs
         .read(&dir.join("packwerk.yml"))
@@ -3885,9 +3971,6 @@ pub(super) fn app_roots<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
             roots.push(rel.join("app"));
         }
     }
-    roots[1..].sort();
-    roots.dedup();
-    roots
 }
 
 /// `package_paths:` from a `packwerk.yml`'s bytes, as the raw glob
