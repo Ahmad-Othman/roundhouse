@@ -886,7 +886,15 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // This limited probe lacks branch-local union narrowing;
     // the full-context runtime still has 519 gradual sites and zero
     // unresolved types. The concrete cast result adds nil, never untyped.
-    const CEILING: usize = 1126;
+    // 2026-10-02 1126 -> 1130, +4, MEASURED against the pre-merge meta
+    // tree (upstream alone: 1056 -> 1060). Only connection.rb changes,
+    // 204 -> 208: `upsert_all`'s `_conflict_predicate(...)` self-send and its
+    // assignment (+2), and the two reads of the result (+2). Like
+    // `_table_sql` above, this probe does not resolve class self-sends;
+    // the method is typed `(String) -> String` in connection.rbs. What
+    // it buys: `upsert_all(unique_by:)` names a partial unique index
+    // with its `WHERE`, as Rails does, which SQLite needs to match it.
+    const CEILING: usize = 1130;
 
     assert!(
         all_untyped.len() <= CEILING,
