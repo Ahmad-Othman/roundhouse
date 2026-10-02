@@ -378,13 +378,13 @@ fn is_bool_target(ty: &crate::ty::Ty) -> bool {
 fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
     use crate::ty::Ty;
     let inner = emit_expr(value);
-    // The Bool coercion runs UNCONDITIONALLY, unlike the narrowing
-    // casts below. Those are semantic no-ops on an already-narrow value
-    // (`String#to_s` is self), so they are skipped when the inner value
-    // is not poly — and the row-hydration lookups this pass rewrites
-    // carry no stamped type at all, so that gate would skip them too.
-    // For a boolean, identity is not a no-op: it is the bug. See the
-    // arm below for why.
+    // A Bool target is coerced even when the value is not poly, unlike
+    // the narrowing casts. Those are semantic no-ops on an already-narrow
+    // value (`String#to_s` is self), so they are skipped when the inner
+    // value is not poly — and the row-hydration lookups this pass
+    // rewrites carry no stamped type at all, so that gate would skip
+    // them too. For a boolean, identity is not a no-op: it is the bug.
+    // The Bool arm sits after `pure_read` so a nullable read keeps nil.
     let value_is_poly = matches!(
         value.ty.as_ref(),
         Some(Ty::Untyped) | Some(Ty::Union { .. })
