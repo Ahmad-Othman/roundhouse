@@ -1606,6 +1606,9 @@ end
     // splices — and `ActionText::RichText` has to be in `app.models`
     // before anything downstream enumerates models.
     crate::lower::rich_text::synthesize_record_model(&mut app);
+    // Admission needs complete controller permit demand and model DSL,
+    // including declarations contributed by either kind of Concern.
+    super::concern_accessors::validate(&mut app)?;
 
     collect_binary_assets(vfs, dir, &mut app);
 

@@ -2420,3 +2420,6 @@ end
         .run_test("test/models/upsert_target_test.rb")
         .assert_passes();
 }
+
+#[path = "emit_and_run/concern_accessors.rs"]
+mod concern_accessors;

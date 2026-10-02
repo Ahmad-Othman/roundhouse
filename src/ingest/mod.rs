@@ -18,6 +18,7 @@
 mod alba;
 pub mod allow_browser;
 pub mod app;
+mod concern_accessors;
 pub mod controller;
 pub mod expr;
 pub mod fixture;

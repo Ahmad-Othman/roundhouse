@@ -2556,6 +2556,7 @@ pub type ConcernModelItems = (
 );
 
 pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItems {
+    use super::concern_accessors::{decline, is_candidate};
     use crate::dialect::ModelBodyItem;
 
     fn walk_dsl_stmts<'pr>(body: ruby_prism::Node<'pr>, out: &mut Vec<ruby_prism::Node<'pr>>) {
@@ -2596,8 +2597,11 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
             }
             let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
             let Some(block_body) = block.body() else { continue };
+            let direct = flatten_statements(block_body);
+            let block_start = items.len();
+            let mut unclaimed = false;
             let mut stmts = Vec::new();
-            walk_dsl_stmts(block_body, &mut stmts);
+            walk_dsl_stmts(block.body().unwrap(), &mut stmts);
             for inner in stmts {
                 // `enum` inside `included do` belongs to every includer
                 // exactly like an association does — campfire declares
@@ -2616,6 +2620,7 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
                         Ok(None) => {}
                         Err(err) => {
                             super::survey::record(&err);
+                            unclaimed = true;
                             continue;
                         }
                     }
@@ -2627,7 +2632,7 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
                 // one field of several.
                 match super::model::ingest_model_body_items(&inner, &id, file, Vec::new()) {
                     Ok(parsed) => {
-                        for item in parsed {
+                        for mut item in parsed {
                             match item {
                                 ModelBodyItem::Association { .. }
                                 | ModelBodyItem::Scope { .. }
@@ -2643,17 +2648,40 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
                                 // includer. Other Unknowns stay with the
                                 // module.
                                 ModelBodyItem::Unknown { .. } => {
+                                    if is_candidate(&item)
+                                        && !direct.iter().any(|stmt| stmt.location().start_offset() == inner.location().start_offset())
+                                    {
+                                        decline(&mut item, "inside with_options is not modeled");
+                                    }
                                     if unknown_is_block_callback(&item)
                                         || unknown_is_model_macro(&item)
+                                        || is_candidate(&item)
                                     {
                                         items.push(item);
+                                    } else if !matches!(&item, ModelBodyItem::Unknown { expr, .. }
+                                        if matches!(&*expr.node, crate::expr::ExprNode::Lit { .. }))
+                                    {
+                                        unclaimed = true;
                                     }
                                 }
-                                _ => {}
+                                _ => unclaimed = true,
                             }
                         }
                     }
-                    Err(err) => super::survey::record(&err),
+                    Err(err) => {
+                        super::survey::record(&err);
+                        unclaimed = true;
+                    }
+                }
+            }
+            // A dropped statement can alter a carried accessor's
+            // visibility or definition. Defer the refusal until a
+            // model actually includes it; dormant blocks stay inert.
+            if unclaimed && items[block_start..].iter().any(is_candidate) {
+                for item in &mut items[block_start..] {
+                    if is_candidate(item) {
+                        decline(item, "alongside unmodeled included-block statements is not supported");
+                    }
                 }
             }
         }
