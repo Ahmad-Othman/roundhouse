@@ -787,10 +787,8 @@ fn ty_from_node(node: &Node<'_>, ctx: TyCtx<'_>) -> Result<Ty, String> {
         // declared stays an unread signature, as it always was.
         Node::AliasType(alias) => {
             let written = declared_name(&alias.name());
-            let bare = alias.name().name().as_str().to_string();
             ctx.aliases
                 .get(&written)
-                .or_else(|| ctx.aliases.get(&bare))
                 .cloned()
                 .ok_or_else(|| format!("unresolved RBS type alias: {written}"))
         }

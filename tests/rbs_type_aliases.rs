@@ -56,6 +56,23 @@ fn an_alias_nobody_declared_still_leaves_the_signature_unread() {
     assert!(sigs.is_err(), "{sigs:?}");
 }
 
+#[test]
+fn a_qualified_alias_does_not_fall_back_to_a_local_bare_alias() {
+    let sigs = roundhouse::rbs::parse_app_signatures(
+        "class Cart\n  type path = String\n  def walk: (Route::path) -> void\nend\n",
+    );
+    assert!(sigs.is_err(), "{sigs:?}");
+}
+
+#[test]
+fn root_qualified_unqualified_and_inherited_aliases_still_resolve() {
+    let sigs = roundhouse::rbs::parse_app_signatures(
+        "type path = String\nclass Cart\n  type count = Integer\n  class Nested\n    def walk: (path, ::path, count) -> void\n  end\nend\n",
+    ).expect("parse");
+    let Ty::Fn { params, .. } = &sigs[&ClassId(Symbol::new("Cart::Nested"))][&Symbol::new("walk")] else { panic!() };
+    assert_eq!(params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(), vec![Ty::Str, Ty::Str, Ty::Int]);
+}
+
 const SCHEMA: (&str, &str) = ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n");
 
 /// The comment form, as core writes it: the alias in the class body
