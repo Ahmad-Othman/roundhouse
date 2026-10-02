@@ -78,8 +78,8 @@ fn collect_surfaces(
     }
 }
 
-/// Requested models get an entry; `None` denotes an abstract or
-/// non-schema model, which cannot admit this concrete accessor contract.
+/// Requested models get an entry; `None` denotes an abstract, non-schema
+/// or ambiguously defined model, which cannot admit this accessor contract.
 pub(crate) fn occupied_surfaces(
     app: &App,
     requested: &HashSet<ClassId>,
@@ -170,7 +170,13 @@ fn inherit_surfaces(
     // Every includer also inherits its ancestors' generated ownership.
     // Read the unmerged sets so traversal order cannot affect admission.
     let own = surfaces.clone();
-    let models: HashMap<_, _> = app.models.iter().map(|m| (m.name.clone(), m)).collect();
+    let mut models = HashMap::new();
+    let mut ambiguous = HashSet::new();
+    for model in &app.models {
+        if models.insert(model.name.clone(), model).is_some() {
+            ambiguous.insert(model.name.clone());
+        }
+    }
     for model in models.values().filter(|m| requested.contains(&m.name)) {
         let occupied = surfaces.get_mut(&model.name).unwrap();
         occupied.extend(base.iter().cloned());
@@ -188,12 +194,15 @@ fn inherit_surfaces(
     }
     // Eligibility changes the result, never the synthesis inputs or
     // ancestor/demand inventory: abstract bases still own storage.
+    // Emission does not merge model reopenings: a later definition can
+    // overwrite the file carrying an earlier one's admitted accessors.
     models
         .values()
         .filter(|model| requested.contains(&model.name))
         .map(|model| {
             let names = surfaces.remove(&model.name).unwrap();
-            let eligible = !super::markers::is_abstract_class(model)
+            let eligible = !ambiguous.contains(&model.name)
+                && !super::markers::is_abstract_class(model)
                 && app.schema.tables.contains_key(&model.table.0);
             (model.name.clone(), eligible.then_some(names))
         })

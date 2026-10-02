@@ -68,6 +68,36 @@ fn reopened_models_do_not_consume_the_same_ownership_surface_twice() {
     );
 }
 
+/// A unique surface entry avoids the panic, but emission still does not
+/// merge model reopenings. Fresh names must be refused rather than lost.
+#[test]
+fn duplicate_model_names_cannot_advertise_a_fresh_accessor() {
+    use roundhouse::dialect::ModelBodyItem;
+    use roundhouse::expr::ExprNode;
+    use roundhouse::ingest::survey;
+
+    let mut input = files("include Virtual");
+    input.insert("app/models/concerns/virtual.rb".into(),
+        b"module Virtual\n  extend ActiveSupport::Concern\n  included { attr_accessor :scratch }\nend\n".to_vec());
+    let source = String::from_utf8(input[&std::path::PathBuf::from("app/models/widget.rb")].clone()).unwrap();
+    input.insert("app/models/widget_extra.rb".into(), source.replace("include Virtual", "").into_bytes());
+    let mut dormant = input.clone();
+    dormant.insert("app/models/widget.rb".into(), source.replace("include Virtual", "").into_bytes());
+    ingest_app_from_tree(dormant).expect("duplicate definitions alone are not a global admission refusal");
+    let error = ingest_app_from_tree(input.clone()).err().expect("ambiguous owners cannot promise accessors");
+    assert!(error.to_string().contains("single definition"), "{error}");
+    survey::activate();
+    let result = ingest_app_from_tree(input);
+    let gaps = survey::drain();
+    let app = result.unwrap();
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert!(gaps[0].to_string().contains("single definition"), "{gaps:?}");
+    assert!(app.models.iter().all(|model| model.body.iter().all(|item|
+        !matches!(item, ModelBodyItem::Unknown { expr, .. }
+            if matches!(&*expr.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "attr_accessor"))
+    )), "survey must not advertise a refused accessor");
+}
+
 #[test]
 fn lexical_constant_resolution_preserves_post_analysis_ownership() {
     fn input(include: &str) -> std::collections::HashMap<std::path::PathBuf, Vec<u8>> {

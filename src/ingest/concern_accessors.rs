@@ -322,7 +322,7 @@ pub(super) fn validate(app: &mut App) -> IngestResult<()> {
                     unwrap_or_record::<()>(Err(IngestError::Unsupported {
                         file: file.clone(),
                         message: format!(
-                            "concern attr_accessor :{name} on {} requires a fresh virtual name on a concrete model, without visibility modifiers or earlier method overrides",
+                            "concern attr_accessor :{name} on {} requires a fresh virtual name on a concrete model with a single definition, without visibility modifiers or earlier method overrides",
                             model.name.0
                         ),
                     }))?;
