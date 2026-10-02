@@ -103,3 +103,38 @@ end
         ]
     );
 }
+
+#[test]
+fn inherited_comment_aliases_keep_their_definition_scope() {
+    for declarations in [
+        "#: type item = Integer\n    #: type local_items = Array[item]",
+        "#: type local_items = Array[item]\n    #: type item = Integer",
+    ] {
+        let source = format!(r#"class Outer
+  #: type item = String
+  #: type items = Array[item]
+  class Inner
+    {declarations}
+    #: type unused = (
+    #: (items, local_items, item) -> void
+    def consume(outer_values, inner_values, value)
+      nil
+    end
+  end
+end
+"#);
+        let signatures = roundhouse::ingest::sorbet_sig::ingest_sorbet_signatures(source.as_bytes());
+        let consume = &signatures[&ClassId(Symbol::new("Outer::Inner"))][&Symbol::new("consume")];
+        let Ty::Fn { params, .. } = consume else { panic!("{consume:?}") };
+        assert_eq!(params[0].ty, Ty::Array { elem: Box::new(Ty::Str) }, "{source}");
+        assert_eq!(params[1].ty, Ty::Array { elem: Box::new(Ty::Int) }, "{source}");
+        assert_eq!(params[2].ty, Ty::Int, "{source}");
+    }
+}
+
+#[test]
+fn an_unread_local_alias_does_not_fall_back_to_the_outer_alias() {
+    let source = b"class Outer\n  #: type item = String\n  class Inner\n    #: type item = missing\n    #: (item) -> void\n    def consume(value); nil; end\n  end\nend\n";
+    let signatures = roundhouse::ingest::sorbet_sig::ingest_sorbet_signatures(source);
+    assert!(!signatures.contains_key(&ClassId(Symbol::new("Outer::Inner"))), "{signatures:?}");
+}
