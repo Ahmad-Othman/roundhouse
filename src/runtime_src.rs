@@ -41,7 +41,7 @@ pub fn parse_module_constants(source: &str) -> Result<std::collections::HashMap<
 type ConstantTypes = std::collections::HashMap<Symbol, Ty>;
 type OwnedConstantTypes = std::collections::HashMap<ClassId, ConstantTypes>;
 
-fn parse_module_constant_tables(source: &str, with_owners: bool) -> (ConstantTypes, OwnedConstantTypes) {
+pub(crate) fn parse_module_constant_tables(source: &str, with_owners: bool) -> (ConstantTypes, OwnedConstantTypes) {
     let mut global = ConstantTypes::new();
     let mut by_owner = OwnedConstantTypes::new();
     let result = parse(source.as_bytes());
@@ -539,8 +539,8 @@ pub fn parse_library_with_rbs(
     // `Array[String]` reaches `errors << "..."` so `<<` resolves to
     // `.push()` per the type-aware operator dispatch).
     // Standalone runtime files lack the declarations in their sibling
-    // files. Their constant values come from the owner-scoped table;
-    // other class reads keep their exact written paths without a
+    // files. Their constant values use owner-first lookup with the
+    // legacy bare-name fallback; other class reads keep exact paths without a
     // partial Rubydex graph that would misreport them as missing.
     let typer = crate::analyze::BodyTyper::new(&class_registry);
     for lc in &mut library_classes {

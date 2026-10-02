@@ -3267,13 +3267,19 @@ fn report_keyword_params(app: &App, target: &str) {
 /// not by the transpiled runtimes. Recognizing them during inference
 /// must not turn a missing target implementation into a clean emit.
 fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
-    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Spinel | BuildTarget::Roda) {
         return;
     }
     fn visit(expr: &crate::expr::Expr, app: &App, target: &str) {
         if matches!(&*expr.node, crate::expr::ExprNode::Const { .. }) {
             if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
-                if matches!(id.0.as_str(), "URI::HTTP" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout")
+                if matches!(id.0.as_str(),
+                    "URI::HTTP" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
+                    | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
+                    | "Rails::HTML5::SafeListSanitizer" | "JSON")
+                    // Nokogiri does not supply HTML5 on JRuby. The
+                    // other bundled values remain available there.
+                    && (target != "jruby" || id.0.as_str() == "Rails::HTML5::SafeListSanitizer")
                     && !app.library_classes.iter().any(|class| class.name == *id)
                     && !app.models.iter().any(|model| model.name == *id)
                     && !app.controllers.iter().any(|controller| controller.name == *id)
@@ -3284,9 +3290,28 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                         expr.span,
                         target,
                         "bundled_constant",
-                        format!("{} is provided by a bundled library only on the Ruby-family targets", id.0.as_str()),
+                        format!("{} is not available as a bundled class/module value on {target}", id.0.as_str()),
                     );
                 }
+            }
+        }
+        // A mapped JSON call does not emit a Ruby module object. Skip
+        // only that exact receiver, not its arguments (which can still
+        // contain unsupported class values) or unmapped method calls.
+        if let crate::expr::ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node {
+            if matches!(&*recv.node, crate::expr::ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "JSON")
+                && args.len() == 1
+                && (method.as_str() == "generate"
+                    || method.as_str() == "parse" && matches!(target, "typescript" | "typescript-worker" | "python" | "crystal")
+                    || method.as_str() == "dump" && matches!(target, "rust" | "elixir")
+                    || matches!(method.as_str(), "fast_generate" | "pretty_generate") && target == "rust")
+            {
+                expr.node.for_each_child(&mut |child| {
+                    if !std::ptr::eq(child, recv) {
+                        visit(child, app, target);
+                    }
+                });
+                return;
             }
         }
         expr.node.for_each_child(&mut |child| visit(child, app, target));

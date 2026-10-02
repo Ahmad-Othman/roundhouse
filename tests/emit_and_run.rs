@@ -1858,6 +1858,47 @@ raise unless HttpConstantProbe.timeout("read") == "read"
     run.assert_passes();
 }
 
+#[test]
+fn bundled_response_io_json_and_runtime_value_constants_run() {
+    emit_and_run::real_blog()
+        .write("app/services/bundled_value_probe.rb", r#"class BundledValueProbe
+  def self.responses
+    [Net::HTTPOK.new("1.1", "200", "OK").is_a?(Net::HTTPOK),
+     Net::HTTPRedirection.new("1.1", "302", "Found").is_a?(Net::HTTPRedirection)]
+  end
+  def self.buffer
+    io = StringIO.new
+    io << "abc"
+    io.string
+  end
+  def self.encode
+    JSON.generate([17, "hello"])
+  end
+  def self.ssl_error
+    begin
+      raise OpenSSL::OpenSSLError
+    rescue OpenSSL::OpenSSLError
+      "ssl"
+    end
+  end
+  def self.attributes
+    ActionText::Attachment::ATTRIBUTES.include?("sgid")
+  end
+  def self.allowed_tags
+    Rails::HTML5::SafeListSanitizer.allowed_tags.include?("a")
+  end
+end
+"#)
+        .run_ruby(r#"raise unless BundledValueProbe.responses == [true, true]
+raise unless BundledValueProbe.buffer == "abc"
+raise unless BundledValueProbe.encode == '[17,"hello"]'
+raise unless BundledValueProbe.ssl_error == "ssl"
+raise unless BundledValueProbe.attributes
+raise unless BundledValueProbe.allowed_tags
+"#)
+        .assert_passes();
+}
+
 /// Not `user || raise NotFound` (a syntax error) or `a && self.x = v && b` (assigns `v && b`): a command or a method assignment as an `&&`/`||` operand keeps its parentheses.
 #[test]
 fn a_command_operand_of_a_boolean_operator_keeps_its_parentheses() {

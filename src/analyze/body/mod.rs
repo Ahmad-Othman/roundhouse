@@ -297,9 +297,10 @@ impl<'a> BodyTyper<'a> {
                             unknown()
                         }
                     }
-                    Some(Some(ResolvedConstant::Value(id))) => self.typed_constants
-                        .and_then(|values| values.get(id))
+                    Some(Some(ResolvedConstant::Value { declaration, runtime })) => self.typed_constants
+                        .and_then(|values| values.get(declaration))
                         .cloned()
+                        .or_else(|| runtime.as_ref().map(|ty| (**ty).clone()))
                         .unwrap_or_else(unknown),
                     // An unresolved source reference may still name an
                     // exact modeled external class (for example Time).

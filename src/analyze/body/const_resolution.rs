@@ -21,6 +21,7 @@ use rubydex::resolution::Resolver;
 
 use crate::ident::{ClassId, Symbol};
 use crate::span::{FileId, SourceFile, Span};
+use crate::ty::Ty;
 
 // Rubydex's minimal built-ins stop at Object/Module/Class. These are
 // Ruby core classes already modeled by Roundhouse's primitive dispatch,
@@ -45,7 +46,7 @@ const RUNTIME_URI_PREFIX: &str = "roundhouse-runtime:";
 
 pub(super) enum ResolvedConstant {
     Namespace { class: Arc<ClassId>, runtime: bool },
-    Value(DeclarationId),
+    Value { declaration: DeclarationId, runtime: Option<Arc<Ty>> },
 }
 
 /// Rubydex answers for one source file.
@@ -226,6 +227,35 @@ fn is_assigned_value(graph: &Graph, declaration: &Declaration) -> bool {
         }
     }
     assigned
+}
+
+/// Literal runtime values come from the same embedded implementations
+/// the name graph indexes. Keep their full owners, not suffix aliases,
+/// and share types between references instead of copying their trees.
+fn runtime_value_types() -> &'static HashMap<String, Arc<Ty>> {
+    static VALUES: std::sync::OnceLock<HashMap<String, Arc<Ty>>> = std::sync::OnceLock::new();
+    VALUES.get_or_init(|| {
+        let mut values: HashMap<String, Arc<Ty>> = HashMap::new();
+        let mut ambiguous = std::collections::HashSet::new();
+        for (_, text) in crate::runtime_files::ruby_sources() {
+            let (_, owners) = crate::runtime_src::parse_module_constant_tables(text, true);
+            for (owner, constants) in owners {
+                for (name, ty) in constants {
+                    let name = format!("{}::{}", owner.0.as_str(), name.as_str());
+                    if ambiguous.contains(&name) {
+                        continue;
+                    }
+                    if values.get(&name).is_some_and(|previous| **previous != ty) {
+                        values.remove(&name);
+                        ambiguous.insert(name);
+                    } else {
+                        values.insert(name, Arc::new(ty));
+                    }
+                }
+            }
+        }
+        values
+    })
 }
 
 impl ConstResolver {
@@ -455,7 +485,20 @@ fn answer_file(
                         runtime: *runtime,
                     }
                 } else {
-                    ResolvedConstant::Value(id)
+                    // An app write to the same declaration must never
+                    // borrow the runtime's previous literal type.
+                    let app_write = declaration.definitions().iter().any(|id| {
+                        graph.definitions().get(id).is_some_and(|definition| {
+                            matches!(definition, Definition::Constant(_) | Definition::ConstantAlias(_))
+                                && graph.documents().get(definition.uri_id()).is_some_and(|document| {
+                                    !document.uri().starts_with(RUNTIME_URI_PREFIX)
+                                })
+                        })
+                    });
+                    let runtime = (!app_write && is_runtime_declaration(graph, declaration))
+                        .then(|| runtime_value_types().get(declaration.name()).cloned())
+                        .flatten();
+                    ResolvedConstant::Value { declaration: id, runtime }
                 }
             });
         match answers.references.entry(offset.start()) {
