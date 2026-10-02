@@ -70,6 +70,7 @@ pub(crate) fn push_synth_instance_method(
         return;
     }
     methods.push(MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
@@ -1158,6 +1159,7 @@ pub(crate) fn push_scope_methods(
         );
 
         methods.push(MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
             has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
@@ -1298,6 +1300,7 @@ pub(crate) fn push_scope_variants(
                     });
                 }
                 methods.push(MethodDef {
+                    visibility: crate::dialect::MethodVisibility::Public,
                     unsupported_formals: None,
                     has_anonymous_block: false,
                     name_span: crate::span::Span::synthetic(),
