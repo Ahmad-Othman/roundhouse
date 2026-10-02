@@ -17,6 +17,30 @@ fn the_unedited_blog_runs() {
         .assert_passes();
 }
 
+/// A test class that a `module` wraps is emitted and runs. Ingest used
+/// to read only the top-level classes of a test file. It lost this
+/// class, and `check` reported nothing. The emit names the file after
+/// the full class name, as it does for `class Models::ArticleTest`.
+#[test]
+fn a_test_class_inside_a_module_runs() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/models_article_test.rb",
+            r#"require "test_helper"
+
+module Models
+  class ArticleTest < ActiveSupport::TestCase
+    test "reads a fixture" do
+      assert_equal "Getting Started with Rails", articles(:one).title
+    end
+  end
+end
+"#,
+        )
+        .run_test("test/models/models_article_test.rb")
+        .assert_passes();
+}
+
 /// Alba's inherited declarations are executable property reads, not just a
 /// return-type assertion. Boot loads the generated classes without Alba.
 #[test]
@@ -1687,5 +1711,159 @@ fn trailing_erb_comments_execute_without_swallowing_output_terminators() {
     on_the_index(emit_and_run::real_blog(), r#"<span class="commented-title"><%= capture do %>
 <% [1, 2].each do |number| %><%= "n: #{number}" # label %><% end # numbers %><% end # capture %></span>"#,
         "    assert_select \"span.commented-title\", \"n: 1n: 2\"\n")
+        .assert_passes();
+}
+
+/// Not the scaffold blog's `app/views.rb`, whose requires name views this tree does not have: an app with no views boots and answers a request (#164).
+#[test]
+fn an_app_with_no_views_boots() {
+    emit_and_run::empty_app()
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "app/controllers/widgets_controller.rb",
+            "class WidgetsController < ApplicationController\n  def index\n    head :no_content\n  end\nend\n",
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  root \"widgets#index\"\n  resources :widgets, only: :index\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"status, = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => "/widgets", "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
+raise "GET /widgets answered #{status}" unless status == 204
+"#,
+        )
+        .assert_passes();
+}
+
+/// Not `user || raise NotFound` (a syntax error) or `a && self.x = v && b` (assigns `v && b`): a command or a method assignment as an `&&`/`||` operand keeps its parentheses.
+#[test]
+fn a_command_operand_of_a_boolean_operator_keeps_its_parentheses() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def self.find_or_fail(id)
+    find_by(id: id) || (raise ActiveRecord::RecordNotFound, "no article #{id}")
+  end
+
+  def retitle(text, persist)
+    text.present? && (self.title = text) && persist && save
+  end"#,
+        )
+        .write(
+            "test/models/article_guard_test.rb",
+            r#"require "test_helper"
+
+class ArticleGuardTest < ActiveSupport::TestCase
+  test "a raise operand runs only when the left operand is nil" do
+    article = articles(:one)
+    assert_equal article.id, Article.find_or_fail(article.id).id
+    assert_raises(ActiveRecord::RecordNotFound) { Article.find_or_fail(-1) }
+  end
+
+  test "a setter operand assigns its own argument" do
+    article = articles(:one)
+    assert_equal false, article.retitle("Retitled", false)
+    assert_equal "Retitled", article.title
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_guard_test.rb")
+        .assert_passes();
+}
+
+/// Not `out = ""`, a literal spinel freezes: `+""` stays an unfrozen copy that the method can append to.
+#[test]
+fn a_mutable_string_literal_stays_mutable() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r##"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def initials
+    out = +""
+    title.split.each { |word| out << word[0] }
+    out
+  end
+
+  def hashtag
+    tag = +"#"
+    tag << title.downcase.delete(" ")
+  end"##,
+        )
+        .write(
+            "test/models/article_mutable_literal_test.rb",
+            r##"require "test_helper"
+
+class ArticleMutableLiteralTest < ActiveSupport::TestCase
+  test "an unfrozen copy of a literal can be appended to" do
+    article = Article.new(title: "Hello World")
+    assert_equal "HW", article.initials
+    assert_equal "#helloworld", article.hashtag
+  end
+end
+"##,
+        )
+        .run_test_frozen("test/models/article_mutable_literal_test.rb")
+        .assert_passes();
+}
+
+/// The key forms Rails' PostgreSQL schema dumper writes run. `id:
+/// :serial` stopped ingest ("unsupported type `serial`"), and `id: {
+/// type: :string, limit: 32 }` was read as the default key, so the
+/// emitted table had an integer autoincrement key where the app keeps
+/// string ones.
+#[test]
+fn postgres_dumped_key_forms_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", id: :serial, force: :cascade do |t|",
+        )
+        .edit(
+            "db/schema.rb",
+            "  add_foreign_key \"comments\", \"articles\"",
+            "  create_table \"codes\", id: { type: :string, limit: 32 }, force: :cascade do |t|\n    \
+             t.string \"label\"\n  end\n\n  add_foreign_key \"comments\", \"articles\"",
+        )
+        .write("app/models/code.rb", "class Code < ApplicationRecord\nend\n")
+        .write(
+            "test/models/key_forms_test.rb",
+            r#"require "test_helper"
+
+class KeyFormsTest < ActiveSupport::TestCase
+  test "a serial key is generated" do
+    article = Article.create!(title: "Serial", body: "A long enough body")
+    assert_kind_of Integer, article.id
+    assert_equal "Serial", Article.find(article.id).title
+  end
+
+  test "a string key is the one the app supplies" do
+    Code.create!(id: "launch-2026", label: "Launch")
+    assert_equal "Launch", Code.find("launch-2026").label
+  end
+end
+"#,
+        )
+        .run_test("test/models/key_forms_test.rb")
         .assert_passes();
 }
