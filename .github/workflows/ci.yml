@@ -1257,7 +1257,7 @@ jobs:
       verify-gen: ${{ steps.result.outputs.verify-gen }}
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 3
       matrix:
         include:
           - gc: default

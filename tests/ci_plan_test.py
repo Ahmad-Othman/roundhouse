@@ -435,9 +435,15 @@ class Results(unittest.TestCase):
         plan = ci.select([], full=True)
         self.assertEqual(ci.check_results(plan, self.needs(plan)), ([], True))
         for mode in ["default", "minor-gc", "verify-gen"]:
-            needs = self.needs(plan)
-            needs["campfire-compare-spinel"]["outputs"][mode] = "failure"
-            self.assertEqual(ci.check_results(plan, needs), ([], False))
+            for status in ["failure", "cancelled", "", None]:
+                with self.subTest(mode=mode, status=status):
+                    needs = self.needs(plan)
+                    outputs = needs["campfire-compare-spinel"]["outputs"]
+                    if status is None:
+                        del outputs[mode]
+                    else:
+                        outputs[mode] = status
+                    self.assertEqual(ci.check_results(plan, needs), ([], False))
 
     def test_unselected_jobs_may_skip_but_planner_must_succeed(self):
         plan = ci.select([])

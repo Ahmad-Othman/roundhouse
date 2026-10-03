@@ -377,7 +377,29 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
     }
     assert_eq!(
         jobs["campfire-compare-spinel"]["strategy"]["max-parallel"].as_u64(),
-        Some(1)
+        Some(3)
+    );
+    let gc = &jobs["campfire-compare-spinel"];
+    assert_eq!(gc["strategy"]["fail-fast"].as_bool(), Some(false));
+    for mode in ["default", "minor-gc", "verify-gen"] {
+        assert_eq!(
+            gc["outputs"][mode].as_str(),
+            Some(format!("${{{{ steps.result.outputs.{mode} }}}}").as_str()),
+            "concurrent GC legs must report distinct mode keys"
+        );
+    }
+    let report = gc["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"].as_str() == Some("result"))
+        .unwrap();
+    assert_eq!(report["if"].as_str(), Some("always()"));
+    assert_eq!(report["env"]["MODE"].as_str(), Some("${{ matrix.gc }}"));
+    assert_eq!(report["env"]["STATUS"].as_str(), Some("${{ job.status }}"));
+    assert_eq!(
+        report["run"].as_str(),
+        Some("echo \"$MODE=$STATUS\" >> \"$GITHUB_OUTPUT\"")
     );
     assert!(
         ci["on"]["pull_request"].get("paths-ignore").is_none(),
