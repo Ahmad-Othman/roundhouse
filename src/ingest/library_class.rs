@@ -1406,9 +1406,15 @@ fn walk_decl_body_with_visibility<'pr>(
             visibility.apply(&statement, &mut m);
             if module_function_active && m.receiver == MethodReceiver::Instance {
                 // The retained singleton copy is public even if the original
-                // instance definition is private/protected. extend self shares
-                // the original method instead and must retain its visibility.
-                m.visibility = crate::dialect::MethodVisibility::Public;
+                // instance definition is private/protected, unless
+                // `private_class_method` / `public_class_method` already
+                // recorded a class-side change at this def. extend self
+                // shares the original method instead and must retain its
+                // visibility.
+                let class_visibility_changed = visibility.class_side_changed(m.name.as_str());
+                if !class_visibility_changed {
+                    m.visibility = crate::dialect::MethodVisibility::Public;
+                }
             }
             if force_class_receiver || module_function_active || extend_self_active {
                 m.receiver = MethodReceiver::Class;
@@ -1698,7 +1704,12 @@ fn walk_decl_body_with_visibility<'pr>(
                 .any(|n| n == methods[*pos].name.as_str())
             {
                 methods[*pos].receiver = MethodReceiver::Class;
-                methods[*pos].visibility = crate::dialect::MethodVisibility::Public;
+                // Same rule as the bare marker: the copy starts public,
+                // and a later `private_class_method :name` keeps the
+                // visibility already recorded for that def.
+                if !visibility.class_side_changed(methods[*pos].name.as_str()) {
+                    methods[*pos].visibility = crate::dialect::MethodVisibility::Public;
+                }
                 promoted.push(methods[*pos].name.clone());
             }
         }
