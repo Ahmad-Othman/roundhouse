@@ -101,6 +101,7 @@ pub mod defined_ivar_memo;
 pub mod controller_class_render;
 pub mod dirty_predicate_kwargs;
 pub mod job_test_only;
+pub mod test_cookie_jar;
 pub mod sti_scope;
 mod sti_subclass_callbacks;
 pub mod sum_symbol;
@@ -140,6 +141,7 @@ pub mod to_param_residue;
 pub mod relation_residue;
 pub mod params_residue;
 pub mod params_permit;
+pub mod normalizes;
 pub mod relation_select_block;
 pub mod send_dispatch;
 pub(crate) mod secure_password;
@@ -387,6 +389,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Const literal nothing else produces and writes a String array
     // nothing else reads, so no ordering constraints.
     ("job_test_only", &[]),
+    ("test_cookie_jar", &[]),
     // `x_previously_changed?(to: V)` → the predicate AND a comparison.
     // Reads a kwargs hash on a synthesized predicate name and writes
     // reads of the same synthesis; no pass produces or consumes either
@@ -535,6 +538,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // consumes. Before `relation_residue`, which then sees the grounded
     // `find_by` chain rather than an unresolved send.
     ("authenticate_by", &[]),
+    // Wraps finder keywords in a model's `normalizes`; authenticate_by
+    // expands into one such `find_by`.
+    ("normalizes", &["authenticate_by"]),
     ("group_count", &[]),
     ("dead_default", &[]),
     ("errors_add", &[]),
@@ -791,6 +797,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("sti_subclass_callbacks");
     job_test_only::apply_job_test_only_lowering(app);
     ran!("job_test_only");
+    test_cookie_jar::apply_test_cookie_jar_lowering(app);
+    ran!("test_cookie_jar");
     dirty_predicate_kwargs::apply_dirty_predicate_kwargs(app);
     ran!("dirty_predicate_kwargs");
     controller_class_render::apply_controller_class_render(app);
@@ -887,6 +895,10 @@ pub fn apply_post_analyze_lowerings(
     ran!("perform_all_later");
     diags.extend(authenticate_by::apply_authenticate_by_lowering(app));
     ran!("authenticate_by");
+    // After authenticate_by: its expansion is a `find_by` whose keyword
+    // a `normalizes` declaration applies to.
+    normalizes::apply_normalizes_finder_lowering(app);
+    ran!("normalizes");
     group_count::apply_group_count_lowering(app);
     ran!("group_count");
     dead_default::apply_dead_default_lowering(app, registry);

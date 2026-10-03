@@ -83,8 +83,9 @@ DDL, so that dialect returns an error for it. Postgres renders what
 ingest kept, so it shares the current ingest and IR limits.
 `schema.rb` ingest drops `array: true`; an index's `using:`, `order:`
 and `opclass:`, and expression indexes; precision on `numeric`,
-`datetime` and `time`; a `limit:` on an `integer` column (so no
-`smallint` or `bigint`); and schema qualifiers. The key forms the
+`datetime` and `time`; a `limit:` of 1 or 2 on an `integer` column
+(so no `smallint`; 5 to 8 is a `bigint`, as in Rails); and schema
+qualifiers. The key forms the
 PostgreSQL dumper writes are read as the keys they name: `id: :serial`
 is an `integer` key, and a hash-valued `id: { type: :string, limit:
 32 }` keeps its type and limit. And the folds below
@@ -279,7 +280,7 @@ apps get the same fallback for Sequel-DSL migrations via
 The real-blog fixture generator (`scripts/create-blog`) runs
 `rails db:prepare` after generating migrations, so `schema.rb`
 always exists by the time ingest runs. See
-[`../../DEVELOPMENT.md`](../../DEVELOPMENT.md#fixtures).
+[fixture setup](../development/testing.md#fixtures).
 
 ## Test fixtures: `test/fixtures/*.yml`
 

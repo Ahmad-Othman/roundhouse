@@ -211,6 +211,8 @@ impl BuildTarget {
 /// and the regenerate command. For `ships_e2e` targets the `## <name>`
 /// sections are a CI contract — `scripts/smoke` executes their ```sh
 /// blocks verbatim against the published archive.
+/// MRI prerequisites describe the minimum in `.ruby-version`, not a CI
+/// patch pin. Keep the human-facing minimum aligned when that line changes.
 pub fn target_readme(target: BuildTarget) -> String {
     let name = target.as_str();
     let body = match target {
@@ -247,7 +249,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              - libvips (`libvips-dev` to build, `libvips42` to run; `brew install vips`) — \
              only when `spin.toml` lists `ruby-vips`, which it does when the app \
              declares image variants (thumbnails, avatars)\n\
-             - Node.js 18+ — for the End-to-end suite\n\n\
+             - Node.js 24+ — for the End-to-end suite\n\n\
              ## Build\n\
              ```sh\n\
              spin build\n\
@@ -502,7 +504,7 @@ pub fn target_readme(target: BuildTarget) -> String {
         }
         BuildTarget::Typescript => {
             "## Prerequisites\n\
-             - Node.js 18+\n\n\
+             - Node.js 24+\n\n\
              ## Install dependencies\n\
              ```sh\n\
              npm install\n\
@@ -521,7 +523,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              is loaded by a host HTML page — there's no standalone \
              server.\n\n\
              ## Prerequisites\n\
-             - Node.js 18+ (for bundling)\n\n\
+             - Node.js 24+ (for bundling)\n\n\
              ## Install + build\n\
              ```sh\n\
              npm install\n\
@@ -600,7 +602,7 @@ pub fn target_readme(target: BuildTarget) -> String {
         // no target needs it now. (See the flash-wiring punch list memory.)
         format!(
             "## End-to-end\n\
-             Browser smoke tests (Playwright). Needs Node.js 18+ and the \
+             Browser smoke tests (Playwright). Needs Node.js 24+ and the \
              `sqlite3` CLI; run after the Build steps above — the test \
              config boots the server and seeds `db/seed.sql` itself:\n\
              ```sh\n\
@@ -808,6 +810,33 @@ fn reject_unsupported_dates(app: &App, target: BuildTarget) -> Result<(), String
     Ok(())
 }
 
+/// Keep admitted Data factories outside unverified target emitters.
+fn reject_unsupported_data_factories(app: &App, target: BuildTarget) -> Result<(), String> {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Spinel) {
+        return Ok(());
+    }
+    fn visit(expr: &crate::expr::Expr, target: &str, found: &mut bool) {
+        if expr.decisions & crate::expr::RESOLVED_DATA_FACTORY != 0 {
+            *found = true;
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "Data.define",
+                "this target has no supported Data factory representation; use Ruby or Spinel",
+            );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target, found));
+    }
+    let mut found = false;
+    crate::lower::for_each_forwarding_body_ref(app, &mut |expr| {
+        visit(expr, target.as_str(), &mut found);
+    });
+    if found {
+        return Err(format!("{}: Data.define is not supported; use Ruby or Spinel", target.as_str()));
+    }
+    Ok(())
+}
+
 /// Arbitrary `&expr` operands need a real forwarding convention, not
 /// a lambda that returns the operand (or a dropped block). Keep the
 /// unsupported native paths out of emit, even in survey mode.
@@ -915,6 +944,7 @@ pub fn target_files(
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
     reject_unsupported_pattern_matches(app, target)?;
+    reject_unsupported_data_factories(app, target)?;
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);

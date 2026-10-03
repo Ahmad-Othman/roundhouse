@@ -104,13 +104,84 @@ class Routing(unittest.TestCase):
                 self.assertEqual(plan["spinel_tests"], ["framework_tests_spinel"])
                 self.assertEqual(plan["archives"], [])
 
-    def test_draft_overrides_full_and_target_expansion(self):
+    def test_draft_without_full_retains_the_small_floor(self):
         plan = ci.select(
             ["src/emit/go/expressions.rs", ".github/workflows/ci.yml"],
             draft=True,
-            full=True,
         )
         self.assertEqual(plan["required"], ["generate-fixture", "unit"])
+        self.assertNotIn("build-roundhouse", plan["jobs"])
+
+    def test_draft_floor_and_gates_do_not_depend_on_base_order(self):
+        with patch.object(ci, "BASE", list(reversed(ci.BASE))):
+            plan = ci.select([], draft=True)
+            self.assertEqual(plan["jobs"], ["generate-fixture", "unit"])
+            needs = {
+                job: {"result": "success"}
+                for job in ["plan", "compact-required", "generate-fixture", "unit"]
+            }
+            for compact in (False, True):
+                self.assertEqual(ci.check_results(plan, needs, compact=compact), ([], True))
+                needs["unit"]["result"] = "failure"
+                self.assertTrue(ci.check_results(plan, needs, compact=compact)[0])
+                needs["unit"]["result"] = "success"
+
+    def test_full_overrides_draft_without_enabling_publication(self):
+        plan = ci.select(["README.md"], draft=True, full=True)
+        self.assertEqual(plan["smoke"], ci.TARGETS)
+        self.assertTrue(plan["site"])
+        self.assertTrue(plan["wasm"])
+        self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+        self.assertIn("build-roundhouse", plan["required"])
+        self.assertIn("archive-results", plan["required"])
+        self.assertNotIn("assemble-site", plan["jobs"])
+
+    def test_draft_label_events_reach_full_selection_and_unlabel_returns_to_floor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            event = Path(directory) / "event.json"
+            env = {
+                "GITHUB_EVENT_PATH": str(event),
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_SHA": "1" * 40,
+                "CI_SPINEL_REVISION": "2" * 40,
+            }
+            for labels, expected_smoke in [([{"name": "ci:full"}], ci.TARGETS), ([], [])]:
+                with self.subTest(labels=labels):
+                    event.write_text(json.dumps({
+                        "pull_request": {"draft": True, "labels": labels}
+                    }))
+                    with (
+                        patch.dict(os.environ, env, clear=True),
+                        patch("sys.argv", ["ci-plan.py", "plan"]),
+                        patch.object(ci, "changed_inputs", return_value=(["README.md"], None)),
+                        patch.object(ci, "write_outputs") as output,
+                    ):
+                        self.assertEqual(ci.main(), 0)
+                    plan = output.call_args.args[0]["plan"]
+                    self.assertEqual(plan["smoke"], expected_smoke)
+                    self.assertNotIn("assemble-site", plan["jobs"])
+
+    def test_contract_tests_do_not_expand_the_exercised_workflows(self):
+        paths = [
+            "tests/ci_plan_test.py",
+            "tests/ci_archive_evidence_test.py",
+            "tests/workflow_yaml_parses.rs",
+            "tests/ci_policy_workflow.rs",
+            "tests/ci_fixture_workflow.rs",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertEqual(ci.select([path])["jobs"], ci.BASE)
+        self.assertEqual(ci.select(paths)["archives"], [])
+        # Test-only narrowing cannot hide a changed workflow or real owner.
+        self.assertEqual(
+            ci.select(paths + [".github/workflows/ci.yml"])["smoke"], ci.TARGETS
+        )
+        partial = ci.select(paths + ["src/emit/go.rs"])
+        self.assertEqual(partial["extra_compare"], ["go"])
+        self.assertEqual(partial["smoke"], ["go"])
+        self.assertNotIn("build-wasm", partial["jobs"])
+        self.assertEqual(ci.select(paths, full=True)["smoke"], ci.TARGETS)
 
     def test_target_partial_does_not_pull_in_wasm_or_other_archives(self):
         plan = ci.select(["src/emit/go/expressions.rs"])
@@ -237,9 +308,8 @@ class Routing(unittest.TestCase):
             "scripts/ci-plan.py",
             "Cargo.toml",
             "scripts/ci-reuse.py",
-            "tests/ci_archive_evidence_test.py",
-            "tests/ci_policy_workflow.rs",
-            "tests/ci_fixture_workflow.rs",
+            "scripts/ci-archive-evidence.py",
+            ".github/workflows/ci.yml",
         ]:
             with self.subTest(path=path):
                 self.assertEqual(ci.select([path])["smoke"], ci.TARGETS)
@@ -381,6 +451,17 @@ class Results(unittest.TestCase):
         needs["compare"]["result"] = "failure"
         self.assertTrue(ci.check_results(plan, needs, compact=True)[0])
 
+    def test_speculative_success_cannot_hide_unit_or_compiler_failure(self):
+        plan = ci.select([])
+        for job in ["unit", "build-roundhouse"]:
+            for result in ["failure", "cancelled", "skipped", None]:
+                with self.subTest(job=job, result=result):
+                    needs = self.needs(plan)
+                    needs[job]["result"] = result
+                    self.assertTrue(ci.check_results(plan, needs, compact=True)[0])
+                    self.assertTrue(ci.check_results(plan, needs)[0])
+                    self.assertFalse(ci.check_results(plan, needs)[1])
+
     def test_advisory_failure_is_visible_but_does_not_fail_required_gate(self):
         plan = ci.select([], full=True)
         needs = self.needs(plan)
@@ -402,9 +483,15 @@ class Results(unittest.TestCase):
         plan = ci.select([], full=True)
         self.assertEqual(ci.check_results(plan, self.needs(plan)), ([], True))
         for mode in ["default", "minor-gc", "verify-gen"]:
-            needs = self.needs(plan)
-            needs["campfire-compare-spinel"]["outputs"][mode] = "failure"
-            self.assertEqual(ci.check_results(plan, needs), ([], False))
+            for status in ["failure", "cancelled", "", None]:
+                with self.subTest(mode=mode, status=status):
+                    needs = self.needs(plan)
+                    outputs = needs["campfire-compare-spinel"]["outputs"]
+                    if status is None:
+                        del outputs[mode]
+                    else:
+                        outputs[mode] = status
+                    self.assertEqual(ci.check_results(plan, needs), ([], False))
 
     def test_unselected_jobs_may_skip_but_planner_must_succeed(self):
         plan = ci.select([])

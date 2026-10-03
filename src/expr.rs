@@ -22,6 +22,9 @@ use crate::ty::Ty;
 /// uses its resolved `Ty::Class` when it changes lexical nesting.
 pub const RESOLVED_CLASS_REF: u64 = 1 << 2;
 
+/// An admitted library-class Data factory with its exact declaration identity.
+pub const RESOLVED_DATA_FACTORY: u64 = 1 << 3;
+
 /// Cross-target intent annotation for canonical Ruby idioms whose
 /// optimal emit shape differs per target. Set by the lowerer when it
 /// synthesizes a pattern it knows the target-specific name for (and by
@@ -115,7 +118,7 @@ pub struct Expr {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<IrHint>,
     /// Bit-packed source facts and target decisions. Bits 0–31 are
-    /// cross-target (`NEEDS_PARENS`, `LAST_USE`, `RESOLVED_CLASS_REF`);
+    /// cross-target (`NEEDS_PARENS`, `LAST_USE`, source-resolution facts);
     /// the analyzer sets source facts and the decide passes set the rest.
     /// Bits 32–63 are per-target-local (e.g. rust's `OWNED`,
     /// `CLONE_AT`). See `src/emit/rust/decide/bits.rs` for the

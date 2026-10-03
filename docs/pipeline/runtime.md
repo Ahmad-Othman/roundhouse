@@ -1043,6 +1043,45 @@ Rails' `expires_at:` (an absolute instant) is not claimed; only
 so it fails by name instead of silently minting a token that never
 expires.
 
+### `has_secure_password`'s reset token: only the default is claimed
+
+`has_secure_password` generates `<attr>_reset_token`,
+`find_by_<attr>_reset_token(!)` and `<attr>_reset_token_expires_in`
+(`lower::secure_password`, over `runtime/ruby/active_record/token_for.rb`).
+The WIRE FORMAT is Rails' own, and `tests/rails8_authentication.rs` holds
+it to a token minted by Rails 8.1.4: the signed-GlobalID envelope (url-safe
+base64 with padding, HMAC-SHA1) under the `active_record/token_for` salt,
+data `[id, password_salt.last(10)]`, purpose `"User\npassword_reset\n900"`.
+
+Only `reset_token: true`, the default, is reproduced. `reset_token: false`
+defines nothing, as in Rails; a custom `expires_in:` hash is left without
+methods rather than given the default lifetime. General
+`generates_token_for :purpose do … end` is still analyzer-typed with no
+runtime. `<attr>_reset_token_expires_in` answers the Integer `900` where
+Rails answers the Duration `15.minutes`; every reader in the generator
+takes seconds.
+
+### `normalizes` also applies to rows loaded from the database
+
+`normalizes :email_address, with: ->(e) { … }` (`lower::normalizes`)
+becomes `Model._normalize_<attr>(value)`, called by the column writer and
+wrapped around the matching keyword of `find_by`/`where`/`exists?`/
+`find_or_*_by`. Hydration assigns through that same writer, so a row
+loaded from the database is normalized too, where Rails leaves an
+existing row alone until the attribute is reassigned. The two agree on
+every row the app wrote after the declaration. A `with:` that is not a
+one-parameter lambda literal, and `apply_to_nil: true`, are not
+reproduced (the declaration is left without effect).
+
+### The mail assertions count deliveries
+
+`assert_enqueued_emails` and `assert_enqueued_email_with` read
+`ActionMailer::Base.deliveries`, which `deliver_later` appends to
+immediately (there is no queue in one process). So a `deliver_now`
+counts as enqueued too, and `assert_enqueued_email_with` checks that a
+mail went out, not the mailer, action, or arguments — the narrowing
+`assert_enqueued_with` already documents for jobs.
+
 ### `remote_connections.disconnect` selects an empty set
 
 `ActionCable.server.remote_connections.where(current_user: user)

@@ -3495,6 +3495,29 @@ fn rewrite_helper_calls(
                 }
             }
         }
+        // Rails' `distance_of_time_in_words` takes seconds as readily as
+        // Times — the authentication generator's reset mailer passes
+        // `(0, @user.password_reset_token_expires_in)`. The runtime keeps
+        // the two apart (one parameter type each; a Time-or-Integer slot
+        // is poly on spinel), so a call whose first time is an Integer
+        // goes to the seconds entry when the second is an Integer too or
+        // has no type here (a mailer view's `user` parameter reaches emit
+        // untyped). A Time in that second slot does not slip through:
+        // spinel refuses `Time - Integer` there, and CRuby raises on it.
+        let is_int = |e: &Expr| matches!(e.ty, Some(crate::ty::Ty::Int));
+        let int_or_open = |e: &Expr| {
+            matches!(e.ty, None | Some(crate::ty::Ty::Int) | Some(crate::ty::Ty::Var { .. }))
+        };
+        let method = if method.as_str() == "distance_of_time_in_words"
+            && path == view_helpers_path()
+            && args.len() >= 2
+            && is_int(&args[0])
+            && int_or_open(&args[1])
+        {
+            Symbol::from("distance_of_seconds_in_words")
+        } else {
+            method
+        };
         *expr.node = ExprNode::Send {
             recv: Some(Expr::new(span, ExprNode::Const { path })),
             method,

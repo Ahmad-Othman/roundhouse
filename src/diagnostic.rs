@@ -69,6 +69,7 @@ impl Diagnostic {
             DiagnosticKind::Parse { .. } => "parse",
             DiagnosticKind::BlankUnlowered { .. } => "blank_unlowered",
             DiagnosticKind::LowerResidue { .. } => "lower_residue",
+            DiagnosticKind::UndefinedFilterTarget { .. } => "undefined_filter_target",
         }
     }
 
@@ -200,6 +201,11 @@ impl Diagnostic {
                     reason.as_str()
                 )
             }
+            DiagnosticKind::UndefinedFilterTarget { target, macro_name } => format!(
+                "`{} :{}` names a method nothing defines; Rails raises NoMethodError on every action it guards",
+                macro_name.as_str(),
+                target.as_str()
+            ),
         }
     }
 
@@ -476,4 +482,11 @@ pub enum DiagnosticKind {
     /// `BlankUnlowered`; produced as returned lists, never as
     /// `Expr.diagnostic` annotations.
     LowerResidue { pass: Symbol, construct: Symbol, reason: Symbol },
+    /// `before_action :x` (or around/after) where no method `x` is
+    /// reachable from the controller — its own methods, its ancestors',
+    /// spliced concerns', or the registered framework surface
+    /// (`analyze::filter_targets`). The source is wrong: Rails answers
+    /// every guarded action with a 500. Default severity `Error`, since
+    /// the emitted program cannot reproduce a guard that names nothing.
+    UndefinedFilterTarget { target: Symbol, macro_name: Symbol },
 }

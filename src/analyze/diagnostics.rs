@@ -79,6 +79,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         diagnose_expr(seeds, &mut out);
     }
     out.extend(super::forwarding::diagnose(app));
+    out.extend(super::filter_targets::diagnose(app));
 
     // Static N+1 pass (#64): missing-preload warnings over the typed
     // query chains, same-procedure and through the controller→view
@@ -217,6 +218,9 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
                     reason.as_str()
                 )
             }
+            // Produced by `filter_targets::diagnose` as a returned list,
+            // never as an `Expr.diagnostic` annotation.
+            DiagnosticKind::UndefinedFilterTarget { .. } => Diagnostic::stub_text(kind),
         };
         out.push(Diagnostic {
             span: expr.span,
