@@ -90,6 +90,10 @@ class RhVerifyTest < Minitest::Test
     File.exist?(@log) ? File.readlines(@log).map { |line| JSON.parse(line) } : []
   end
 
+  def python_available?
+    system('python3', '--version', out: File::NULL, err: File::NULL)
+  end
+
   def test_plan_is_read_only_and_routes_committed_dirty_deleted_and_untracked_inputs
     File.write(File.join(@root, 'docs/guide/verify.md'), 'committed guide')
     git('add', 'docs')
@@ -102,9 +106,14 @@ class RhVerifyTest < Minitest::Test
     report = JSON.parse(out)
     assert_equal 'planned', report['status']
     assert_equal ['docs/guide/verify.md', 'src/emit/go.rs', 'wasm/new file.txt'], report['changes']
-    assert_includes report['hosted_coverage']['smoke'], 'go'
-    assert report['hosted_coverage']['wasm']
-    assert_equal false, report['hosted_coverage']['publish']
+    if python_available?
+      assert_includes report['hosted_coverage']['smoke'], 'go'
+      assert report['hosted_coverage']['wasm']
+      assert_equal false, report['hosted_coverage']['publish']
+    else
+      assert_nil report['hosted_coverage']
+      assert_includes report['hosted_coverage_error'], 'python3'
+    end
     assert_equal %w[not-run not-run], report['checks'].map { |c| c['status'] }
     assert_empty calls
     assert_nil report['disk_space']['before']
@@ -167,7 +176,7 @@ class RhVerifyTest < Minitest::Test
     report = JSON.parse(out)
     assert_equal 'passed', report['status']
     assert_nil report['hosted_coverage']
-    assert_includes report['hosted_coverage_error'], 'unavailable policy'
+    assert_includes report['hosted_coverage_error'], python_available? ? 'unavailable policy' : 'python3'
     assert_equal 1, calls.length
   end
 
@@ -175,7 +184,8 @@ class RhVerifyTest < Minitest::Test
     File.write(File.join(@root, 'scripts/ci-plan.py'), "def select(paths): return []\n")
     out, err, status = invoke
     assert status.success?, err
-    assert_includes out, 'Hosted selection unavailable: unsupported hosted coverage format'
+    assert_includes out, 'Hosted selection unavailable:'
+    assert_includes out, python_available? ? 'unsupported hosted coverage format' : 'python3'
     assert_includes out, 'Local checks: passed'
     assert_equal 1, calls.length
   end
@@ -243,6 +253,8 @@ class RhVerifyTest < Minitest::Test
     report = JSON.parse(out)
     assert_equal 'passed', report['status']
     assert_includes report['disk_space']['before']['workspace']['error'], 'df'
+    assert_nil report['hosted_coverage']
+    assert_includes report['hosted_coverage_error'], 'python3'
     File.delete(File.join(@root, 'mocks/cargo'))
     out, _err, status = invoke('--json', env: { 'PATH' => File.join(@root, 'mocks') })
     assert_equal 127, status.exitstatus
