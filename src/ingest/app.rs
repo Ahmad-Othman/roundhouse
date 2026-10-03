@@ -4513,9 +4513,16 @@ fn synthesize_redirect_controller(
         .map(|redirect| {
             // Built from Ruby source so the action body is ingested the
             // way a hand-written `redirect_to` would be.
+            let location = if let Some(expression) = redirect.location.strip_prefix('\u{0}') {
+                expression.to_string()
+            } else if redirect.location_is_expression {
+                redirect.location.clone()
+            } else {
+                redirect_location_source(&redirect.location)
+            };
             let src = format!(
                 "def __redirect\n  redirect_to({}, status: :{})\nend\n",
-                redirect_location_source(&redirect.location),
+                location,
                 redirect_status_symbol(redirect.status),
             );
             let body = crate::runtime_src::parse_methods(&src)

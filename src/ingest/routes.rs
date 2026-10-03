@@ -306,6 +306,10 @@ mod redirect_sink {
     /// it: the path, made into an identifier, with a counter appended
     /// if an earlier route already took that name.
     pub(super) fn push(path: &str, location: String, status: u16) -> Symbol {
+        push_with(path, location, status, false)
+    }
+
+    fn push_with(path: &str, location: String, status: u16, location_is_expression: bool) -> Symbol {
         SINK.with(|sink| {
             let mut sink = sink.borrow_mut();
             let base = action_name(path);
@@ -316,7 +320,7 @@ mod redirect_sink {
                 name = format!("{base}_{n}");
             }
             let action = Symbol::from(name.as_str());
-            sink.push(RedirectRoute { action: action.clone(), location, status });
+            sink.push(RedirectRoute { action: action.clone(), location, status, location_is_expression });
             action
         })
     }
@@ -399,14 +403,43 @@ fn redirect_literal(node: &Node<'_>) -> Option<(String, u16)> {
 /// not return a string stays unsupported.
 fn redirect_block(block: ruby_prism::BlockNode<'_>) -> Option<(String, u16)> {
     let params = block.parameters().and_then(|params| params.as_block_parameters_node());
-    let count = params.map(|params| params.parameters().map(|list| list.requireds().len()).unwrap_or(0)).unwrap_or(0);
-    if count > 2 {
+    let names = params
+        .and_then(|params| params.parameters())
+        .map(|list| {
+            list.requireds()
+                .iter()
+                .filter_map(|param| param.as_required_parameter_node())
+                .map(|param| constant_id_str(&param.name()).to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if names.len() > 2 || names.iter().any(|name| name != "_" && name != "params" && name != "request" && name != "req") {
         return None;
     }
     let body = block.body()?;
     let statements: Vec<_> = body.as_statements_node().map(|node| node.body().iter().collect()).unwrap_or_else(|| vec![body]);
     let [statement] = statements.as_slice() else { return None };
-    Some((string_value(statement)?, 301))
+    if let Some(literal) = string_value(statement) {
+        return Some((literal, 301));
+    }
+    let source = super::expr::ingest_expr(statement, "<redirect>").ok()?;
+    if !redirect_expression_is_string(&source) {
+        return None;
+    }
+    let mut rendered = crate::emit::ruby::emit_expr(&source);
+    for name in ["request", "req"] {
+        rendered = rendered.replace(name, "request");
+    }
+    Some((format!("\u{0}{rendered}"), 301))
+}
+
+fn redirect_expression_is_string(expr: &crate::expr::Expr) -> bool {
+    match &*expr.node {
+        crate::expr::ExprNode::Lit { value: crate::expr::Literal::Str { .. } | crate::expr::Literal::Nil } => true,
+        crate::expr::ExprNode::StringInterp { .. } | crate::expr::ExprNode::If { .. } => true,
+        crate::expr::ExprNode::Send { method, .. } if matches!(method.as_str(), "query_string" | "path" | "fullpath" | "to_s" | "+") => true,
+        _ => false,
+    }
 }
 
 fn ingest_route_call(

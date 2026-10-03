@@ -113,6 +113,17 @@ fn a_redirect_inside_a_namespace_keeps_the_one_controller() {
 }
 
 #[test]
+fn a_block_that_builds_a_string_is_served() {
+    let app = app_with(
+        "  get \"/reports\", to: \"reports#index\"\n  get \"/old\", to: redirect(status: 301) { |params, request| request.query_string.empty? ? \"/reports\" : \"/reports?#{request.query_string}\" }\n  get \"/older\", to: redirect { |_| \"/reports\" }\n  get \"/one\", to: redirect { |params| \"/reports/#{params[:id]}\" }\n",
+    );
+    let emitted = redirect_controller(&app);
+    assert!(emitted.contains("query_string"), "built path; got:\n{emitted}");
+    assert!(emitted.contains("def older"), "unused parameter; got:\n{emitted}");
+    assert!(emitted.contains("params[:id]") || emitted.contains("@params"), "one-arg interpolation; got:\n{emitted}");
+}
+
+#[test]
 fn a_string_block_redirect_is_served() {
     let app = app_with(
         "  get \"/reports\", to: \"reports#index\"\n  get \"/old\", to: redirect { |params, request| \"/reports\" }\n  get \"/older\", to: redirect { |request| \"/reports\" }\n  root to: redirect(\"/reports\")\n",
@@ -156,7 +167,7 @@ fn engine_routes_stay_explicit_gaps() {
 fn a_block_redirect_is_still_dropped_with_its_ledger_line() {
     // There is no literal to serve, so the #82 contract stands.
     let app = app_with(
-        "  get \"/reports\", to: \"reports#index\"\n  get \"/old\", to: redirect { |params, request| request.path }\n",
+        "  get \"/reports\", to: \"reports#index\"\n  get \"/old\", to: redirect { |params, request| request.user }\n",
     );
     assert!(
         !app.routes.entries.iter().any(|e| matches!(
