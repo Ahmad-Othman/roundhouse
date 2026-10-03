@@ -3316,3 +3316,32 @@ fn rails_root_join_takes_any_number_of_parts() {
     run.assert_passes();
     assert!(run.stdout.contains("Rails.root.join contract passed"));
 }
+
+/// An Active Job argument serializer extends a Rails base that the
+/// runtime does not port. The emit drops the class with a
+/// `lower_residue` warning, so the tree still loads. Before, the class
+/// was kept, and `app/models.rb` raised `uninitialized constant
+/// ActiveJob::Serializers` at boot.
+#[test]
+fn an_active_job_object_serializer_does_not_stop_the_boot() {
+    emit_and_run::real_blog()
+        .write(
+            "app/serializers/article_serializer.rb",
+            r#"class ArticleSerializer < ActiveJob::Serializers::ObjectSerializer
+  def klass
+    Article
+  end
+
+  def serialize(article)
+    super("id" => article.id)
+  end
+
+  def deserialize(hash)
+    Article.find(hash["id"])
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}

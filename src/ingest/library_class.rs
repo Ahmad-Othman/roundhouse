@@ -2271,6 +2271,7 @@ pub fn is_unported_rails_base(parent: &str) -> bool {
     matches!(
         parent,
         "ActionMailbox::Base"
+            | "ActiveJob::Serializers::ObjectSerializer"
             | "ActiveModel::Validator"
             | "ActiveModel::EachValidator"
             | "ActiveRecord::Migration"
