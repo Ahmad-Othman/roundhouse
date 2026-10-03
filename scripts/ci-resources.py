@@ -52,10 +52,24 @@ def sample(start, previous_cpu):
     }, current_cpu
 
 
+def cargo_dir_bytes(name):
+    path = Path("target/debug") / name
+    if not path.is_dir():
+        return None
+    size = subprocess.check_output(["du", "-s", "-B1", str(path)], text=True)
+    return int(size.split()[0])
+
+
 def collect(child, out, start):
     out.parent.mkdir(parents=True, exist_ok=True)
     row, previous_cpu = sample(start, cpu_times())
     rows = [row]
+    # Peak deps during the phase: batch reclaim makes end size unrepresentative.
+    # Full `du` on multi-GiB deps is expensive — sample about once a minute.
+    deps_samples = []
+    deps_tick = 0
+    if (size := cargo_dir_bytes("deps")) is not None:
+        deps_samples.append(size)
     with out.with_suffix(".csv").open("w") as output:
         writer = csv.DictWriter(output, fieldnames=row.keys())
         writer.writeheader()
@@ -70,6 +84,10 @@ def collect(child, out, start):
             rows.append(row)
             writer.writerow(row)
             output.flush()
+            deps_tick += 1
+            if status is not None or deps_tick % 12 == 0:
+                if (size := cargo_dir_bytes("deps")) is not None:
+                    deps_samples.append(size)
             if status is not None:
                 break
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -86,14 +104,16 @@ def collect(child, out, start):
         "disk_min_available_bytes": min(r["disk_available_bytes"] for r in rows),
         "disk_used_start_bytes": rows[0]["disk_used_bytes"],
         "disk_used_end_bytes": row["disk_used_bytes"],
+        "disk_used_peak_bytes": max(r["disk_used_bytes"] for r in rows),
         "cargo_artifacts_bytes": {},
     }
-    # One directory walk per phase, not every sample. Never delete live builds.
+    # Final allocated sizes, plus deps peak across samples. Never delete builds.
     for name in ["deps", "incremental", "build"]:
-        path = Path("target/debug") / name
-        if path.is_dir():
-            size = subprocess.check_output(["du", "-s", "-B1", str(path)], text=True)
-            report["cargo_artifacts_bytes"][name] = int(size.split()[0])
+        size = cargo_dir_bytes(name)
+        if size is not None:
+            report["cargo_artifacts_bytes"][name] = size
+    if deps_samples:
+        report["cargo_artifacts_bytes"]["deps_peak"] = max(deps_samples)
     out.with_suffix(".json").write_text(json.dumps(report, indent=2) + "\n")
     print(f"Resources ({out.name}): {json.dumps(report)}", flush=True)
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):

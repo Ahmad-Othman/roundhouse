@@ -62,6 +62,7 @@ class ResourcesTests(unittest.TestCase):
             self.assertEqual(report["disk_min_available_bytes"], 10)
             self.assertEqual(report["disk_used_start_bytes"], 50)
             self.assertEqual(report["disk_used_end_bytes"], 60)
+            self.assertEqual(report["disk_used_peak_bytes"], 90)
             self.assertEqual(report["wall_s"], 6)
             with out.with_suffix(".csv").open() as stream:
                 self.assertEqual(len(list(csv.DictReader(stream))), 3)
