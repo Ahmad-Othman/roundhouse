@@ -1362,11 +1362,6 @@ pub(super) fn ingest_method(
         Some(b) => ingest_expr(&b, file)?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
-    super::forwarding::require_anonymous_keyword_declaration(
-        formals.anonymous,
-        &body,
-        file,
-    )?;
 
     Ok(MethodDef {
         name_span: super::util::def_name_span(def, file),

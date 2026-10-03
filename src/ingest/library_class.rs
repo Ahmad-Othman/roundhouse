@@ -2054,9 +2054,6 @@ pub(super) fn ingest_library_method(
                             // `rest = {}` after a `name:` it does not parse
                             // and dropping it beside `*args` changes the
                             // rest array even when the keyword-rest is unread.
-                            // A body that forwards `**rest` needs the same
-                            // retention: flattening it makes the call pass
-                            // one positional hash.
                             let mut p = Param::keyword(Symbol::from(s), None);
                             p.rest = true;
                             params.push(p);
@@ -2096,11 +2093,6 @@ pub(super) fn ingest_library_method(
     };
 
     params.extend(formals.anonymous.map(super::forwarding::AnonymousFormal::into_param));
-    super::forwarding::require_anonymous_keyword_declaration(
-        formals.anonymous,
-        &body,
-        file,
-    )?;
 
     Ok(MethodDef {
         name_span: super::util::def_name_span(def, file),
