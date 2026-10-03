@@ -1448,6 +1448,24 @@ fn walk_decl_body_with_visibility<'pr>(
                 continue;
             }
         }
+        if let Some(alias) = stmt.as_alias_method_node() {
+            let to = alias_keyword_name(&alias.new_name());
+            let from = alias_keyword_name(&alias.old_name());
+            let receiver = if force_class_receiver { MethodReceiver::Class } else { MethodReceiver::Instance };
+            if let Some((to, from)) = to.zip(from) {
+                if let Some(source) = methods.iter().rposition(|method| method.name.as_str() == from && method.receiver == receiver) {
+                    let mut copy = methods[source].clone();
+                    copy.name = Symbol::from(to.as_str());
+                    visibility.apply(&statement, &mut copy);
+                    methods.push(copy);
+                    continue;
+                }
+            }
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "alias names a method this body has not defined".into(),
+            });
+        }
         if let Some(call) = stmt.as_call_node() {
             if call.receiver().is_none() {
                 let kw = constant_id_str(&call.name());
@@ -1757,6 +1775,15 @@ fn normalize_classvars_to_ivars(e: &mut Expr) {
 /// last `old` already walked on the same side (instance, or class inside
 /// `class << self`). None when either name is not a literal symbol or
 /// the body has not defined `old`.
+fn alias_keyword_name(node: &ruby_prism::Node<'_>) -> Option<String> {
+    if let Some(symbol) = symbol_value(node) {
+        return Some(symbol);
+    }
+    node.as_call_node()
+        .filter(|call| call.receiver().is_none() && call.arguments().is_none())
+        .map(|call| constant_id_str(&call.name()).to_string())
+}
+
 fn alias_source(
     call: &ruby_prism::CallNode<'_>,
     methods: &[MethodDef],

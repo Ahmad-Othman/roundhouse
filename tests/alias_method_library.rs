@@ -64,6 +64,26 @@ end
 /// Inside `class << self` the alias is a class method, copied from the
 /// class-side original.
 #[test]
+fn alias_keyword_copies_a_defined_method_in_a_class_and_module() {
+    for source in [
+        "class Probe\n  def display_name\n    \"shown\"\n  end\n  alias translated_fault_name display_name\n  def old_name?\n    true\n  end\n  alias next_name old_name?\nend\n",
+        "module Probe\n  def display_name\n    \"shown\"\n  end\n  alias translated_fault_name display_name\nend\n",
+    ] {
+        let classes = roundhouse::ingest::ingest_library_classes(source.as_bytes(), "probe.rb").expect(source);
+        let names: Vec<_> = classes[0].methods.iter().map(|method| method.name.as_str().to_string()).collect();
+        assert!(names.iter().any(|name| name == "translated_fault_name"), "{names:?}");
+        if source.contains("old_name?") {
+            assert!(names.iter().any(|name| name == "next_name"), "{names:?}");
+        }
+    }
+    let err = roundhouse::ingest::ingest_library_classes(
+        b"class Probe\n  alias missing gone\nend\n",
+        "probe.rb",
+    ).expect_err("undefined alias");
+    assert!(err.to_string().contains("alias names a method"));
+}
+
+#[test]
 fn alias_method_in_the_singleton_class_copies_the_class_method() {
     let src = emitted(
         r#"class Point
