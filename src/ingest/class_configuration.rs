@@ -308,21 +308,32 @@ fn expand_controller(
                         "class configuration call precedes its concern include",
                     ));
                 }
-                let mut value = match args.as_slice() {
-                    [] => Expr::new(
+                let hash = match args.as_slice() {
+                    [] => None,
+                    [hash] => Some(hash),
+                    _ => {
+                        return Err(refuse(
+                            "class configuration needs a fully readable keyword hash",
+                        ));
+                    }
+                };
+                if hash.is_some_and(|hash| !readable_keyword_hash(hash)) {
+                    return Err(refuse(
+                        "class configuration needs a fully readable keyword hash",
+                    ));
+                }
+                let mut value = hash.cloned().unwrap_or_else(|| {
+                    Expr::new(
                         expr.span,
                         ExprNode::Hash {
                             entries: vec![],
                             kwargs: false,
                         },
-                    ),
-                    [hash] if readable_keyword_hash(hash) => hash.clone(),
-                    _ => {
-                        return Err(refuse(
-                            "class configuration needs literal keyword arguments",
-                        ));
-                    }
-                };
+                    )
+                });
+                if let ExprNode::KeywordSplat { value: inner } = &mut *value.node {
+                    value = inner.clone();
+                }
                 if let ExprNode::Hash { kwargs, .. } = &mut *value.node {
                     *kwargs = false;
                 }
@@ -425,12 +436,15 @@ fn reader_slot(method: &MethodDef) -> Option<Symbol> {
 }
 
 fn readable_keyword_hash(expr: &Expr) -> bool {
-    let ExprNode::Hash {
-        entries,
-        kwargs: true,
-    } = &*expr.node
-    else {
-        return false;
+    let entries = match &*expr.node {
+        ExprNode::Hash { entries, kwargs: true } => entries,
+        // A parenthesized call can retain the keyword list as a splat of
+        // that same hash. It is still the writer's options, not a value.
+        ExprNode::KeywordSplat { value } => match &*value.node {
+            ExprNode::Hash { entries, kwargs: true } => entries,
+            _ => return false,
+        },
+        _ => return false,
     };
     entries.iter().all(|(key, value)| {
         matches!(

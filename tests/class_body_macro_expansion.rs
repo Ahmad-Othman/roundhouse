@@ -526,6 +526,8 @@ fn readable_class_methods_store_keywords_blocks_and_filter_options() {
         ("configure_window only: [:show], except: [:index], if: :ready?, unless: :draft?", true),
         ("configure_window auth: -> { current_user }", true),
         ("configure_window mode: helper", false),
+        ("configure_window(mode: :month, days: 3)", true),
+        ("configure_window default_date: ->(today) { today }", true),
         ("configure_window(mode: :month) { :ready }", false),
     ];
     for (call, readable) in shapes {
