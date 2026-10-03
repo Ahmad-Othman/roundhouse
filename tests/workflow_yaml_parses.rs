@@ -605,6 +605,200 @@ fn campfire_comparisons_require_an_uploaded_binary_and_report_blocking() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn unit_debug_roundhouse_reaches_campfire_consumers_via_roundhouse_bin() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let workflow: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let unit = &workflow["jobs"]["unit"];
+    assert_eq!(
+        unit["outputs"]["roundhouse-bin-artifact-id"].as_str(),
+        Some("${{ steps.roundhouse-bin.outputs.artifact-id }}")
+    );
+    let upload = unit["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"].as_str() == Some("roundhouse-bin"))
+        .expect("unit uploads the debug binary");
+    assert_eq!(
+        upload["with"]["name"].as_str(),
+        Some("roundhouse-debug-bin")
+    );
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "roundhouse-bin-helper-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let marker = root.join("invoked.txt");
+    let fake = root.join("fake-roundhouse");
+    // Staged producer stand-in: records argv and, when given -o, writes a
+    // minimal emit tree so campfire-suite can finish its emit branch.
+    fs::write(
+        &fake,
+        format!(
+            r#"#!/bin/bash
+set -euo pipefail
+printf 'fake-roundhouse' >> "{marker}"
+printf ' %q' "$@" >> "{marker}"
+printf '\n' >> "{marker}"
+echo "fake-roundhouse:$*" >&2
+out=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "-o" || "$prev" == "--output" ]]; then out="$arg"; fi
+  prev="$arg"
+done
+if [[ -n "$out" ]]; then
+  mkdir -p "$out"
+  # Empty SPINEL_TESTS: suite parses the list and runs zero files.
+  printf 'SPINEL_TESTS :=\n\n.PHONY: all\nall:\n' > "$out/Makefile"
+  mkdir -p "$out/db" "$out/storage"
+  : > "$out/db/seed.sql"
+  printf 'require_relative "app/models"\n' > "$out/boot.rb"
+  mkdir -p "$out/app"
+  : > "$out/app/models.rb"
+fi
+echo fake-ok
+"#,
+            marker = marker.display()
+        ),
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&fake).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&fake, perms).unwrap();
+
+    let repo = std::env::current_dir().unwrap();
+    let helper = repo.join("scripts/lib/roundhouse-bin.sh");
+
+    // Direct helper: ROUNDHOUSE_BIN is consumed; cargo is not.
+    // Drive via a small script file (no bash -c interpolation).
+    let probe = root.join("probe-helper.sh");
+    let probe_app = root.join("probe-app");
+    let probe_out = root.join("probe-out");
+    fs::create_dir_all(&probe_app).unwrap();
+    fs::write(
+        &probe,
+        "#!/bin/bash\nset -euo pipefail\n. \"$HELPER\"\nroundhouse_run --target ruby \"$PROBE_APP\" -o \"$PROBE_OUT\"\n",
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&probe).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&probe, perms).unwrap();
+    let _ = fs::remove_file(&marker);
+    let output = Command::new(&probe)
+        .env("HELPER", &helper)
+        .env("REPO_ROOT", &repo)
+        .env("ROUNDHOUSE_BIN", &fake)
+        .env("ROUNDHOUSE_BIN_TRACE", "1")
+        .env("PROBE_APP", &probe_app)
+        .env("PROBE_OUT", &probe_out)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status={:?} stdout={stdout} stderr={stderr}",
+        output.status
+    );
+    assert!(
+        stdout.contains("fake-ok"),
+        "stdout must come from the staged binary: {stdout}"
+    );
+    assert!(
+        stderr.contains("roundhouse-bin: exec") && stderr.contains("fake-roundhouse"),
+        "trace must name the staged binary: {stderr}"
+    );
+    assert!(
+        !stderr.contains("cargo run"),
+        "must not fall back to cargo: {stderr}"
+    );
+    let invoked = fs::read_to_string(&marker).unwrap_or_default();
+    assert!(
+        invoked.contains("fake-roundhouse"),
+        "helper must exec the staged binary: {invoked}"
+    );
+
+    // Missing ROUNDHOUSE_BIN path must fail closed, not cargo-run.
+    let missing = root.join("missing-roundhouse");
+    let fail_probe = root.join("probe-missing.sh");
+    fs::write(
+        &fail_probe,
+        "#!/bin/bash\nset -euo pipefail\n. \"$HELPER\"\nroundhouse_run --version\n",
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&fail_probe).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&fail_probe, perms).unwrap();
+    let failed = Command::new(&fail_probe)
+        .env("HELPER", &helper)
+        .env("REPO_ROOT", &repo)
+        .env("ROUNDHOUSE_BIN", &missing)
+        .output()
+        .unwrap();
+    assert!(!failed.status.success(), "missing binary must not succeed");
+    let err = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        err.contains("ROUNDHOUSE_BIN is not an executable file"),
+        "fail-closed message: {err}"
+    );
+
+    // End-to-end (#317): a Campfire consumer emit branch must call the
+    // supplied executable. campfire-suite is what campfire-conformance runs;
+    // bypassing roundhouse_run for cargo run would miss the marker file.
+    let app = root.join("mini-app");
+    fs::create_dir_all(&app).unwrap();
+    let out = root.join("suite-out");
+    let tally = root.join("tally.txt");
+    let _ = fs::remove_file(&marker);
+    let suite = Command::new(repo.join("scripts/campfire-suite"))
+        .args([
+            "--no-stubs",
+            "--out",
+            out.to_str().unwrap(),
+            "--tally",
+            tally.to_str().unwrap(),
+            app.to_str().unwrap(),
+        ])
+        .env("ROUNDHOUSE_BIN", &fake)
+        .env("ROUNDHOUSE_BIN_TRACE", "1")
+        // Not the repo cwd: relative paths must still resolve via abs_path,
+        // and the binary branch must not silently become cargo under REPO_ROOT.
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let suite_out = String::from_utf8_lossy(&suite.stdout);
+    let suite_err = String::from_utf8_lossy(&suite.stderr);
+    assert!(
+        suite.status.success(),
+        "campfire-suite emit branch failed: status={:?}\nstdout={suite_out}\nstderr={suite_err}",
+        suite.status
+    );
+    let invoked = fs::read_to_string(&marker).unwrap_or_default();
+    assert!(
+        invoked.contains("fake-roundhouse") && invoked.contains("--target"),
+        "campfire-suite must exec ROUNDHOUSE_BIN on the emit branch: {invoked}\nstderr={suite_err}"
+    );
+    assert!(
+        !suite_err.contains("cargo run") && !invoked.contains("cargo"),
+        "campfire-suite must not rebuild via cargo: stderr={suite_err} invoked={invoked}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+
 #[test]
 fn every_workflow_file_parses_as_yaml() {
     let dir = Path::new(".github/workflows");
