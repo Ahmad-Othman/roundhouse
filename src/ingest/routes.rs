@@ -458,10 +458,21 @@ fn redirect_expression_is_string(expr: &crate::expr::Expr) -> bool {
         crate::expr::ExprNode::If { then_branch, else_branch, .. } => {
             redirect_expression_is_string(then_branch) && redirect_expression_is_string(else_branch)
         }
-        crate::expr::ExprNode::Send { method, .. } => matches!(
-            method.as_str(),
-            "query_string" | "path" | "fullpath" | "to_s" | "+" | "[]"
-        ),
+        crate::expr::ExprNode::Send { method, recv, args, .. } => {
+            // `present?` is rewritten to `!(...).strip.empty?` before this
+            // check. The result is a string when that call's argument is.
+            if method.as_str() == "!" {
+                return args.iter().any(redirect_expression_is_string);
+            }
+            if matches!(method.as_str(), "strip" | "empty?") {
+                return recv.as_ref().is_some_and(redirect_expression_is_string)
+                    || args.iter().any(redirect_expression_is_string);
+            }
+            matches!(
+                method.as_str(),
+                "query_string" | "path" | "fullpath" | "to_s" | "+" | "[]" | "present?"
+            )
+        }
         crate::expr::ExprNode::Seq { exprs } => exprs
             .last()
             .is_some_and(redirect_expression_is_string),
