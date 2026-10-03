@@ -144,6 +144,15 @@ end"#;
 }
 
 #[test]
+fn private_class_method_accepts_several_defined_class_methods() {
+    let source = "class Probe\n  def self.a; 1; end\n  def self.b; 2; end\n  def self.c; 3; end\n  private_class_method :a, :b, :c\n  public_class_method :b\nend\n";
+    let methods = methods(source, false);
+    assert_eq!(visibility(&methods, "a", MethodReceiver::Class), MethodVisibility::Private);
+    assert_eq!(visibility(&methods, "b", MethodReceiver::Class), MethodVisibility::Public);
+    assert_eq!(visibility(&methods, "c", MethodReceiver::Class), MethodVisibility::Private);
+}
+
+#[test]
 fn forward_inherited_dynamic_and_ambiguous_changes_stay_errors() {
     for body in [
         "private :later\n def later; 1; end",

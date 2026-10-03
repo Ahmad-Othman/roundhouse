@@ -248,13 +248,22 @@ impl Visibility {
                     inline = Some(visibility);
                 } else if let Some(args) = call.arguments() {
                     for arg in args.arguments().iter() {
+                        if arg.as_call_node().is_some_and(|call| call.receiver().is_none() && marker(&call)) {
+                            break;
+                        }
                         let Some(name) = symbol_or_string_value(&arg) else {
                             return Err(Self::unsupported(
                                 file,
                                 "visibility method names must be literal symbols or strings",
                             ));
                         };
-                        self.change(name, class_side || named_class, visibility, file)?;
+                        // `private_class_method :name` after `def self.name`.
+                        // The instance-side lookup misses that normal order.
+                        // A forward reference and an instance-only name still fail.
+                        let class_copy = named_class
+                            && !self.known.contains_key(&(false, name.clone()))
+                            && self.known.contains_key(&(true, name.clone()));
+                        self.change(name, class_side || named_class || class_copy, visibility, file)?;
                     }
                     continue;
                 } else {
