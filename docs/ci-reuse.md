@@ -18,6 +18,28 @@ including on failures when a report is available. Test results are never reused.
 The test profile keeps file/line backtraces with `line-tables-only` debug info;
 the independent dev-profile bench emission gate remains unchanged.
 
+Build, execution and debug-bench phases also retain `unit-resources`: five-second
+CSV samples of whole-runner CPU busy/I/O wait, available RAM and workspace
+filesystem space, plus per-phase JSON summaries and Cargo `deps`/`incremental`/
+`build` allocated sizes. Initial/final samples cover short commands too. Reports
+are outside the Cargo cache and uploaded on failure; commands and exit codes
+are preserved. Measurement/report I/O failures are best-effort warnings, never
+replacements for the command result. No cleanup runs while test binaries are
+still needed.
+
+These are resource measurements, not a performance gate. CPU percentages and
+available RAM include other runner processes and the OS; available RAM excludes
+reclaimable-cache pressure. Child CPU time is cumulative and may exceed wall
+time; child peak RSS is the largest single process, **not** concurrent tree RAM.
+Five-second samples can miss shorter spikes. To reproduce a Linux measurement:
+
+```bash
+python3 scripts/ci-resources.py --out /tmp/unit-resources/build -- \
+  cargo test --locked --all-targets --no-run --timings
+python3 scripts/ci-resources.py --out /tmp/unit-resources/tests -- \
+  cargo test --locked --all-targets
+```
+
 These are nine validation executions, plus three small orchestration jobs
 (`plan`, `compact-required`, `ci-summary`). Drafts select only fixture and
 unit validation. **`CI summary` is informational:** it reports missing,

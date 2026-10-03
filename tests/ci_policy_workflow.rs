@@ -10,18 +10,26 @@ fn unit_separates_build_timing_without_reducing_coverage() {
     let steps = unit["steps"].as_sequence().unwrap();
     let build = steps
         .iter()
-        .position(|step| {
-            step["run"].as_str() == Some("cargo test --locked --all-targets --no-run --timings")
-        })
+        .position(|step| step["name"].as_str() == Some("Build all test targets"))
         .expect("compile every target with timings");
     let run = steps
         .iter()
-        .position(|step| step["run"].as_str() == Some("cargo test --locked --all-targets"))
+        .position(|step| step["name"].as_str() == Some("Run all test targets"))
         .expect("execute every non-ignored test, not just compile it");
     assert!(build < run);
-    for index in [build, run] {
+    for (index, phase, command) in [
+        (
+            build,
+            "build",
+            "cargo test --locked --all-targets --no-run --timings",
+        ),
+        (run, "tests", "cargo test --locked --all-targets"),
+    ] {
         assert!(steps[index].get("if").is_none());
         assert!(steps[index].get("continue-on-error").is_none());
+        let body = steps[index]["run"].as_str().unwrap();
+        assert!(body.contains(&format!("--out \"$RUNNER_TEMP/unit-resources/{phase}\" --")));
+        assert!(body.trim_end().ends_with(command));
     }
     let timings = steps
         .iter()
@@ -41,6 +49,34 @@ fn unit_separates_build_timing_without_reducing_coverage() {
         .expect("retain the independent dev-profile stack-overflow gate");
     assert!(bench.get("if").is_none());
     assert!(bench.get("continue-on-error").is_none());
+    let body = bench["run"].as_str().unwrap();
+    assert!(body.contains("bash -euo pipefail -c"));
+    assert!(body.contains("typescript crystal rust python elixir go kotlin swift csharp"));
+    assert!(body.contains("cargo run --quiet --bin emit_preview -- --target"));
+    let resources = steps
+        .iter()
+        .find(|step| step["with"]["name"].as_str() == Some("unit-resources"))
+        .expect("retain phase samples even when a command fails");
+    assert_eq!(resources["if"].as_str(), Some("always()"));
+    assert_eq!(
+        resources["with"]["path"].as_str(),
+        Some("${{ runner.temp }}/unit-resources/")
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn resource_monitor_preserves_failures_and_metric_meanings() {
+    let result = std::process::Command::new("python3")
+        .args(["-B", "tests/ci_resources_test.py", "-v"])
+        .output()
+        .expect("CI helper tests require python3");
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
 }
 
 #[test]
