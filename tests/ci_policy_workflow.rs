@@ -26,10 +26,26 @@ fn unit_batches_all_targets_without_reducing_coverage() {
         .get("CARGO_PROFILE_TEST_SPLIT_DEBUGINFO")
         .is_none());
     let steps = unit["steps"].as_sequence().unwrap();
+    let gems = steps
+        .iter()
+        .position(|step| {
+            step["name"].as_str()
+                == Some("Install gems used by emitted Ruby and Campfire harness tests")
+        })
+        .expect("install sqlite3 and bcrypt before the unit batches");
+    let install = steps[gems]["run"].as_str().unwrap();
+    assert!(
+        install.contains("gem install sqlite3") && install.contains("bcrypt"),
+        "{install}"
+    );
     let tests = steps
         .iter()
         .position(|step| step["name"].as_str() == Some("Build and run all test targets in batches"))
         .expect("batch every lib/bin/integration target through Cargo");
+    assert!(
+        gems < tests,
+        "Campfire launcher regressions require bcrypt before the batches"
+    );
     assert!(steps[tests].get("if").is_none());
     assert!(steps[tests].get("continue-on-error").is_none());
     let body = steps[tests]["run"].as_str().unwrap();
