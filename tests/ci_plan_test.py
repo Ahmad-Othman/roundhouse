@@ -239,6 +239,7 @@ class Routing(unittest.TestCase):
             "scripts/ci-reuse.py",
             "tests/ci_archive_evidence_test.py",
             "tests/ci_policy_workflow.rs",
+            "tests/ci_fixture_workflow.rs",
         ]:
             with self.subTest(path=path):
                 self.assertEqual(ci.select([path])["smoke"], ci.TARGETS)

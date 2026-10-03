@@ -166,7 +166,8 @@ the same producer bytes, without later re-emission.
 Every cycle executes freshly; validation results are not cached. Spinel master
 is resolved once per run, and evidence records the compiler revision actually
 used. Its lanes remain advisory. Ordinary build caches and the conservative PR
-execution receipts described below are unchanged.
+execution receipts described below are unchanged. Full cycles also regenerate
+both Rails fixtures: the PR-only source snapshot cache is never restored here.
 
 Archive producers upload with `always()`, preserving any files already produced
 if a later producer step fails. The outcome report names the source SHA, run and
@@ -199,9 +200,38 @@ fanouts, **not** total repository concurrency or a guaranteed PR runner priority
 `scripts/ci-reuse.py` can reuse **executed, successful** checks from the same
 pull request. The allowlist is `store-check`, `writebook-inventory`, Rust archive
 smoke, SharedWorker browser smoke, and the Rust inflector framework suite.
-Unit tests, fixture generation, artifact producers, DOM comparisons, other
-selected toolchain lanes and all selected main-branch checks execute freshly.
+Unit tests, emitted-artifact producers, DOM comparisons, other selected
+toolchain lanes and all selected main-branch checks execute freshly.
 Routing changes the required coverage, not the execution-receipt trust rules.
+
+The SharedWorker browser and site jobs cache npm's download store through
+`setup-node`, keyed by their checked-in harness/asset lockfile and the
+TypeScript package-manifest recipe (`src/emit/typescript/package.rs`). This
+warms downloads for freshly emitted apps, not `node_modules`, browser binaries,
+builds or test results. Installation and builds still run, without offline
+resolution or a cache-hit skip; floating dependencies still resolve normally.
+Missing caches only cost downloads. Downstream receipts continue to fingerprint
+the actual installed modules and built output, not the npm cache key.
+
+### Fixture inputs
+
+Installed gems use an isolated `GEM_HOME`, keyed by observed runner image
+version/architecture, exact Ruby engine/version/platform and RubyGems/Bundler.
+Weekly fallback keys stay within that compatibility boundary. Fresh generation
+still checks for the current Rails release; gems are not shipped in the artifact.
+
+First-attempt PRs may restore packed blog/store source under an exact key combining
+`bin/rh`, generator/validation scripts, `ci.yml`, the same observed environment
+and UTC day, without fallback keys. This deliberately holds floating gem resolution
+within one day, not a claim of deterministic generation. Main, scheduled/manual
+runs and reruns always regenerate; full PR coverage alone does not disable reuse.
+Successful default-branch output can seed PR reads; PR writes remain PR-scoped.
+Missing/unavailable caches fall back to generation; corrupt source fails closed.
+
+`scripts/test-store` installs the frozen bundle and runs both guide tests on fresh
+and restored paths. Every run uploads its own artifact, excluding scratch/logs and
+Store storage but retaining the seeded Blog database. The source snapshot contains
+no compiled output or test receipt; downstream fingerprints remain unchanged.
 
 ## What must match
 
@@ -228,8 +258,10 @@ SHA-stamped WASM and its consumers are **not** eligible.
 
 Any shared compiler change invalidates both jobs. A change only to an unrelated
 Rust integration test can reuse Writebook. Store reuse will often miss because
-fresh Rails generation changes its actual contents; that is intentional, not a
-reason to pretend identical generator scripts produced identical inputs.
+fresh Rails generation changes its actual contents. A PR source-cache hit
+preserves actual source bytes (including migration names and generated
+credentials); receipt reuse still checks those bytes and the compiler inputs,
+never just the generator recipe.
 
 ## Downstream consumers
 
