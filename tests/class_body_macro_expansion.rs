@@ -589,6 +589,34 @@ end
 }
 
 #[test]
+fn a_namespaced_controller_include_is_the_module_the_store_searches() {
+    use roundhouse::ingest::survey;
+    let concern = "module WindowSettings\n  extend ActiveSupport::Concern\n  class_methods do\n    def configure_window(**opts)\n      @window_options = opts\n    end\n    def window_options\n      @window_options || {}\n    end\n  end\n  def current\n    @current\n  end\nend\n";
+    let controller = "module MarketData\n  class AnnualValuesController < BaseController\n    include WindowSettings\n    configure_window mode: :open\n  end\nend\n";
+    let tree = [
+        ("app/controllers/concerns/window_settings.rb", concern),
+        ("app/controllers/base_controller.rb", "class BaseController < ActionController::Base\nend\n"),
+        ("app/controllers/market_data/annual_values_controller.rb", controller),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+    .collect();
+    survey::activate();
+    let app = ingest_app_from_tree(tree).expect("namespaced controller");
+    let gaps = survey::drain();
+    let controller = app.controllers.iter().find(|c| c.name.0.as_str().contains("Annual")).expect("controller");
+    let includes: Vec<_> = controller.body.iter().filter_map(|item| match item {
+        ControllerBodyItem::Unknown { expr, .. } => Some(format!("{:?}", expr.node).chars().take(180).collect::<String>()),
+        _ => None,
+    }).collect();
+    let methods: Vec<_> = app.library_classes.iter().map(|lc| {
+        format!("{} {:?}", lc.name.0.as_str(), lc.methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>())
+    }).collect();
+    let stored = controller.body.iter().any(|item| matches!(item, ControllerBodyItem::ClassIvarInit { .. }));
+    assert!(stored, "not stored\nincludes={includes:?}\nlibrary={methods:?}\ngaps={gaps:?}\nname={}", controller.name.0.as_str());
+}
+
+#[test]
 fn a_concern_with_an_instance_method_still_stores_its_writer() {
     use roundhouse::ingest::survey;
     let concern = r#"
