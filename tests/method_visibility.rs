@@ -157,7 +157,22 @@ fn private_class_method_follows_module_function() {
             MethodVisibility::Private,
             "{source}"
         );
+        if source.contains("def other") {
+            assert_eq!(
+                visibility(methods, "other", MethodReceiver::Class),
+                MethodVisibility::Private,
+                "{source}"
+            );
+        }
     }
+    let restored = "module DerivedBulkWrite\n  module_function\n  def materialize_exact\n    1\n  end\n  private_class_method :materialize_exact\n  public_class_method :materialize_exact\nend\n";
+    let restored_methods = &ingest_library_classes(restored.as_bytes(), "thing.rb")
+        .expect("public_class_method")[0]
+        .methods;
+    assert_eq!(
+        visibility(restored_methods, "materialize_exact", MethodReceiver::Class),
+        MethodVisibility::Public
+    );
     let undefined = "module DerivedBulkWrite\n  module_function\n  def materialize_exact\n    1\n  end\n  private_class_method :missing\nend\n";
     assert!(
         ingest_library_classes(undefined.as_bytes(), "thing.rb").is_err(),
