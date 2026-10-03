@@ -65,14 +65,25 @@ end
     assert!(flat.iter().any(|r| r.path == "/scan"), "{flat:?}");
 }
 
-/// The ledger line #82 added is for the redirects that STILL cannot be
-/// served: a block redirect has no literal to send anyone to.
+/// A block that returns a string is served. A block whose value is not
+/// a string stays the survey gap #82 recorded.
 #[test]
-fn a_block_redirect_records_a_survey_line() {
+fn a_string_block_redirect_is_served_and_a_non_string_stays_a_gap() {
+    let table = ingest_routes(
+        br#"Rails.application.routes.draw do
+  get "/old", to: redirect { |params, request| "/scan" }
+end
+"#,
+        "config/routes.rb",
+    )
+    .expect("ingest routes");
+    assert_eq!(table.redirects.len(), 1, "{:?}", table.redirects);
+    assert!(table.redirects[0].location.contains("/scan"), "{:?}", table.redirects);
+
     roundhouse::ingest::survey::activate();
     ingest_routes(
         br#"Rails.application.routes.draw do
-  get "/old", to: redirect { |params, request| "/scan" }
+  get "/old", to: redirect { |params, request| 7 }
 end
 "#,
         "config/routes.rb",
