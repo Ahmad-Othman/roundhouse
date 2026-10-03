@@ -140,16 +140,10 @@ def version_of(output, re = /(\d+\.\d+(?:\.\d+)?)/)
   m ? m[1] : nil
 end
 
-def version_at_least?(found, minimum)
-  Gem::Version.new(found) >= Gem::Version.new(minimum)
+def requirement_met?(found, minimum)
+  found && (minimum.nil? || Gem::Version.new(found) >= Gem::Version.new(minimum))
 rescue ArgumentError
   false
-end
-
-def requirement_met?(found, minimum)
-  return false unless found
-
-  minimum.nil? || version_at_least?(found, minimum)
 end
 
 # Highest installed `rails` gem version satisfying a requirement string
@@ -207,7 +201,7 @@ def cmd_doctor(argv)
   puts ''
   DOCTOR_CHECKS.each do |c|
     v = versions[c[:key]]
-    old = v && c[:min] && !version_at_least?(v, c[:min])
+    old = v && !requirement_met?(v, c[:min])
     mark = v && !old ? "\u2713" : "\u2717"
     val = if v.nil?
             'not found'

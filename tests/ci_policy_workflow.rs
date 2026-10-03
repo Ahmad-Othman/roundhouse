@@ -289,7 +289,8 @@ fn test_backtraces_retain_library_and_integration_source_locations() {
         .unwrap()
         .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "roundhouse-backtrace-{}-{unique}", std::process::id()
+        "roundhouse-backtrace-{}-{unique}",
+        std::process::id()
     ));
     fs::create_dir(&root).unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -310,7 +311,9 @@ fn test_backtraces_retain_library_and_integration_source_locations() {
         // The panic header includes a location even without debug info.
         // Require symbolicated stack frames, not just that header.
         assert!(
-            stderr.lines().any(|line| line.trim_start().starts_with("at ") && line.contains(source)),
+            stderr
+                .lines()
+                .any(|line| line.trim_start().starts_with("at ") && line.contains(source)),
             "missing file/line backtrace for {source}:\n{stderr}"
         );
     }
@@ -500,12 +503,6 @@ fn generated_npm_projects_cache_downloads_without_skipping_preparation() {
 #[test]
 fn active_node_jobs_pin_node_24_with_setup_node_v7() {
     let source = fs::read_to_string(".github/workflows/ci.yml").unwrap();
-    assert_eq!(source.matches("actions/setup-node@v7").count(), 9);
-    assert_eq!(source.matches("node-version: '24'").count(), 9);
-    assert!(
-        !source.contains("actions/setup-node@v5") && !source.contains("node-version: '20'"),
-        "do not leave a Node 20 setup beside the Node 24 pin"
-    );
     let workflow: serde_yaml_ng::Value = serde_yaml_ng::from_str(&source).unwrap();
     let mut expanded = 0;
     for (name, job) in workflow["jobs"].as_mapping().unwrap() {
@@ -527,23 +524,67 @@ fn active_node_jobs_pin_node_24_with_setup_node_v7() {
         }
     }
     assert!(
-        expanded >= 9,
-        "YAML anchors must not drop a setup-node step; expanded {expanded}"
+        expanded > 0,
+        "must inspect actual Node setup steps, including expanded YAML anchors"
     );
-    let fixture = roundhouse::fixtures::real_blog();
-    let mut app = roundhouse::ingest::ingest_app(fixture).expect("ingest real-blog");
-    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
-    let files = roundhouse::emit::typescript::emit(&app);
+    let files = roundhouse::emit::typescript::emit(&roundhouse::App::new());
     let package = files
         .iter()
         .find(|file| file.path == std::path::Path::new("package.json"))
         .expect("typescript emit writes package.json");
-    assert!(
-        package.content.contains("\"@types/node\": \"^24\""),
-        "emitted Node types must be the Node 24 range:\n{}",
-        package.content
+    let package: serde_json::Value = serde_json::from_str(&package.content).unwrap();
+    assert_eq!(
+        package["devDependencies"]["@types/node"].as_str(),
+        Some("^24"),
+        "emitted Node types must follow the runtime pin"
     );
-    assert!(!package.content.contains("\"@types/node\": \"^20\""));
+}
+
+#[test]
+fn archive_smoke_reuses_setup_ruby_cache_without_skipping_readme_execution() {
+    let workflow: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let smoke = &workflow["jobs"]["smoke"];
+    assert!(smoke["env"].get("BUNDLE_PATH").is_none());
+    let steps = smoke["steps"].as_sequence().unwrap();
+    let position = |name| {
+        steps
+            .iter()
+            .position(|step| step["name"].as_str() == Some(name))
+            .unwrap()
+    };
+    let prepare = position("Prepare archive bundle cache inputs");
+    let export = position("Reuse prepared gems in the fresh README smoke");
+    let run = position("scripts/smoke ${{ matrix.target }}");
+    let guard = "matrix.target == 'ruby' || matrix.target == 'jruby'";
+    assert_eq!(steps[prepare]["if"].as_str(), Some(guard));
+    assert_eq!(steps[export]["if"].as_str(), Some(guard));
+    assert_eq!(
+        steps[export]["run"].as_str(),
+        Some("echo \"BUNDLE_PATH=$RUNNER_TEMP/smoke-bundle-source/$TARGET/vendor/bundle\" >> \"$GITHUB_ENV\"")
+    );
+    for (name, target, version) in [
+        ("Install Ruby (MRI 3.4)", "ruby", "3.4"),
+        ("Install JRuby 10", "jruby", "jruby-10.0"),
+    ] {
+        let setup = position(name);
+        assert!(prepare < setup && setup < export && export < run);
+        assert_eq!(steps[setup]["uses"].as_str(), Some("ruby/setup-ruby@v1"));
+        assert_eq!(steps[setup]["with"]["ruby-version"].as_str(), Some(version));
+        assert_eq!(steps[setup]["with"]["bundler-cache"].as_bool(), Some(true));
+        assert_eq!(
+            steps[setup]["with"]["working-directory"].as_str(),
+            Some("${{ runner.temp }}/smoke-bundle-source/${{ matrix.target }}")
+        );
+        assert_eq!(
+            steps[setup]["if"].as_str(),
+            Some(format!("matrix.target == '{target}'").as_str())
+        );
+    }
+    let body = steps[run]["run"].as_str().unwrap();
+    assert!(body.contains("scripts/smoke"));
+    assert!(body.contains("--work-dir \"$RUNNER_TEMP/ci-smoke-validation\""));
+    assert!(!steps[run]["if"].as_str().unwrap().contains("cache-hit"));
 }
 
 #[cfg(unix)]

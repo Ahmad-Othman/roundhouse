@@ -2029,7 +2029,7 @@ jobs:
           python-version: '3.14'
       - name: Install uv (Python)
         if: matrix.target == 'python'
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v10.2.0
       # setup-ruby LAST — see the job comment (MRI 3.4 must win PATH).
       - uses: ruby/setup-ruby@v1
         with:
@@ -2371,17 +2371,38 @@ jobs:
           python-version: '3.14'
       - name: Install uv (Python)
         if: matrix.target == 'python'
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v10.2.0
+      # Use setup-ruby's existing compiled-gem cache and identity, not a second
+      # download-only cache. Smoke still extracts afresh and runs bundle install.
+      - name: Prepare archive bundle cache inputs
+        if: matrix.target == 'ruby' || matrix.target == 'jruby'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/smoke-bundle-source"
+          tar -xzf "browse/$TARGET.tgz" -C "$RUNNER_TEMP/smoke-bundle-source"
+          # JRuby deliberately has no MRI lock; setup-ruby resolves its own.
+          test -f "$RUNNER_TEMP/smoke-bundle-source/$TARGET/Gemfile"
       - name: Install Ruby (MRI 3.4)
         if: matrix.target == 'ruby'
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ${{ runner.temp }}/smoke-bundle-source/${{ matrix.target }}
       - name: Install JRuby 10
         if: matrix.target == 'jruby'
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: 'jruby-10.0'
+          bundler-cache: true
+          working-directory: ${{ runner.temp }}/smoke-bundle-source/${{ matrix.target }}
+      - name: Reuse prepared gems in the fresh README smoke
+        if: matrix.target == 'ruby' || matrix.target == 'jruby'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: echo "BUNDLE_PATH=$RUNNER_TEMP/smoke-bundle-source/$TARGET/vendor/bundle" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
