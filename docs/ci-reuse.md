@@ -26,6 +26,23 @@ must include sidecars and object files, not only executable sizes. This override
 does not change local platform defaults, dev or release profiles. The policy
 suite checks real library and integration-test file/line backtraces.
 
+### Current-run debug compiler for Campfire (#317)
+
+After its own tests and debug-profile bench emissions, `unit` stages
+`target/debug/roundhouse` (profile.dev, same shape as the harness scripts'
+historical `cargo run`) with an `identity.txt` that records `source_sha`,
+`profile=debug`, host/toolchain and `roundhouse --version`. The artifact
+`roundhouse-debug-bin` is current-run only.
+
+`campfire-conformance` and `campfire-compare` (including the model/database
+differential in that job) download it, require a non-empty producer
+`artifact-id`, set `ROUNDHOUSE_BIN`, and emit through
+`scripts/lib/roundhouse-bin.sh`. They do not install Rust and must not
+silently rebuild via `cargo run`. A missing or non-executable
+`ROUNDHOUSE_BIN` fails the lane. Local development keeps the cargo fallback
+when the variable is unset. Release-profile jobs, Spinel toolchain builds and
+cross-run binary reuse are out of scope.
+
 Build, execution and debug-bench phases also retain `unit-resources`: five-second
 CSV samples of whole-runner CPU busy/I/O wait, available RAM and workspace
 filesystem space, plus per-phase JSON summaries and Cargo `deps`/`incremental`/

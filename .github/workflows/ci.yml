@@ -458,6 +458,10 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Current-run debug compiler for compatible Campfire consumers (#317).
+    # Empty artifact-id means the consumers must not run as selected greens.
+    outputs:
+      roundhouse-bin-artifact-id: ${{ steps.roundhouse-bin.outputs.artifact-id }}
     env:
       # Share first-party split DWARF instead of copying it into every test
       # executable. Keep sidecars until all tests finish; code stays unoptimized.
@@ -543,6 +547,38 @@ jobs:
           name: unit-resources
           path: ${{ runner.temp }}/unit-resources/
           if-no-files-found: ignore
+      # Share the Debug-profile compiler with Campfire conformance and
+      # comparison/db-differential (#317). Same profile as cargo test and
+      # the harness scripts' historical `cargo run` (not release). The
+      # binary alone is not enough: consumers must set ROUNDHOUSE_BIN so
+      # scripts/lib/roundhouse-bin.sh execs it instead of rebuilding.
+      # cargo test builds integration harnesses under profile.test; the
+      # `roundhouse` bin itself is profile.dev — rebuild is a cache hit
+      # after the bench emit step and guarantees the staged path exists.
+      - name: Stage current-run debug roundhouse binary
+        run: |
+          set -euo pipefail
+          cargo build --locked --bin roundhouse
+          test -x target/debug/roundhouse
+          mkdir -p roundhouse-debug-bin
+          cp -L target/debug/roundhouse roundhouse-debug-bin/roundhouse
+          chmod +x roundhouse-debug-bin/roundhouse
+          {
+            echo "source_sha=${GITHUB_SHA}"
+            echo "profile=debug"
+            echo "binary=roundhouse"
+            echo "producer_job=unit"
+            echo "rustc_host=$(rustc -vV | awk '/^host:/{print $2}')"
+            echo "rustc_release=$(rustc -vV | awk '/^release:/{print $2}')"
+            ./roundhouse-debug-bin/roundhouse --version | sed 's/^/version=/'
+          } | tee roundhouse-debug-bin/identity.txt
+      - name: Upload current-run debug roundhouse binary
+        id: roundhouse-bin
+        uses: actions/upload-artifact@v7
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+          retention-days: 1
 
   # -------------------------------------------------------------------
   # One job per target language. Each generates a project from the
@@ -864,7 +900,8 @@ jobs:
   #
   # Cheap, unlike its lobsters sibling: `campfire-suite` runs the EMIT's
   # own tests, so it needs no Rails bundle and no mise-pinned ruby — just
-  # cargo, ruby, the sqlite3 gem, and the sqlite3 CLI.
+  # the shared debug roundhouse binary (#317), ruby, the sqlite3 gem, and
+  # the sqlite3 CLI.
   # campfire-compare: REAL Rails campfire vs the CRuby-emit lane — the
   # only job that boots Rails campfire. Both lanes start from the same
   # seeded rows and take the same cable walk (sign in through the real
@@ -880,7 +917,9 @@ jobs:
   # is tracked unpinned.
   campfire-compare:
     needs: [unit, plan]
-    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-compare') }}
+    # Require the unit producer's debug binary artifact id so a missing
+    # upload cannot skip into a green compact gate (#317).
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-compare') && needs.unit.outputs.roundhouse-bin-artifact-id != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -893,8 +932,25 @@ jobs:
       BUNDLE_PATH: vendor/bundle
     steps:
       - uses: actions/checkout@v5
-      - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      # No setup-rust: emission uses the unit job's current-run debug binary.
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+      - name: Stage shared debug roundhouse binary
+        run: |
+          set -euo pipefail
+          chmod +x roundhouse-debug-bin/roundhouse
+          test -x roundhouse-debug-bin/roundhouse
+          test -f roundhouse-debug-bin/identity.txt
+          echo "=== producer identity ==="
+          cat roundhouse-debug-bin/identity.txt
+          echo "=== consumer probe ==="
+          ./roundhouse-debug-bin/roundhouse --version
+          grep -q "source_sha=${GITHUB_SHA}" roundhouse-debug-bin/identity.txt
+          grep -q 'profile=debug' roundhouse-debug-bin/identity.txt
+          echo "ROUNDHOUSE_BIN=${GITHUB_WORKSPACE}/roundhouse-debug-bin/roundhouse" >> "$GITHUB_ENV"
+          echo "ROUNDHOUSE_BIN_TRACE=1" >> "$GITHUB_ENV"
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
@@ -1232,13 +1288,32 @@ jobs:
 
   campfire-conformance:
     needs: [unit, plan]
-    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-conformance') }}
+    # Require the unit producer's debug binary artifact id so a missing
+    # upload cannot skip into a green compact gate (#317).
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-conformance') && needs.unit.outputs.roundhouse-bin-artifact-id != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
-      - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      # No setup-rust: strict-emit and campfire-suite use the unit debug binary.
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+      - name: Stage shared debug roundhouse binary
+        run: |
+          set -euo pipefail
+          chmod +x roundhouse-debug-bin/roundhouse
+          test -x roundhouse-debug-bin/roundhouse
+          test -f roundhouse-debug-bin/identity.txt
+          echo "=== producer identity ==="
+          cat roundhouse-debug-bin/identity.txt
+          echo "=== consumer probe ==="
+          ./roundhouse-debug-bin/roundhouse --version
+          grep -q "source_sha=${GITHUB_SHA}" roundhouse-debug-bin/identity.txt
+          grep -q 'profile=debug' roundhouse-debug-bin/identity.txt
+          echo "ROUNDHOUSE_BIN=${GITHUB_WORKSPACE}/roundhouse-debug-bin/roundhouse" >> "$GITHUB_ENV"
+          echo "ROUNDHOUSE_BIN_TRACE=1" >> "$GITHUB_ENV"
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
@@ -1370,14 +1445,17 @@ jobs:
       # (rubys/roundhouse#71). This step is the run the ledger's
       # "zero errors" invariant is actually about.
       #
-      # Same profile as the suite's own `cargo run`, so the build is
-      # shared rather than paid twice.
+      # Same debug binary as the suite (ROUNDHOUSE_BIN from unit), so the
+      # compiler is shared rather than paid twice (#317).
       - name: Enforce the strict-emit ceiling
         env:
           CEILING_ERRORS: 0
         run: |
           set -uo pipefail
-          cargo run --quiet --bin roundhouse -- \
+          test -n "${ROUNDHOUSE_BIN:-}"
+          test -x "$ROUNDHOUSE_BIN"
+          # Never cargo run: prove the producer binary is the one that emits.
+          "$ROUNDHOUSE_BIN" \
             --target spinel /tmp/campfire -o /tmp/campfire-spinel \
             > /tmp/campfire-strict.log 2>&1
           errors=$(grep -c 'error\[' /tmp/campfire-strict.log || true)

@@ -68,6 +68,130 @@ fn unit_separates_build_timing_without_reducing_coverage() {
         resources["with"]["path"].as_str(),
         Some("${{ runner.temp }}/unit-resources/")
     );
+    // #317: current-run debug compiler for Campfire consumers.
+    assert_eq!(
+        unit["outputs"]["roundhouse-bin-artifact-id"].as_str(),
+        Some("${{ steps.roundhouse-bin.outputs.artifact-id }}")
+    );
+    let stage = steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Stage current-run debug roundhouse binary"))
+        .expect("stage the debug bin after tests/bench emission");
+    let stage_body = stage["run"].as_str().unwrap();
+    assert!(stage_body.contains("cargo build --locked --bin roundhouse"));
+    assert!(stage_body.contains("roundhouse-debug-bin/identity.txt"));
+    assert!(stage_body.contains("profile=debug"));
+    assert!(stage_body.contains("source_sha=${GITHUB_SHA}"));
+    let upload = steps
+        .iter()
+        .find(|step| step["id"].as_str() == Some("roundhouse-bin"))
+        .expect("upload the staged debug binary");
+    assert!(upload["uses"]
+        .as_str()
+        .unwrap()
+        .starts_with("actions/upload-artifact@"));
+    assert_eq!(
+        upload["with"]["name"].as_str(),
+        Some("roundhouse-debug-bin")
+    );
+    assert_eq!(upload["with"]["retention-days"].as_u64(), Some(1));
+    let resources_pos = steps
+        .iter()
+        .position(|step| step["with"]["name"].as_str() == Some("unit-resources"))
+        .unwrap();
+    let stage_pos = steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Stage current-run debug roundhouse binary"))
+        .unwrap();
+    let upload_pos = steps
+        .iter()
+        .position(|step| step["id"].as_str() == Some("roundhouse-bin"))
+        .unwrap();
+    assert!(resources_pos < stage_pos && stage_pos < upload_pos);
+}
+
+#[test]
+fn campfire_consumers_require_unit_debug_binary_and_do_not_rebuild() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    for job_name in ["campfire-compare", "campfire-conformance"] {
+        let job = &ci["jobs"][job_name];
+        assert_eq!(job["needs"][0].as_str(), Some("unit"));
+        assert_eq!(job["needs"][1].as_str(), Some("plan"));
+        let expected_if = format!(
+            "${{{{ contains(fromJSON(needs.plan.outputs.jobs), '{job_name}') && needs.unit.outputs.roundhouse-bin-artifact-id != '' }}}}"
+        );
+        assert_eq!(
+            job["if"].as_str(),
+            Some(expected_if.as_str()),
+            "{job_name}"
+        );
+        let steps = job["steps"].as_sequence().unwrap();
+        assert!(
+            steps.iter().all(|step| {
+                step["uses"]
+                    .as_str()
+                    .map(|u| !u.contains("setup-rust") && !u.contains("rust-cache"))
+                    .unwrap_or(true)
+            }),
+            "{job_name} must not install Rust; it consumes the unit binary"
+        );
+        let download = steps
+            .iter()
+            .find(|step| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|u| u.starts_with("actions/download-artifact@"))
+                    && step["with"]["name"].as_str() == Some("roundhouse-debug-bin")
+            })
+            .unwrap_or_else(|| panic!("{job_name}: download shared binary"));
+        assert_eq!(
+            download["with"]["path"].as_str(),
+            Some("roundhouse-debug-bin")
+        );
+        let stage = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Stage shared debug roundhouse binary"))
+            .unwrap_or_else(|| panic!("{job_name}: stage shared binary"));
+        let body = stage["run"].as_str().unwrap();
+        assert!(body.contains("chmod +x roundhouse-debug-bin/roundhouse"));
+        assert!(body.contains("ROUNDHOUSE_BIN=${GITHUB_WORKSPACE}/roundhouse-debug-bin/roundhouse"));
+        assert!(body.contains("ROUNDHOUSE_BIN_TRACE=1"));
+        assert!(body.contains("source_sha=${GITHUB_SHA}"));
+        assert!(body.contains("profile=debug"));
+        // No cargo in the job body outside comments.
+        let runs: Vec<_> = steps
+            .iter()
+            .filter_map(|step| step["run"].as_str())
+            .collect();
+        for run in &runs {
+            for line in run.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with('#') {
+                    continue;
+                }
+                assert!(
+                    !trimmed.contains("cargo run") && !trimmed.contains("cargo build"),
+                    "{job_name} must not rebuild roundhouse: {trimmed}"
+                );
+            }
+        }
+    }
+
+    // Conformance strict-emit must exec ROUNDHOUSE_BIN, not cargo.
+    let conf = &ci["jobs"]["campfire-conformance"];
+    let strict = conf["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Enforce the strict-emit ceiling"))
+        .expect("strict-emit ceiling");
+    let strict_run = strict["run"].as_str().unwrap();
+    assert!(strict_run.contains("test -x \"$ROUNDHOUSE_BIN\""));
+    assert!(strict_run.contains("\"$ROUNDHOUSE_BIN\""));
+    assert!(!strict_run
+        .lines()
+        .any(|l| !l.trim().starts_with('#') && l.contains("cargo run")));
 }
 
 #[test]

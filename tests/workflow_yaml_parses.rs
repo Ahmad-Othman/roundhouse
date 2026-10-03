@@ -501,6 +501,116 @@ fn campfire_comparisons_require_an_uploaded_binary_and_report_blocking() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn unit_debug_roundhouse_reaches_campfire_consumers_via_roundhouse_bin() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let workflow: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let unit = &workflow["jobs"]["unit"];
+    assert_eq!(
+        unit["outputs"]["roundhouse-bin-artifact-id"].as_str(),
+        Some("${{ steps.roundhouse-bin.outputs.artifact-id }}")
+    );
+    let upload = unit["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"].as_str() == Some("roundhouse-bin"))
+        .expect("unit uploads the debug binary");
+    assert_eq!(
+        upload["with"]["name"].as_str(),
+        Some("roundhouse-debug-bin")
+    );
+
+    // scripts/lib/roundhouse-bin.sh: with ROUNDHOUSE_BIN set, never cargo.
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "roundhouse-bin-helper-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let fake = root.join("fake-roundhouse");
+    fs::write(
+        &fake,
+        "#!/bin/bash\necho \"fake-roundhouse:$*\" >&2\necho fake-ok\n",
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&fake).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&fake, perms).unwrap();
+
+    let helper = "scripts/lib/roundhouse-bin.sh";
+    let script = format!(
+        r#"
+set -euo pipefail
+REPO_ROOT="{repo}"
+. "{helper}"
+ROUNDHOUSE_BIN="{fake}" ROUNDHOUSE_BIN_TRACE=1 roundhouse_run --target ruby /tmp/app -o /tmp/out
+"#,
+        repo = std::env::current_dir().unwrap().display(),
+        helper = std::env::current_dir().unwrap().join(helper).display(),
+        fake = fake.display(),
+    );
+    let output = Command::new("bash")
+        .args(["-euo", "pipefail", "-c", &script])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status={:?} stdout={stdout} stderr={stderr}",
+        output.status
+    );
+    assert!(
+        stdout.contains("fake-ok"),
+        "stdout must come from the staged binary: {stdout}"
+    );
+    assert!(
+        stderr.contains("roundhouse-bin: exec") && stderr.contains("fake-roundhouse"),
+        "trace must name the staged binary: {stderr}"
+    );
+    assert!(
+        !stderr.contains("cargo run"),
+        "must not fall back to cargo: {stderr}"
+    );
+
+    // Missing ROUNDHOUSE_BIN path must fail closed, not cargo-run.
+    let missing = root.join("missing-roundhouse");
+    let fail_script = format!(
+        r#"
+set -euo pipefail
+REPO_ROOT="{repo}"
+. "{helper}"
+ROUNDHOUSE_BIN="{missing}" roundhouse_run --version
+"#,
+        repo = std::env::current_dir().unwrap().display(),
+        helper = std::env::current_dir().unwrap().join(helper).display(),
+        missing = missing.display(),
+    );
+    let failed = Command::new("bash")
+        .args(["-c", &fail_script])
+        .output()
+        .unwrap();
+    assert!(
+        !failed.status.success(),
+        "missing binary must not succeed"
+    );
+    let err = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        err.contains("ROUNDHOUSE_BIN is not an executable file"),
+        "fail-closed message: {err}"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn every_workflow_file_parses_as_yaml() {
     let dir = Path::new(".github/workflows");
