@@ -1,3 +1,67 @@
+# Snapshot cleanup errors must not bypass reader cleanup or replace the
+# request's exception. The failed COMMIT still gets a ROLLBACK.
+[false, true].each do |request_failed|
+  conn = transient = original_execute = nil
+  snapshot_error = RuntimeError.new("injected snapshot COMMIT failure")
+  request_error = RuntimeError.new("request failed inside snapshot")
+  begin
+    Db.with_connection do
+      conn = Db.current_dbh
+      original_execute = conn.method(:execute)
+      conn.define_singleton_method(:execute) do |sql, *args|
+        raise snapshot_error if sql == "COMMIT"
+        original_execute.call(sql, *args)
+      end
+      Db.read_snapshot_begin
+      outer = Db.prepare("SELECT 1 AS snapshot_cleanup_ownership")
+      inner = Db.prepare("SELECT 1 AS snapshot_cleanup_ownership")
+      transient = inner[:stmt]
+      Db.step?(outer)
+      Db.step?(inner)
+      raise request_error if request_failed
+    end
+    raise "snapshot cleanup failure was swallowed"
+  rescue RuntimeError => e
+    expected = request_failed ? request_error : snapshot_error
+    raise "snapshot cleanup replaced the exception" unless e.equal?(expected)
+  ensure
+    conn.define_singleton_method(:execute, original_execute) if original_execute
+  end
+  raise "snapshot cleanup retained readers" unless Db.open_statements(conn).empty?
+  raise "snapshot cleanup retained its sibling" unless transient.closed?
+  raise "snapshot cleanup retained its transaction" if conn.transaction_active?
+  raise "snapshot cleanup retained its lease" if Db.in_lease?
+  raise "snapshot cleanup lost its usable connection" unless Db.instance_variable_get(:@pool).free.include?(conn)
+end
+puts "runtime: snapshot failure drains readers and preserves exception identity passed"
+
+# A failed rollback releases the permit, drains readers and quarantines
+# the connection while its transaction is still active.
+conn = original_execute = nil
+request_error = RuntimeError.new("request failed before rollback")
+begin
+  Db.with_connection do
+    conn = Db.current_dbh
+    original_execute = conn.method(:execute)
+    conn.define_singleton_method(:execute) do |sql, *args|
+      raise "injected ROLLBACK failure" if sql == "ROLLBACK"
+      original_execute.call(sql, *args)
+    end
+    Db.exec("BEGIN")
+    Db.prepare("SELECT 1 AS rollback_cleanup_ownership")
+    raise request_error
+  end
+rescue RuntimeError => e
+  raise "rollback cleanup replaced the request exception" unless e.equal?(request_error)
+ensure
+  conn.define_singleton_method(:execute, original_execute) if original_execute
+end
+raise "rollback cleanup retained readers" unless Db.open_statements(conn).empty?
+raise "rollback cleanup retained the permit" if Db.permit_owned?
+raise "rollback failure returned its connection" if Db.instance_variable_get(:@pool).free.include?(conn)
+raise "rollback failure lost quarantine" unless Db.instance_variable_get(:@quarantined).include?(conn)
+puts "runtime: rollback failure drains readers and quarantines the connection passed"
+
 # Gem-level lifecycle observations complement the cross-runtime row checks.
 Db.with_connection do
   outer = Db.prepare("SELECT ? AS transient_ownership")
@@ -263,11 +327,43 @@ module CrubyCleanupRegressions
     stuck.define_singleton_method(:close, original_close) if original_close
     Db.release_open_statements(owner) if owner
   end
+
+  def self.original_driver_error_case(operation)
+    Db.with_connection do
+      sql = operation == :step ? "SELECT abs(-9223372036854775808)" : "SELECT ? AS bind_error_identity"
+      stmt = Db.prepare(sql)
+      raw = stmt[:stmt]
+      driver_name = operation == :step ? :step : :bind_param
+      driver_call = raw.method(driver_name)
+      original_error = nil
+      raw.define_singleton_method(driver_name) do |*args|
+        driver_call.call(*args)
+      rescue SQLite3::Exception => e
+        original_error = e
+        raise
+      end
+      raw.define_singleton_method(:reset!) { raise "cleanup must not replace the driver error" }
+      error = begin
+        operation == :step ? Db.step?(stmt) : Db.bind_int(stmt, 2, 73)
+        nil
+      rescue StandardError => e
+        e
+      end
+      expected_class = operation == :step ? SQLite3::SQLException : SQLite3::RangeException
+      check("#{operation}: preserve the driver exception class", error.instance_of?(expected_class))
+      check("#{operation}: preserve the driver exception object", error.equal?(original_error))
+      check("#{operation}: cleanup closes the failed statement", raw.closed?)
+      check("#{operation}: cleanup releases ownership", stmt[:stmt].nil?)
+    end
+    puts "runtime: #{operation} preserves the original driver exception passed"
+  end
 end
 
 CrubyCleanupRegressions.replacement_failure_case(false)
 CrubyCleanupRegressions.replacement_failure_case(true)
-puts "runtime: #{CrubyCleanupRegressions.instance_variable_get(:@checks)} replacement assertions passed"
+CrubyCleanupRegressions.original_driver_error_case(:step)
+CrubyCleanupRegressions.original_driver_error_case(:bind)
+puts "runtime: #{CrubyCleanupRegressions.instance_variable_get(:@checks)} replacement and exception assertions passed"
 
 # The unleased boot/script path also owns its unfinished statements at close.
 outer = Db.prepare("SELECT ? AS shutdown_ownership")
