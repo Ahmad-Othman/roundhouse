@@ -188,6 +188,88 @@ fn campfire_docker_recipe_avoids_a_frontend_pull_and_ships_executable_boot() {
 }
 
 #[test]
+fn campfire_docker_smoke_caches_apt_for_eight_hours_and_always_builds() {
+    let workflow: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let job = &workflow["jobs"]["smoke-campfire-docker"];
+    let steps = job["steps"].as_sequence().unwrap();
+    let step = |name: &str| {
+        steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("missing step {name}"))
+    };
+
+    let window = step("Campfire Docker apt cache window");
+    assert!(window["run"]
+        .as_str()
+        .unwrap()
+        .contains("/ 28800"));
+    assert_eq!(window["id"].as_str(), Some("apt-window"));
+
+    let restore = step("Restore Campfire Docker apt layers");
+    assert_eq!(restore["id"].as_str(), Some("docker-cache"));
+    assert_eq!(restore["continue-on-error"].as_bool(), Some(true));
+    assert_eq!(
+        restore["uses"].as_str(),
+        Some("actions/cache/restore@v4")
+    );
+    assert_eq!(
+        restore["with"]["path"].as_str(),
+        Some("${{ env.CAMPFIRE_DOCKER_CACHE }}")
+    );
+    let restore_key = restore["with"]["key"].as_str().unwrap();
+    assert!(restore_key.contains("campfire-docker-apt-"));
+    assert!(restore_key.contains("steps.apt-window.outputs.bucket"));
+    assert!(restore["with"]["restore-keys"]
+        .as_str()
+        .unwrap()
+        .contains("campfire-docker-apt-"));
+
+    let smoke = step("Build and run the image");
+    let script = smoke["run"].as_str().unwrap();
+    assert!(
+        script.contains(r#"docker build -t campfire "${cache_args[@]}" ."#),
+        "CI must still run docker build -t campfire (README install)"
+    );
+    assert!(script.contains("--cache-from"));
+    assert!(script.contains("--cache-to"));
+    assert!(script.contains("mode=max"));
+    assert!(
+        script.contains("GET /first_run") && script.contains("GET /account/logo"),
+        "HTTP checks must always run"
+    );
+    assert!(
+        !script.contains("sccache") && !script.contains("CCACHE"),
+        "do not hide the pack compile behind a compiler cache"
+    );
+
+    let save = step("Save Campfire Docker apt layers");
+    assert_eq!(save["continue-on-error"].as_bool(), Some(true));
+    assert_eq!(save["uses"].as_str(), Some("actions/cache/save@v4"));
+    assert_eq!(
+        save["if"].as_str(),
+        Some("steps.smoke.outcome == 'success' && steps.docker-cache.outputs.cache-hit != 'true'")
+    );
+    assert_eq!(
+        save["with"]["key"].as_str(),
+        Some(restore_key)
+    );
+
+    for step in steps {
+        let uses = step["uses"].as_str().unwrap_or("");
+        assert!(
+            !uses.contains("setup-buildx") && !uses.contains("build-push-action"),
+            "plain docker build + local cache; no buildx GHA backend"
+        );
+    }
+
+    let policy = fs::read_to_string("docs/ci-reuse.md").unwrap();
+    assert!(policy.contains("eight-hour"));
+    assert!(policy.contains("Do not cache the make"));
+}
+
+#[test]
 fn rust_ci_uses_the_repository_pin_before_restoring_caches() {
     let workflow: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();

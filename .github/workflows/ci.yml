@@ -2419,6 +2419,13 @@ jobs:
   # sign-in, `/first_run` renders, and `/account/logo` -- a source-path
   # read the sign-in page triggers -- is found. Advisory like every
   # spinel job.
+  #
+  # Hosted rebuild is dominated by compiling pack/ (~95 s). The two apt
+  # layers (~30–38 s, parallel, ~460 MB BuildKit export) are reused for
+  # an eight-hour window via a local BuildKit cache under actions/cache.
+  # A new spin pack still recompiles; the three HTTP checks always run.
+  # The README command stays `docker build -t campfire .` with optional
+  # --cache-from/--cache-to flags only — not a different install path.
   smoke-campfire-docker:
     needs: [build-campfire-archive, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'smoke-campfire-docker') && needs.build-campfire-archive.result == 'success' }}
@@ -2426,12 +2433,31 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     continue-on-error: true
+    env:
+      # Apt layers only. pack/ changes every spin pack, so the make layer
+      # is never the durable hit. Eight-hour key: full validation is every
+      # four hours; a miss re-resolves Debian packages at least thrice a day.
+      CAMPFIRE_DOCKER_CACHE: ${{ runner.temp }}/campfire-docker-buildkit
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v8
         with:
           name: campfire-archive
           path: campfire
+      - name: Campfire Docker apt cache window
+        id: apt-window
+        # UTC epoch / 28800 → eight-hour buckets shared across schedule and PR.
+        run: echo "bucket=$(( $(date -u +%s) / 28800 ))" >> "$GITHUB_OUTPUT"
+      - name: Restore Campfire Docker apt layers
+        id: docker-cache
+        # Fail-open: a cache outage must not skip the README build.
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CAMPFIRE_DOCKER_CACHE }}
+          key: campfire-docker-apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.apt-window.outputs.bucket }}-v1
+          restore-keys: |
+            campfire-docker-apt-${{ runner.os }}-${{ runner.arch }}-
       - name: Build and run the image
         id: smoke
         run: |
@@ -2442,7 +2468,17 @@ jobs:
           fi
           tar xzf campfire/docker.tgz
           cd campfire-docker
-          docker build -t campfire .
+          cache_args=()
+          if [ -d "$CAMPFIRE_DOCKER_CACHE" ] && [ -n "$(ls -A "$CAMPFIRE_DOCKER_CACHE" 2>/dev/null || true)" ]; then
+            cache_args+=(--cache-from "type=local,src=$CAMPFIRE_DOCKER_CACHE")
+          fi
+          # Export after the build so a later successful save can seed the
+          # next run. mode=max keeps intermediate build-apt when pack/ changes.
+          mkdir -p "$CAMPFIRE_DOCKER_CACHE"
+          cache_args+=(--cache-to "type=local,dest=$CAMPFIRE_DOCKER_CACHE,mode=max")
+          # README install is still `docker build -t campfire .`; the cache
+          # flags only feed apt layers and do not skip make or HTTP checks.
+          docker build -t campfire "${cache_args[@]}" .
           docker run -d --name campfire -p 3000:3000 campfire
           for i in $(seq 1 30); do
             curl -sf -o /dev/null localhost:3000/first_run && break
@@ -2457,6 +2493,15 @@ jobs:
           docker logs campfire
           docker rm -f campfire >/dev/null
           [ "$root" = 302 ] && [ "$first" = 200 ] && [ "$logo" = 200 ]
+      - name: Save Campfire Docker apt layers
+        # Only after a green smoke, and only when the primary key missed —
+        # an exact hit already holds this window's layers. Fail-open.
+        if: steps.smoke.outcome == 'success' && steps.docker-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CAMPFIRE_DOCKER_CACHE }}
+          key: campfire-docker-apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.apt-window.outputs.bucket }}-v1
       - name: Record byte-specific archive validation
         if: always()
         env:
