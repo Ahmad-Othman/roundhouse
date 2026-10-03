@@ -305,7 +305,7 @@ the outer harness returning success on a hit cannot create a new receipt.
 | IDE/WASM browser | WASM intentionally embeds the current commit SHA. Do not normalize away a changed consumer input to force a hit. |
 | Spinel framework/toolchain/archive lanes | Need fresh emitted source plus the actual unpinned Spinel binary, `spin` package closure, C toolchain and native-library identities. Advisory failures remain signals, never reusable success. |
 | Campfire CRuby/Spinel compare, model differential and conformance | Include pinned Campfire source, Rails/gem oracle closure, assets, Redis/DB scenarios, native packages, Spinel binary and GC mode as applicable. Current harnesses still resolve mutable external inputs. |
-| Campfire Docker smoke | Build the current Docker context and run the three HTTP checks every time. Archive identity alone cannot certify the image. Apt layers may be reused for an eight-hour window (~460 MB BuildKit export under `actions/cache`); a fresh `spin pack` still recompiles `pack/`, and the smoke never skips `docker build` or HTTP. Do not cache the make layer or replace the README install with a prebuilt image. |
+| Campfire Docker smoke | Build the current Docker context and run the three HTTP checks every time. Archive identity alone cannot certify the image. Apt layers may be reused for an eight-hour window (~460 MB BuildKit export under `actions/cache`, primary key only — no cross-bucket restore); a fresh `spin pack` still recompiles `pack/`, and the smoke never skips the image build or HTTP. Do not cache the make layer or replace the install with a prebuilt image. |
 | Site/archive producers, assembly and publication | Must produce current-run outputs and provenance; site content also fetches live bench data. They are not reused validation results. |
 
 ## Evidence, not just a green run
@@ -360,13 +360,15 @@ The Campfire Docker recipe no longer downloads a separate Dockerfile frontend:
 its ordinary multi-stage instructions use the bundled frontend and COPY
 preserves the archive's executable boot mode. The real Docker smoke remains
 enabled. Measured 2026-10-03 (hosted job 111138541027 and a local rebuild of
-the published archive): cold `docker build` is ~138–158 s, dominated by
-compiling `pack/src/campfire.c` (~95 s). The build-apt and runtime-apt layers
+the published archive): cold build is ~138–158 s, dominated by compiling
+`pack/src/campfire.c` (~95 s). The build-apt and runtime-apt layers
 (~30–38 s, parallel) are exported as a ~460 MB BuildKit cache and restored
-for an eight-hour UTC window so a later `spin pack` still recompiles while
-skipping apt. `docker build -t campfire .` stays the install command; cache
-flags only feed those layers. The three HTTP checks always run. Do not cache
-the make result or ship a prebuilt image in place of the README build.
+for an eight-hour UTC window (primary key only, no cross-bucket restore) so a
+later `spin pack` still recompiles while skipping apt. A `docker-container`
+Buildx builder exports `type=local` on hosted runners; the image is loaded as
+`campfire` and the three HTTP checks always run. Cache export uses
+`ignore-error=true` so a cache backend failure does not skip those checks.
+Do not cache the make result or ship a prebuilt image in place of the build.
 
 ## Forcing a fresh check and extending the allowlist
 

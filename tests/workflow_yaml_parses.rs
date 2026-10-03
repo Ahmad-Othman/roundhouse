@@ -200,12 +200,27 @@ fn campfire_docker_smoke_caches_apt_for_eight_hours_and_always_builds() {
             .unwrap_or_else(|| panic!("missing step {name}"))
     };
 
+    // job-level env cannot use the runner context (actionlint / GH docs).
+    // Cache keys may still use runner.os / runner.arch in steps.with.
+    if let Some(env) = job.get("env").and_then(|v| v.as_mapping()) {
+        for (key, value) in env {
+            let name = key.as_str().unwrap_or("");
+            let text = value.as_str().unwrap_or("");
+            assert!(
+                !text.contains("runner."),
+                "{name} job env must not reference runner context; got {text}"
+            );
+        }
+    }
+
     let window = step("Campfire Docker apt cache window");
-    assert!(window["run"]
-        .as_str()
-        .unwrap()
-        .contains("/ 28800"));
     assert_eq!(window["id"].as_str(), Some("apt-window"));
+    let window_run = window["run"].as_str().unwrap();
+    assert!(window_run.contains("/ 28800"));
+    assert!(
+        window_run.contains("CAMPFIRE_DOCKER_CACHE=$RUNNER_TEMP/campfire-docker-buildkit"),
+        "cache path must come from $RUNNER_TEMP via GITHUB_ENV"
+    );
 
     let restore = step("Restore Campfire Docker apt layers");
     assert_eq!(restore["id"].as_str(), Some("docker-cache"));
@@ -221,20 +236,29 @@ fn campfire_docker_smoke_caches_apt_for_eight_hours_and_always_builds() {
     let restore_key = restore["with"]["key"].as_str().unwrap();
     assert!(restore_key.contains("campfire-docker-apt-"));
     assert!(restore_key.contains("steps.apt-window.outputs.bucket"));
-    assert!(restore["with"]["restore-keys"]
-        .as_str()
-        .unwrap()
-        .contains("campfire-docker-apt-"));
+    assert!(
+        restore["with"].get("restore-keys").is_none(),
+        "no cross-bucket restore-keys: a miss must re-resolve apt"
+    );
 
     let smoke = step("Build and run the image");
     let script = smoke["run"].as_str().unwrap();
     assert!(
-        script.contains(r#"docker build -t campfire "${cache_args[@]}" ."#),
-        "CI must still run docker build -t campfire (README install)"
+        script.contains(r#"docker buildx build --load -t campfire "${cache_args[@]}" ."#),
+        "image must still be tagged campfire for docker run (README install)"
+    );
+    assert!(
+        script.contains("--driver docker-container")
+            && script.contains("docker buildx use campfire-docker-cache"),
+        "docker-container builder is required for type=local export on hosted runners"
     );
     assert!(script.contains("--cache-from"));
     assert!(script.contains("--cache-to"));
     assert!(script.contains("mode=max"));
+    assert!(
+        script.contains("ignore-error=true"),
+        "cache export failure must not abort HTTP checks"
+    );
     assert!(
         script.contains("GET /first_run") && script.contains("GET /account/logo"),
         "HTTP checks must always run"
@@ -251,22 +275,20 @@ fn campfire_docker_smoke_caches_apt_for_eight_hours_and_always_builds() {
         save["if"].as_str(),
         Some("steps.smoke.outcome == 'success' && steps.docker-cache.outputs.cache-hit != 'true'")
     );
-    assert_eq!(
-        save["with"]["key"].as_str(),
-        Some(restore_key)
-    );
+    assert_eq!(save["with"]["key"].as_str(), Some(restore_key));
 
     for step in steps {
         let uses = step["uses"].as_str().unwrap_or("");
         assert!(
             !uses.contains("setup-buildx") && !uses.contains("build-push-action"),
-            "plain docker build + local cache; no buildx GHA backend"
+            "local BuildKit cache under actions/cache; no build-push-action GHA backend"
         );
     }
 
     let policy = fs::read_to_string("docs/ci-reuse.md").unwrap();
     assert!(policy.contains("eight-hour"));
     assert!(policy.contains("Do not cache the make"));
+    assert!(policy.contains("primary key only") || policy.contains("no cross-bucket"));
 }
 
 #[test]
