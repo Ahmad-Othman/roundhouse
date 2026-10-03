@@ -1849,6 +1849,7 @@ fn relation_return_on_array_repr(kind: crate::catalog::ReturnKind, elem: &Ty) ->
         }
         ReturnKind::SelfOrNil => union_of(elem.clone(), Ty::Nil),
         ReturnKind::Int => Ty::Int,
+        ReturnKind::IntOrNil => union_of(Ty::Int, Ty::Nil),
         ReturnKind::Bool => Ty::Bool,
         ReturnKind::ArrayOfInt => Ty::Array { elem: Box::new(Ty::Int) },
         ReturnKind::ArrayOfUntyped => Ty::Array { elem: Box::new(Ty::Untyped) },
