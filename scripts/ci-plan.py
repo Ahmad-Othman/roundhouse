@@ -200,6 +200,7 @@ def select(paths, *, draft=False, full=False, publish=False, project_scope=None)
             "tests/ci_archive_evidence_test.py",
             "tests/workflow_yaml_parses.rs",
             "tests/ci_policy_workflow.rs",
+            "tests/ci_fixture_workflow.rs",
             "src/project.rs",
             "src/bin/roundhouse.rs",
             "Cargo.toml",

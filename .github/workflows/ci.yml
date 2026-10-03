@@ -151,42 +151,116 @@ jobs:
           if-no-files-found: error
 
   # -------------------------------------------------------------------
-  # Generate the real-blog fixture once, upload as artifact. Every
-  # downstream test job downloads + extracts it — pay the Ruby/Rails
-  # install cost once per CI run instead of in each of seven jobs.
+  # Share both fixtures through this run's artifact. First-attempt PRs
+  # may reuse a daily source snapshot; main/scheduled/manual/rerun builds
+  # always generate freshly. Store guide tests execute on either path.
   # -------------------------------------------------------------------
   generate-fixture:
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      BUNDLE_JOBS: '4'
     steps:
       - uses: actions/checkout@v5
+      - name: Isolate fixture gems
+        # Runner paths are available in steps, not in job-level env expressions.
+        run: |
+          echo "GEM_HOME=$RUNNER_TEMP/fixture-gems" >> "$GITHUB_ENV"
+          echo "GEM_PATH=$RUNNER_TEMP/fixture-gems" >> "$GITHUB_ENV"
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
+      - name: Identify fixture inputs
+        id: gems
+        env:
+          FIXTURE_RECIPE: ${{ hashFiles('bin/rh', 'scripts/create-blog', 'scripts/create-store', 'scripts/test-store', '.github/workflows/ci.yml') }}
+        run: |
+          echo "$GEM_HOME/bin" >> "$GITHUB_PATH"
+          platform="${ImageOS}-$(ruby -e 'print "#{RUBY_ENGINE}-#{RUBY_VERSION}-#{RUBY_PLATFORM}"')"
+          echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+          tools="$(ruby -rbundler -e 'print "#{Gem::VERSION}-#{Bundler::VERSION}"')"
+          echo "platform=${platform}-${ImageVersion}-${tools}" >> "$GITHUB_OUTPUT"
+          echo "fixture-key=fixture-source-v1-${RUNNER_OS}-${RUNNER_ARCH}-${platform}-${ImageVersion}-${tools}-$(date -u +%F)-${FIXTURE_RECIPE}" >> "$GITHUB_OUTPUT"
+      - name: Restore fixture source snapshot
+        id: fixture-cache
+        if: github.event_name == 'pull_request' && github.run_attempt == 1
+        continue-on-error: true
+        uses: actions/cache/restore@v6
+        with:
+          path: real-blog.tar.gz
+          key: ${{ steps.gems.outputs.fixture-key }}
+      - name: Select fresh generation or restored source
+        id: fixture
+        env:
+          RESTORED: ${{ steps.fixture-cache.outcome == 'success' && steps.fixture-cache.outputs.cache-hit == 'true' }}
+        run: |
+          if [ "$RESTORED" = true ]; then
+            tar -xzf real-blog.tar.gz
+            echo "generate=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "generate=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Cache installed fixture gems
+        # Weekly keys refresh dependencies only within the same runner
+        # image version, Ruby patch/platform and RubyGems/Bundler. Generation
+        # checks for the latest Rails release, even on a gem-cache hit.
+        continue-on-error: true
+        uses: actions/cache@v6
+        with:
+          # Downloaded .gem archives and documentation are not needed to use
+          # installed gems; omitting them keeps cache transfers smaller.
+          path: |
+            ${{ env.GEM_HOME }}/bin
+            ${{ env.GEM_HOME }}/build_info
+            ${{ env.GEM_HOME }}/extensions
+            ${{ env.GEM_HOME }}/gems
+            ${{ env.GEM_HOME }}/plugins
+            ${{ env.GEM_HOME }}/specifications
+          key: fixture-gems-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-${{ steps.gems.outputs.week }}
+          restore-keys: fixture-gems-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-
       - name: Install Rails
-        run: gem install rails
+        if: steps.fixture.outputs.generate == 'true'
+        run: gem install rails --no-document
       - name: Generate fixtures/real-blog
+        if: steps.fixture.outputs.generate == 'true'
         run: bin/rh fixture
       # The Rails Guides store rides the same artifact: the /ide/
       # default app and a picker entry, so build-site and
       # browser-smoke-ide bundle it without a second Rails install.
       - name: Generate fixtures/store by following the guide
+        if: steps.fixture.outputs.generate == 'true'
         run: cd fixtures && ../scripts/create-store store
+      - name: Run guide tests on restored store
+        # create-store runs these on fresh builds; a source hit is not a
+        # test receipt. Install its locked bundle without updating the lock.
+        if: steps.fixture.outputs.generate == 'false'
+        run: scripts/test-store
       - name: Pack fixtures
+        if: steps.fixture.outputs.generate == 'true'
         run: |
-          tar --exclude='./fixtures/real-blog/tmp' \
-              --exclude='./fixtures/real-blog/log' \
-              --exclude='./fixtures/store/tmp' \
-              --exclude='./fixtures/store/log' \
-              --exclude='./fixtures/store/storage' \
+          tar --exclude='fixtures/real-blog/tmp' \
+              --exclude='fixtures/real-blog/log' \
+              --exclude='fixtures/store/tmp' \
+              --exclude='fixtures/store/log' \
+              --exclude='fixtures/store/storage' \
               -czf real-blog.tar.gz fixtures/real-blog fixtures/store
+      - name: Save fresh fixture source snapshot
+        # Main/full cycles never restore, but can seed the default-branch
+        # cache for PRs. Never save failed generation or guide-test results.
+        if: success() && steps.fixture.outputs.generate == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: real-blog.tar.gz
+          key: ${{ steps.gems.outputs.fixture-key }}
       - name: Upload fixture
         uses: actions/upload-artifact@v7
         with:
           name: real-blog-fixture
           path: real-blog.tar.gz
+          compression-level: 0
           retention-days: 1
 
   # -------------------------------------------------------------------
@@ -600,6 +674,11 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: '20'
+          # Warm downloads for the generated app, not node_modules or dist.
+          cache: npm
+          cache-dependency-path: |
+            tests/browser_smoke/package-lock.json
+            src/emit/typescript/package.rs
       - name: Install harness deps
         run: npm ci
         working-directory: tests/browser_smoke
@@ -2605,6 +2684,11 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: '20'
+          # Also warm the live demo's downloads; always build current output.
+          cache: npm
+          cache-dependency-path: |
+            e2e/package-lock.json
+            src/emit/typescript/package.rs
       - name: Install Ruby (for the turbo-rails / stimulus-rails JS bundles)
         uses: ruby/setup-ruby@v1
         with:
