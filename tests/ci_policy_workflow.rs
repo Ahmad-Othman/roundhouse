@@ -342,6 +342,7 @@ fn resource_and_harness_helpers_preserve_failures_and_contracts() {
         "tests/ci_resources_test.py",
         "tests/ci_unit_tests_test.py",
         "tests/ci_campfire_optimization_test.py",
+        "tests/ci_smoke_test.py",
     ] {
         let result = std::process::Command::new("python3")
             .args(["-B", test, "-v"])
