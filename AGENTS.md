@@ -116,11 +116,14 @@ defect even if the build is green.
   `#[ignore]`-gated (`cargo test --test <target>_toolchain -- --ignored`); CI
   runs each in its own job.
 - **Focused local loop:** `bin/rh verify --plan --test <suite>` previews;
-  `bin/rh verify --test <suite>` builds tests, runs library tests and that
-  suite sequentially. Repeat `--test`; opt into native checks with
-  `--toolchain <target>`. Prepare both fixtures and dependencies first.
+  `bin/rh verify --test <suite>` builds and runs only library tests and the
+  selected suites sequentially, not all test programs. Repeat `--test`; opt
+  into native checks with `--toolchain <target>`. Prepare both fixtures and
+  dependencies first.
   The JSON report (`--json`) separates executed local checks from unexecuted
   hosted coverage; neither a preview nor a passing subset proves full CI.
+  Before/after filesystem-space snapshots and low-space warnings are advisory;
+  an unavailable probe does not block tests. The runner never cleans caches.
   Do not run another build/test in that checkout concurrently. See
   DEVELOPMENT.md § "Focused local verification" for scope and prerequisites.
 - **CI is deliberately not uniformly gating.** The core `cargo test` job is

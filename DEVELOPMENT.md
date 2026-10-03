@@ -73,9 +73,12 @@ Build (requires Rust):
 ### Focused local verification
 
 `bin/rh verify` is a foreground, fail-fast developer/agent loop, **not full
-CI or merge approval**. It builds all Rust test programs, runs library tests,
-then runs only the integration and ignored toolchain suites you explicitly
-select. The normal full-suite guidance above still applies at milestones.
+CI or merge approval**. It builds and runs library tests, then only the
+integration and ignored toolchain suites you explicitly select. Cargo builds
+the programs needed by those suites (including application binaries for
+integration tests); unrelated test programs are not built. The full
+`cargo build --tests` / `cargo test --all-targets` guidance above still applies
+at milestones.
 
 ```sh
 bin/rh verify --plan --base main --test ingest
@@ -107,13 +110,31 @@ Debug bench emissions and browser/DOM/corpus gates are not part of this loop.
 The tool performs no cleanup, autofixes, publishing or Git writes beyond its
 worktree-local verification lock. Do not run other builds/tests concurrently
 in the same checkout: the lock coordinates `verify` callers, not arbitrary
-Cargo commands. Check disk space with your platform tools before large runs.
+Cargo commands.
+
+Before and after execution (also after a failed check), the runner reports
+available and total filesystem space for the checkout and Cargo target
+directory. Cargo's offline, locked metadata resolves the target location,
+including `CARGO_TARGET_DIR` and Cargo configuration; a missing target directory
+is measured at its nearest existing parent without creating it. The optional
+probe uses POSIX `df -P -k` (Linux/macOS); missing tools or unsupported output,
+including environments without `df`, are reported as unavailable and never
+block tests or override their exit codes. `--plan` performs neither probe nor
+Cargo metadata lookup. Less than **5 GiB** available produces an advisory
+warning on stderr, not an enforced build budget or automatic cleanup.
+
+These are filesystem snapshots, **not the size of this run's artifacts**:
+other processes and shared caches affect free space. Existing artifacts are
+retained; selecting fewer suites prevents unnecessary new builds but does not
+remove old ones. Check disk space with your platform tools before large runs.
 
 `--json` sends a report to stdout and child output to stderr. The report names
 HEAD, changed paths, base, build settings, each command, its exit code/time and
-`passed`, `failed` or `not-run` status. It includes the working tree but is not
-a content fingerprint or reusable execution receipt; do not reuse it merely
-because HEAD matches. A preview is `planned`; a failed child stops subsequent
+`passed`, `failed` or `not-run` status. `disk_space` contains before/after
+snapshots in bytes or probe errors (null snapshots for a preview).
+It includes the working tree but is not a content fingerprint or reusable
+execution receipt; do not reuse it merely because HEAD matches.
+A preview is `planned`; a failed child stops subsequent
 checks and preserves its exit code. Invalid arguments or missing Git are
 reported on stderr with exit 2; an unavailable Cargo command exits 127.
 
