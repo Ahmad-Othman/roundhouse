@@ -21,9 +21,9 @@ TARGETS = [
     "ruby",
     "jruby",
 ]
+DRAFT_FLOOR = ["generate-fixture", "unit"]
 BASE = [
-    "generate-fixture",
-    "unit",
+    *DRAFT_FLOOR,
     "build-roundhouse",
     "store-check",
     "compare",
@@ -169,7 +169,7 @@ def archive_and_campfire_jobs(path, interpreter_only):
 def select(paths, *, draft=False, full=False, publish=False, project_scope=None):
     if draft and not full:
         return finish(
-            BASE[:2],
+            DRAFT_FLOOR,
             [],
             [],
             False,
@@ -475,7 +475,7 @@ def changed_inputs(event, event_name, sha):
 
 def check_results(plan, needs, *, compact=False):
     required = (
-        BASE[:2] if plan["jobs"] == BASE[:2] else BASE if compact else plan["required"]
+        DRAFT_FLOOR if plan["jobs"] == DRAFT_FLOOR else BASE if compact else plan["required"]
     )
     failures = [
         f"{j}: {needs.get(j, {}).get('result', 'missing')}"

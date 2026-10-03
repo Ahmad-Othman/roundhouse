@@ -163,7 +163,7 @@ end
 # Subcommand: doctor
 
 DOCTOR_CHECKS = [
-  { key: :ruby,   label: 'Ruby',      unlocks: 'always (rh itself)',     min: '3.4' },
+  { key: :ruby,   label: 'Ruby',      unlocks: 'always (rh itself)',     min: File.read(File.join(ROUNDHOUSE_ROOT, '.ruby-version')).strip },
   { key: :rust,   label: 'Rust',      unlocks: 'transpile, site, compare, verify' },
   { key: :git,    label: 'Git',       unlocks: 'verify / verify --plan' },
   { key: :python, label: 'Python 3',  unlocks: 'optional verify hosted-coverage preview' },

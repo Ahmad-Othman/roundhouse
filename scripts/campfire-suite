@@ -39,9 +39,9 @@
 #
 # The RUBY runs are also parallel (`--jobs`), one process per file. Each
 # file already opens its own sqlite path from `$0`, but Active Storage
-# writes `tmp/storage` for the whole tree. A parallel file therefore
-# bind-mounts a private `tmp/storage` and keeps the emit as its working
-# directory, so `$0`, `Dir.pwd` and `__dir__` stay what a serial run
+# writes `storage/files` (or `tmp/storage` under RAILS_ENV=test). A parallel
+# file bind-mounts private directories over both roots and keeps the emit
+# as its working directory, so `$0`, `Dir.pwd` and `__dir__` stay what a serial run
 # sees. The tally is still printed in file-list order. `--jobs 1`, or a
 # box whose `unshare` cannot mount, runs the files in this process as
 # before.
@@ -380,18 +380,20 @@ run_test() {
     export SECRET_KEY_BASE="${SECRET_KEY_BASE:-campfire-suite-secret}"
     if [[ "$TARGET" == spinel ]]; then
         perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" "./build/$t"
-    elif [[ -n "$priv" ]]; then
-        ruby_isolated "$t" "$priv"
     else
-        ruby -Itest -r "$REPO_ROOT/scripts/campfire-test-bcrypt.rb" "$t.rb"
+        local ruby_command=(ruby -Itest -r "$REPO_ROOT/scripts/campfire-test-bcrypt.rb" "$t.rb")
+        if [[ -n "$priv" ]]; then
+            ruby_isolated "$priv" "${ruby_command[@]}"
+        else
+            "${ruby_command[@]}"
+        fi
     fi
 }
 
-# A ruby file's only shared mutable tree is Active Storage's disk root
-# (`tmp/storage` when the harness boots without RAILS_ENV). The sqlite
-# file is already named from `$0`. Bind-mount a private directory over
-# that root and run the same ruby the serial path uses, so argv0, cwd
-# and the load path do not move.
+# Active Storage uses `storage/files` by default and `tmp/storage` under
+# RAILS_ENV=test. Isolate both without changing the serial environment;
+# the sqlite file is already named from `$0`. Run the same ruby the
+# serial path uses, so argv0, cwd and the load path do not move.
 #
 # `--map-current-user` keeps the real uid. `--keep-caps` is what lets
 # the mount happen inside that mapping; it also fills every capability
@@ -401,16 +403,18 @@ run_test() {
 # bounding set is left as the caller's — clearing it is irreversible
 # and would make the process stricter than a serial run.
 ruby_isolated() {
-    local t="$1" priv="$2"
-    mkdir -p "$priv" "$OUT/tmp/storage" || return
+    local priv="$1"
+    shift
+    mkdir -p "$priv/tmp-storage" "$priv/files" "$OUT/tmp/storage" "$OUT/storage/files" || return
     unshare --user --map-current-user --keep-caps --mount bash -c '
-        mount --bind "$1" tmp/storage || exit $?
-        exec setpriv --inh-caps -all --ambient-caps -all \
-            ruby -Itest -r "$2" "$3.rb"
-    ' _ "$priv" "$REPO_ROOT/scripts/campfire-test-bcrypt.rb" "$t"
+        mount --bind "$1/tmp-storage" tmp/storage || exit $?
+        mount --bind "$1/files" storage/files || exit $?
+        shift
+        exec setpriv --inh-caps -all --ambient-caps -all "$@"
+    ' _ "$priv" "$@"
 }
 
-# True when parallel ruby runs can isolate tmp/storage. Probed once:
+# True when parallel ruby runs can isolate the storage roots. Probed once:
 # a missing unshare, or a mount that the kernel refuses, is a serial
 # run rather than a suite of failed files.
 ruby_parallel_ok() {

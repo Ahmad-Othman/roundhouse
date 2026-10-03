@@ -112,6 +112,20 @@ class Routing(unittest.TestCase):
         self.assertEqual(plan["required"], ["generate-fixture", "unit"])
         self.assertNotIn("build-roundhouse", plan["jobs"])
 
+    def test_draft_floor_and_gates_do_not_depend_on_base_order(self):
+        with patch.object(ci, "BASE", list(reversed(ci.BASE))):
+            plan = ci.select([], draft=True)
+            self.assertEqual(plan["jobs"], ["generate-fixture", "unit"])
+            needs = {
+                job: {"result": "success"}
+                for job in ["plan", "compact-required", "generate-fixture", "unit"]
+            }
+            for compact in (False, True):
+                self.assertEqual(ci.check_results(plan, needs, compact=compact), ([], True))
+                needs["unit"]["result"] = "failure"
+                self.assertTrue(ci.check_results(plan, needs, compact=compact)[0])
+                needs["unit"]["result"] = "success"
+
     def test_full_overrides_draft_without_enabling_publication(self):
         plan = ci.select(["README.md"], draft=True, full=True)
         self.assertEqual(plan["smoke"], ci.TARGETS)

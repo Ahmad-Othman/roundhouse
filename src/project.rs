@@ -211,6 +211,8 @@ impl BuildTarget {
 /// and the regenerate command. For `ships_e2e` targets the `## <name>`
 /// sections are a CI contract — `scripts/smoke` executes their ```sh
 /// blocks verbatim against the published archive.
+/// MRI prerequisites describe the minimum in `.ruby-version`, not a CI
+/// patch pin. Keep the human-facing minimum aligned when that line changes.
 pub fn target_readme(target: BuildTarget) -> String {
     let name = target.as_str();
     let body = match target {

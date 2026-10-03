@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    # Drafts run fixture + unit only. Ready PRs use selected coverage.
+    # Drafts default to fixture + unit; ci:full also expands drafts.
     # Label/draft/head transitions cancel superseded PR runs via concurrency.
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
   workflow_call:
@@ -35,6 +35,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # CI selects the latest patch on this MRI line. The local minimum lives in
+  # .ruby-version; keep both anchors aligned. Exact repro pins remain separate.
+  MRI_RUBY: '3.4'
   # The Rails apps the /ide/ + /playground/ demos ship (in-browser). Pinned
   # so the page — and any blog post's claims about it — stay stable against
   # upstream churn; bump deliberately. Each bundle embeds the app's LICENSE
@@ -171,7 +174,7 @@ jobs:
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: "3.4"
+          ruby-version: ${{ env.MRI_RUBY }}
       - name: Identify fixture inputs
         id: gems
         env:
@@ -570,7 +573,7 @@ jobs:
       # on the same one.
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
+          ruby-version: ${{ env.MRI_RUBY }}
       - name: Install the gem the overlay escape surface uses
         run: gem install rails-html-sanitizer --no-document
       # The native Date reference uses ActiveRecord against in-memory
@@ -599,7 +602,7 @@ jobs:
       - name: Build and run all test targets in batches
         run: |
           python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-resources/tests" -- \
-            python3 scripts/ci-unit-tests.py --shard-index ${{ matrix.shard }} --shard-count 3
+            python3 scripts/ci-unit-tests.py --shard-index ${{ strategy.job-index }} --shard-count ${{ strategy.job-total }}
       - name: Upload test build timings
         if: always()
         uses: actions/upload-artifact@v7
@@ -1049,7 +1052,7 @@ jobs:
           echo "ROUNDHOUSE_BIN_TRACE=1" >> "$GITHUB_ENV"
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
+          ruby-version: ${{ env.MRI_RUBY }}
       - name: Fetch pinned once-campfire
         run: |
           curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
@@ -1067,7 +1070,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/campfire-oracle
-          key: campfire-oracle-${{ env.CAMPFIRE_SHA }}-ruby34-v1
+          key: campfire-oracle-${{ env.CAMPFIRE_SHA }}-ruby${{ env.MRI_RUBY }}-v1
       - name: Prepare the Rails oracle (cache miss)
         if: steps.oracle.outputs.cache-hit != 'true'
         run: scripts/campfire-oracle prepare --app /tmp/campfire
@@ -1284,7 +1287,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
+          ruby-version: ${{ env.MRI_RUBY }}
       - uses: actions/download-artifact@v8
         with:
           name: spinel-dist
@@ -1316,7 +1319,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/campfire-oracle
-          key: campfire-oracle-${{ env.CAMPFIRE_SHA }}-ruby34-v1
+          key: campfire-oracle-${{ env.CAMPFIRE_SHA }}-ruby${{ env.MRI_RUBY }}-v1
       - name: Prepare the Rails oracle (cache miss)
         if: steps.oracle.outputs.cache-hit != 'true'
         run: scripts/campfire-oracle prepare --app /tmp/campfire
@@ -1354,7 +1357,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
+          ruby-version: ${{ env.MRI_RUBY }}
       - uses: actions/download-artifact@v8
         with:
           name: spinel-dist
@@ -1374,7 +1377,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/campfire-oracle
-          key: campfire-oracle-${{ env.CAMPFIRE_SHA }}-ruby34-v1
+          key: campfire-oracle-${{ env.CAMPFIRE_SHA }}-ruby${{ env.MRI_RUBY }}-v1
       - name: Prepare the Rails oracle (cache miss)
         if: steps.oracle.outputs.cache-hit != 'true'
         run: scripts/campfire-oracle prepare --app /tmp/campfire
@@ -1412,7 +1415,7 @@ jobs:
           echo "ROUNDHOUSE_BIN_TRACE=1" >> "$GITHUB_ENV"
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
+          ruby-version: ${{ env.MRI_RUBY }}
       # Two gems, from two different places, both needed by a bare
       # `ruby -Itest` — which is how the suite runs each file, so they
       # have to land on the DEFAULT gem path; a bundler-cached
@@ -1883,7 +1886,7 @@ jobs:
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev libjemalloc-dev
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
+          ruby-version: ${{ env.MRI_RUBY }}
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
       - name: cargo test --test spinel_toolchain -- --ignored
@@ -2039,7 +2042,7 @@ jobs:
       # setup-ruby LAST — see the job comment (MRI 3.4 must win PATH).
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
+          ruby-version: ${{ env.MRI_RUBY }}
           bundler-cache: true
           working-directory: ./fixtures/real-blog
       # Not separate jobs: each target's framework-tests and toolchain suites ride the compare job that already installs its toolchain (#273).
@@ -2140,12 +2143,12 @@ jobs:
         run: tar -xzf real-blog.tar.gz
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
+          ruby-version: ${{ env.MRI_RUBY }}
           bundler-cache: true
           working-directory: ./fixtures/real-blog
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
+          ruby-version: ${{ env.MRI_RUBY }}
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
       - uses: actions/setup-node@v7
@@ -2204,7 +2207,7 @@ jobs:
           ruby-version: 'jruby-10.0'
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
+          ruby-version: ${{ env.MRI_RUBY }}
           bundler-cache: true
           working-directory: ./fixtures/real-blog
       - name: scripts/compare jruby
@@ -2249,12 +2252,12 @@ jobs:
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev libjemalloc-dev
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
+          ruby-version: ${{ env.MRI_RUBY }}
           bundler-cache: true
           working-directory: ./fixtures/real-blog
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
+          ruby-version: ${{ env.MRI_RUBY }}
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
       - uses: actions/setup-node@v7
@@ -2390,11 +2393,11 @@ jobs:
           tar -xzf "browse/$TARGET.tgz" -C "$RUNNER_TEMP/smoke-bundle-source"
           # JRuby deliberately has no MRI lock; setup-ruby resolves its own.
           test -f "$RUNNER_TEMP/smoke-bundle-source/$TARGET/Gemfile"
-      - name: Install Ruby (MRI 3.4)
+      - name: Install Ruby (MRI)
         if: matrix.target == 'ruby'
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
+          ruby-version: ${{ env.MRI_RUBY }}
           bundler-cache: true
           working-directory: ${{ runner.temp }}/smoke-bundle-source/${{ matrix.target }}
       - name: Install JRuby 10
@@ -2575,7 +2578,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
+          ruby-version: ${{ env.MRI_RUBY }}
       - uses: actions/download-artifact@v8
         continue-on-error: true
         with:
@@ -2870,7 +2873,7 @@ jobs:
       - name: Install Ruby (for the turbo-rails / stimulus-rails JS bundles)
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
+          ruby-version: ${{ env.MRI_RUBY }}
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
       - name: Build static asset graph for archives
@@ -3355,7 +3358,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.4'
+          ruby-version: ${{ env.MRI_RUBY }}
       - uses: actions/download-artifact@v8
         with:
           name: site-base

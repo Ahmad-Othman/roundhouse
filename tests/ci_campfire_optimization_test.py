@@ -62,6 +62,7 @@ class CampfireSuiteParallelTests(unittest.TestCase):
             env.pop(key, None)
         if env_extra:
             env.update(env_extra)
+        env["SUITE_TEST_RUN_ID"] = str(stamp)
         result = subprocess.run(
             [
                 "bash",
@@ -132,12 +133,31 @@ class CampfireSuiteParallelTests(unittest.TestCase):
                 SHIM.format(klass=klass)
                 + textwrap.dedent(
                     f"""\
+                    module ActionController; class Base; end; end
+                    require "{ROOT / 'runtime/ruby/rails.rb'}"
+                    require "{ROOT / 'runtime/spinel/active_storage_disk.rb'}"
+                    Rails.env_name = ENV["RAILS_ENV"]
+                    raise "argv0 changed" unless $0 == "test/models/{tag}_test.rb"
+                    raise "arguments changed" unless ARGV.empty?
+                    raise "cwd changed" unless Dir.pwd == File.expand_path("../..", __dir__)
                     warn "STDERR-FIRST-{tag}"
                     path = "tmp/storage/shared-name"
                     File.write(path, "{tag}\\n")
-                    sleep 0.3
+                    service = ActiveStorage::Service.new
+                    service.upload("shared-name", "{tag}\\n")
+                    if ENV["OVERLAP_SUITE_TESTS"] == "1"
+                      ready = "tmp/ready-" + ENV.fetch("SUITE_TEST_RUN_ID") + "-"
+                      File.write(ready + "{tag}", "ready")
+                      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 10
+                      until File.exist?(ready + "{'beta' if tag == 'alpha' else 'alpha'}")
+                        raise "sibling did not overlap" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+                        sleep 0.01
+                      end
+                    end
                     seen = File.read(path)
                     raise "shared storage leaked: " + seen.inspect unless seen == "{tag}\\n"
+                    seen = service.download("shared-name")
+                    raise "Active Storage leaked: " + seen.inspect unless seen == "{tag}\\n"
                     puts "STDOUT-SECOND-{tag}"
                     File.write("tmp/note-{tag}.txt", [
                       "uid=#{{Process.uid}}",
@@ -152,9 +172,18 @@ class CampfireSuiteParallelTests(unittest.TestCase):
     def test_parallel_isolation_matches_serial_contract(self):
         self._require_mounts()
         self._two_file_emit()
-        serial = self._run("1", unset=("SECRET_KEY_BASE",))
+        for rails_env in (None, "test", "production"):
+            with self.subTest(rails_env=rails_env):
+                env = {} if rails_env is None else {"RAILS_ENV": rails_env}
+                self._assert_serial_contract(env)
+
+    def _assert_serial_contract(self, env):
+        serial = self._run("1", env_extra=env, unset=("SECRET_KEY_BASE", "RAILS_ENV"))
         serial_note = self._note("alpha")
-        parallel = self._run("2", unset=("SECRET_KEY_BASE",))
+        parallel = self._run(
+            "2", env_extra={**env, "OVERLAP_SUITE_TESTS": "1"},
+            unset=("SECRET_KEY_BASE", "RAILS_ENV"),
+        )
         self.assertEqual(serial.returncode, 0, serial.stderr + serial.stdout)
         self.assertEqual(parallel.returncode, 0, parallel.stderr + parallel.stdout)
         self.assertEqual(serial.tally_path.read_text(), parallel.tally_path.read_text())
@@ -235,21 +264,26 @@ class CampfireSuiteParallelTests(unittest.TestCase):
         self._two_file_emit()
         fake = Path(self.tmp.name) / "bin" / "mount"
         executable(fake, f"""#!/bin/sh
-if [ "$3" = tmp/storage ]; then
+if [ "$3" = "$REFUSED_STORAGE_ROOT" ]; then
     echo 'storage mount refused' >&2
     exit 1
 fi
 exec "{shutil.which('mount')}" "$@"
 """)
-        result = self._run(
-            "2", env_extra={"PATH": f"{fake.parent}:{os.environ['PATH']}"},
-            unset=("SECRET_KEY_BASE",),
-        )
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertIn("ruby files ran in", result.stdout)
-        self.assertNotIn("PASS|", result.tally_path.read_text())
-        self.assertEqual(result.tally_path.read_text().count("storage mount refused"), 3)
-        self.assertFalse((self.emit / "tmp/storage/shared-name").exists())
+        for root in ("tmp/storage", "storage/files"):
+            with self.subTest(root=root):
+                result = self._run(
+                    "2", env_extra={
+                        "PATH": f"{fake.parent}:{os.environ['PATH']}",
+                        "REFUSED_STORAGE_ROOT": root,
+                    }, unset=("SECRET_KEY_BASE",),
+                )
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                self.assertIn("ruby files ran in", result.stdout)
+                self.assertNotIn("PASS|", result.tally_path.read_text())
+                self.assertEqual(result.tally_path.read_text().count("storage mount refused"), 3)
+                self.assertFalse((self.emit / "tmp/storage/shared-name").exists())
+                self.assertFalse((self.emit / "storage/files/sh/ar/shared-name").exists())
 
 
 if __name__ == "__main__":

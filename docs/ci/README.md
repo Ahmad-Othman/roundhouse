@@ -93,6 +93,7 @@ Read the owner and its executable contract before editing:
 | Concern | Source | Tests |
 |---|---|---|
 | Coverage and execution | [ci.yml](../../.github/workflows/ci.yml), [ci-plan.py](../../scripts/ci-plan.py), [ci-unit-tests.py](../../scripts/ci-unit-tests.py) | `tests/ci_policy_workflow.rs`, `tests/workflow_yaml_parses.rs` |
+| Toolchain selection | [ci.yml](../../.github/workflows/ci.yml), [`.ruby-version`](../../.ruby-version), [bin/rh](../../bin/rh) | `tests/ci_toolchain_workflow.rs`, `tests/rh_verify.rs` |
 | Receipt reuse | [ci-reuse.py](../../scripts/ci-reuse.py) | `tests/ci_reuse_test.py` |
 | Fixture caching | [generate-fixture in ci.yml](../../.github/workflows/ci.yml) | `tests/ci_fixture_workflow.rs` |
 | Archive evidence and Pages | [ci-archive-evidence.py](../../scripts/ci-archive-evidence.py), [full-ci.yml](../../.github/workflows/full-ci.yml) | `tests/ci_policy_workflow.rs` |
