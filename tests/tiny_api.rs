@@ -315,7 +315,7 @@ puts "TINY API MODELS OK"
 
 /// The routed JSON actions on the `ActionController::API` parent:
 /// create, the validation error, index, show, the not-found branch and
-/// update, each an inline `render json:` of a Hash or an array of
+/// update and its validation error, each an inline `render json:` of a Hash or an array of
 /// summary Hashes. On main the first routed request raises
 /// `uninitialized constant ActionController::API` (NameError) when the
 /// controller loads, because the Ruby runtime defines only `Base`
@@ -354,6 +354,9 @@ raise "404 body #{missing.inspect}" unless missing == { "error" => "not found" }
 updated = json("PATCH", "/widgets/#{id}", 200, { name: "cog" }.to_json)
 raise "update #{updated.inspect}" unless updated["name"] == "cog"
 raise "update did not persist" unless json("GET", "/widgets/#{id}", 200)["name"] == "cog"
+rejected = json("PATCH", "/widgets/#{id}", 422, { name: "" }.to_json)
+raise "update 422 body #{rejected.inspect}" unless rejected == { "error" => "Name can't be blank" }
+raise "a rejected update persisted" unless json("GET", "/widgets/#{id}", 200)["name"] == "cog"
 puts "TINY API REQUESTS OK"
 "##,
     );

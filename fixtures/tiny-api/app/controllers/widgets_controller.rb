@@ -24,8 +24,11 @@ class WidgetsController < ApplicationController
   def update
     return render_problem(message: "not found", status: :not_found) unless @widget
 
-    @widget.update(name: params[:name])
-    render json: @widget.summary
+    if @widget.update(name: params[:name])
+      render json: @widget.summary
+    else
+      render_problem(message: @widget.errors.full_messages.join(", "))
+    end
   end
 
   private
