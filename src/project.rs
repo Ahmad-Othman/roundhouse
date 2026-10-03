@@ -834,55 +834,9 @@ fn reject_unsupported_forwarded_procs(app: &App, target: BuildTarget) -> Result<
         }
         e.node.for_each_child(&mut |child| visit(child, target, found));
     }
-    fn visit_method(method: &crate::dialect::MethodDef, f: &mut impl FnMut(&crate::expr::Expr)) {
-        f(&method.body);
-        for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
-            f(default);
-        }
-    }
     let mut found = false;
     let mut f = |e: &crate::expr::Expr| visit(e, target.as_str(), &mut found);
-    crate::lower::for_each_hook_body_ref(app, &mut f);
-    for controller in &app.controllers {
-        for action in controller.actions() {
-            for default in action.kw_params.iter().filter_map(|(_, e)| e.as_ref()) {
-                f(default);
-            }
-        }
-    }
-    for view in &app.views {
-        f(&view.body);
-        for default in view.strict_locals.iter().flatten().filter_map(|p| p.default.as_ref()) {
-            f(default);
-        }
-    }
-    for tm in &app.test_modules {
-        if let Some(setup) = &tm.setup { f(setup); }
-        for test in &tm.tests { f(&test.body); }
-        for method in &tm.helpers { visit_method(method, &mut f); }
-        for class in &tm.inner_classes {
-            for method in &class.methods { visit_method(method, &mut f); }
-            for (_, value) in &class.constants { f(value); }
-            for call in &class.unknown_calls { f(call); }
-        }
-        for (_, value) in &tm.constants { f(value); }
-    }
-    for fixture in &app.fixtures {
-        for e in &fixture.preamble { f(e); }
-        for value in fixture.records.values().flat_map(|record| record.values()) {
-            if let crate::dialect::FixtureValue::Ruby(e) = value { f(e); }
-        }
-    }
-    for helper in &app.routes.direct_helpers { f(&helper.body); }
-    for function in &app.sql_functions {
-        match &function.kind {
-            crate::app::SqlFunctionKind::Scalar { method } => visit_method(method, &mut f),
-            crate::app::SqlFunctionKind::Aggregate { step, finalize } => {
-                visit_method(step, &mut f);
-                visit_method(finalize, &mut f);
-            }
-        }
-    }
+    crate::lower::for_each_emit_body_ref(app, &mut f);
     if found {
         return Err(format!("{}: arbitrary &expr Proc forwarding is not supported; use Ruby instead", target.as_str()));
     }
@@ -928,11 +882,39 @@ fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
     }
 }
 
+/// `case/in` is not equivalent to the targets' existing `case/when`
+/// renderers, even for nil or a plain binding. Refuse before file emission
+/// rather than lose bindings, skip evaluation, or turn a test into a wildcard.
+fn reject_unsupported_pattern_matches(app: &App, target: BuildTarget) -> Result<(), String> {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby
+        | BuildTarget::Spinel | BuildTarget::Roda) {
+        return Ok(());
+    }
+    fn visit(e: &crate::expr::Expr, target: &str, found: &mut bool) {
+        use crate::expr::ExprNode;
+        if matches!(&*e.node, ExprNode::CaseMatch { .. } | ExprNode::MatchPredicate { .. }
+            | ExprNode::MatchRequired { .. }) {
+            *found = true;
+            emit::diagnostics::report_unsupported(e.span, target, e.node.kind_str(),
+                "structural pattern matching requires a native Ruby target");
+        }
+        e.node.for_each_child(&mut |child| visit(child, target, found));
+    }
+    let mut found = false;
+    let mut f = |e: &crate::expr::Expr| visit(e, target.as_str(), &mut found);
+    crate::lower::for_each_emit_body_ref(app, &mut f);
+    if found {
+        return Err(format!("{}: structural pattern matching requires a native Ruby target", target.as_str()));
+    }
+    Ok(())
+}
+
 pub fn target_files(
     app: &App,
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    reject_unsupported_pattern_matches(app, target)?;
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
