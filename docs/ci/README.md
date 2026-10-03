@@ -28,13 +28,14 @@ The planner uses the actual PR merge tree against its base, includes both
 sides of a rename, and expands uncertain diff identity to full coverage.
 See the run's **plan** job for its selected jobs and reasons.
 
-Drafts run fixture preparation and unit tests only, even with `ci:full`.
+Drafts default to fixture preparation and unit tests only. `ci:full` overrides
+that floor and runs full validation while the PR is still a draft.
 Documentation-only PRs still receive checks; changes to the rendered user
 guide also select site/browser coverage.
 
 ## Request full or fresh validation
 
-- **More coverage:** ask a maintainer to apply `ci:full` to a ready PR. The
+- **More coverage:** ask a maintainer to apply `ci:full` to a ready or draft PR. The
   label triggers a full run of the current PR merge tree and keeps full
   coverage on later pushes. A comment requesting it is not itself a trigger.
 - **Fresh execution:** select **Re-run all jobs** on the desired run.

@@ -167,7 +167,7 @@ def archive_and_campfire_jobs(path, interpreter_only):
 
 
 def select(paths, *, draft=False, full=False, publish=False, project_scope=None):
-    if draft:
+    if draft and not full:
         return finish(
             BASE[:2],
             [],

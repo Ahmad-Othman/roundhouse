@@ -104,14 +104,48 @@ class Routing(unittest.TestCase):
                 self.assertEqual(plan["spinel_tests"], ["framework_tests_spinel"])
                 self.assertEqual(plan["archives"], [])
 
-    def test_draft_overrides_full_and_target_expansion(self):
+    def test_draft_without_full_retains_the_small_floor(self):
         plan = ci.select(
             ["src/emit/go/expressions.rs", ".github/workflows/ci.yml"],
             draft=True,
-            full=True,
         )
         self.assertEqual(plan["required"], ["generate-fixture", "unit"])
         self.assertNotIn("build-roundhouse", plan["jobs"])
+
+    def test_full_overrides_draft_without_enabling_publication(self):
+        plan = ci.select(["README.md"], draft=True, full=True)
+        self.assertEqual(plan["smoke"], ci.TARGETS)
+        self.assertTrue(plan["site"])
+        self.assertTrue(plan["wasm"])
+        self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+        self.assertIn("build-roundhouse", plan["required"])
+        self.assertIn("archive-results", plan["required"])
+        self.assertNotIn("assemble-site", plan["jobs"])
+
+    def test_draft_label_events_reach_full_selection_and_unlabel_returns_to_floor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            event = Path(directory) / "event.json"
+            env = {
+                "GITHUB_EVENT_PATH": str(event),
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_SHA": "1" * 40,
+                "CI_SPINEL_REVISION": "2" * 40,
+            }
+            for labels, expected_smoke in [([{"name": "ci:full"}], ci.TARGETS), ([], [])]:
+                with self.subTest(labels=labels):
+                    event.write_text(json.dumps({
+                        "pull_request": {"draft": True, "labels": labels}
+                    }))
+                    with (
+                        patch.dict(os.environ, env, clear=True),
+                        patch("sys.argv", ["ci-plan.py", "plan"]),
+                        patch.object(ci, "changed_inputs", return_value=(["README.md"], None)),
+                        patch.object(ci, "write_outputs") as output,
+                    ):
+                        self.assertEqual(ci.main(), 0)
+                    plan = output.call_args.args[0]["plan"]
+                    self.assertEqual(plan["smoke"], expected_smoke)
+                    self.assertNotIn("assemble-site", plan["jobs"])
 
     def test_contract_tests_do_not_expand_the_exercised_workflows(self):
         paths = [
