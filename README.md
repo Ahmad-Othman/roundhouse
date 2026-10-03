@@ -76,7 +76,9 @@ runtime itself rather than a translation of it. Basecamp's Campfire
 runs this way — every page and every cable frame compared against
 live Rails in the full validation cycle, and a
 [Docker archive](https://rubys.github.io/roundhouse/apps/campfire.html)
-you can run in minutes. → [Spinel](docs/guide/spinel.md)
+you can run in minutes. [OCRAN](https://github.com/Largo/ocran), the
+Ruby application packager, does the whole compile in one command:
+`ocran --roundhouse path/to/app`. → [Spinel](docs/guide/spinel.md)
 
 ## Get it
 
