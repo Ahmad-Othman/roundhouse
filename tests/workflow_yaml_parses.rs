@@ -188,6 +188,110 @@ fn campfire_docker_recipe_avoids_a_frontend_pull_and_ships_executable_boot() {
 }
 
 #[test]
+fn campfire_docker_smoke_caches_apt_for_eight_hours_and_always_builds() {
+    let workflow: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let job = &workflow["jobs"]["smoke-campfire-docker"];
+    let steps = job["steps"].as_sequence().unwrap();
+    let step = |name: &str| {
+        steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("missing step {name}"))
+    };
+
+    // job-level env cannot use the runner context (actionlint / GH docs).
+    // Cache keys may still use runner.os / runner.arch in steps.with.
+    if let Some(env) = job.get("env").and_then(|v| v.as_mapping()) {
+        for (key, value) in env {
+            let name = key.as_str().unwrap_or("");
+            let text = value.as_str().unwrap_or("");
+            assert!(
+                !text.contains("runner."),
+                "{name} job env must not reference runner context; got {text}"
+            );
+        }
+    }
+
+    let window = step("Campfire Docker apt cache window");
+    assert_eq!(window["id"].as_str(), Some("apt-window"));
+    let window_run = window["run"].as_str().unwrap();
+    assert!(window_run.contains("/ 28800"));
+    assert!(
+        window_run.contains("CAMPFIRE_DOCKER_CACHE=$RUNNER_TEMP/campfire-docker-buildkit"),
+        "cache path must come from $RUNNER_TEMP via GITHUB_ENV"
+    );
+
+    let restore = step("Restore Campfire Docker apt layers");
+    assert_eq!(restore["id"].as_str(), Some("docker-cache"));
+    assert_eq!(restore["continue-on-error"].as_bool(), Some(true));
+    assert_eq!(
+        restore["uses"].as_str(),
+        Some("actions/cache/restore@v4")
+    );
+    assert_eq!(
+        restore["with"]["path"].as_str(),
+        Some("${{ env.CAMPFIRE_DOCKER_CACHE }}")
+    );
+    let restore_key = restore["with"]["key"].as_str().unwrap();
+    assert!(restore_key.contains("campfire-docker-apt-"));
+    assert!(restore_key.contains("steps.apt-window.outputs.bucket"));
+    assert!(
+        restore["with"].get("restore-keys").is_none(),
+        "no cross-bucket restore-keys: a miss must re-resolve apt"
+    );
+
+    let smoke = step("Build and run the image");
+    let script = smoke["run"].as_str().unwrap();
+    assert!(
+        script.contains(r#"docker buildx build --load -t campfire "${cache_args[@]}" ."#),
+        "image must still be tagged campfire for docker run (README install)"
+    );
+    assert!(
+        script.contains("--driver docker-container")
+            && script.contains("docker buildx use campfire-docker-cache"),
+        "docker-container builder is required for type=local export on hosted runners"
+    );
+    assert!(script.contains("--cache-from"));
+    assert!(script.contains("--cache-to"));
+    assert!(script.contains("mode=max"));
+    assert!(
+        script.contains("ignore-error=true"),
+        "cache export failure must not abort HTTP checks"
+    );
+    assert!(
+        script.contains("GET /first_run") && script.contains("GET /account/logo"),
+        "HTTP checks must always run"
+    );
+    assert!(
+        !script.contains("sccache") && !script.contains("CCACHE"),
+        "do not hide the pack compile behind a compiler cache"
+    );
+
+    let save = step("Save Campfire Docker apt layers");
+    assert_eq!(save["continue-on-error"].as_bool(), Some(true));
+    assert_eq!(save["uses"].as_str(), Some("actions/cache/save@v4"));
+    assert_eq!(
+        save["if"].as_str(),
+        Some("steps.smoke.outcome == 'success' && steps.docker-cache.outputs.cache-hit != 'true'")
+    );
+    assert_eq!(save["with"]["key"].as_str(), Some(restore_key));
+
+    for step in steps {
+        let uses = step["uses"].as_str().unwrap_or("");
+        assert!(
+            !uses.contains("setup-buildx") && !uses.contains("build-push-action"),
+            "local BuildKit cache under actions/cache; no build-push-action GHA backend"
+        );
+    }
+
+    let policy = fs::read_to_string("docs/ci-reuse.md").unwrap();
+    assert!(policy.contains("eight-hour"));
+    assert!(policy.contains("Do not cache the make"));
+    assert!(policy.contains("primary key only") || policy.contains("no cross-bucket"));
+}
+
+#[test]
 fn rust_ci_uses_the_repository_pin_before_restoring_caches() {
     let workflow: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();

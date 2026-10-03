@@ -2499,6 +2499,14 @@ jobs:
   # sign-in, `/first_run` renders, and `/account/logo` -- a source-path
   # read the sign-in page triggers -- is found. Advisory like every
   # spinel job.
+  #
+  # Hosted rebuild is dominated by compiling pack/ (~95 s). The two apt
+  # layers (~30–38 s, parallel, ~460 MB BuildKit export) are reused for
+  # an eight-hour window via a local BuildKit cache under actions/cache.
+  # A new spin pack still recompiles; the three HTTP checks always run.
+  # A docker-container Buildx builder exports type=local on hosted
+  # runners (default docker driver may not); the image is still loaded
+  # and tagged `campfire` so docker run matches the README install.
   smoke-campfire-docker:
     needs: [build-campfire-archive, plan]
     if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'smoke-campfire-docker') && needs.build-campfire-archive.result == 'success' }}
@@ -2512,6 +2520,23 @@ jobs:
         with:
           name: campfire-archive
           path: campfire
+      - name: Campfire Docker apt cache window
+        id: apt-window
+        # UTC epoch / 28800 → eight-hour buckets. Primary key only: a miss
+        # re-resolves Debian packages instead of carrying an older bucket
+        # forward. runner.temp is set via $RUNNER_TEMP (job env cannot use
+        # the runner context).
+        run: |
+          echo "bucket=$(( $(date -u +%s) / 28800 ))" >> "$GITHUB_OUTPUT"
+          echo "CAMPFIRE_DOCKER_CACHE=$RUNNER_TEMP/campfire-docker-buildkit" >> "$GITHUB_ENV"
+      - name: Restore Campfire Docker apt layers
+        id: docker-cache
+        # Fail-open: a cache outage must not skip the README build.
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CAMPFIRE_DOCKER_CACHE }}
+          key: campfire-docker-apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.apt-window.outputs.bucket }}-v1
       - name: Build and run the image
         id: smoke
         run: |
@@ -2522,7 +2547,23 @@ jobs:
           fi
           tar xzf campfire/docker.tgz
           cd campfire-docker
-          docker build -t campfire .
+          cache_args=()
+          if [ -d "$CAMPFIRE_DOCKER_CACHE" ] && [ -n "$(ls -A "$CAMPFIRE_DOCKER_CACHE" 2>/dev/null || true)" ]; then
+            cache_args+=(--cache-from "type=local,src=$CAMPFIRE_DOCKER_CACHE")
+          fi
+          # Export after the build so a later successful save can seed the
+          # next run. mode=max keeps intermediate build-apt when pack/ changes.
+          # ignore-error: cache export must not abort the HTTP checks.
+          mkdir -p "$CAMPFIRE_DOCKER_CACHE"
+          cache_args+=(--cache-to "type=local,dest=$CAMPFIRE_DOCKER_CACHE,mode=max,ignore-error=true")
+          # docker-container builder supports local cache export on the
+          # hosted runner's default daemon. --load tags `campfire` so the
+          # subsequent docker run matches the README install path.
+          if ! docker buildx inspect campfire-docker-cache >/dev/null 2>&1; then
+            docker buildx create --name campfire-docker-cache --driver docker-container >/dev/null
+          fi
+          docker buildx use campfire-docker-cache
+          docker buildx build --load -t campfire "${cache_args[@]}" .
           docker run -d --name campfire -p 3000:3000 campfire
           for i in $(seq 1 30); do
             curl -sf -o /dev/null localhost:3000/first_run && break
@@ -2537,6 +2578,15 @@ jobs:
           docker logs campfire
           docker rm -f campfire >/dev/null
           [ "$root" = 302 ] && [ "$first" = 200 ] && [ "$logo" = 200 ]
+      - name: Save Campfire Docker apt layers
+        # Only after a green smoke, and only when the primary key missed —
+        # an exact hit already holds this window's layers. Fail-open.
+        if: steps.smoke.outcome == 'success' && steps.docker-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CAMPFIRE_DOCKER_CACHE }}
+          key: campfire-docker-apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.apt-window.outputs.bucket }}-v1
       - name: Record byte-specific archive validation
         if: always()
         env:
