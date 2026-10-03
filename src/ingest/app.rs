@@ -1619,6 +1619,14 @@ end
     // joins `dir`); map-VFS trees pass `""` and register app-relative.
     app.root = dir.display().to_string().trim_end_matches('/').to_string();
 
+    // A module-nested controller's relative superclass
+    // (`module Ns; class XController < BaseController`) names
+    // `Ns::BaseController` under Ruby's lexical lookup. Left bare, the
+    // parent matched no controller, the ancestry walk came back empty,
+    // and the whole filter chain (its own base's before_action AND
+    // ApplicationController's) vanished from the synthesized dispatcher.
+    qualify_relative_controller_superclasses(&mut app);
+
     // `app/models/post/summary.rb` often reopens `class Post` only to
     // hold `Post::Summary`. That reopen is a namespace, not a class of
     // its own: kept as a library class, it owns the file
@@ -3225,6 +3233,50 @@ fn map_enum_labels(app: &mut App) {
         }
     }
     crate::lower::for_each_hook_body(app, &mut |expr| map_const_receiver_sites(expr, &tables));
+}
+
+/// Resolve a controller's relative superclass against Ruby's lexical
+/// scope: in `module Ns; class XController < BaseController`, the
+/// superclass constant lookup tries `Ns::BaseController` first and only
+/// falls back to a top-level `BaseController`.
+///
+/// Rewrites only when the qualified name actually names an ingested
+/// controller, so `ApplicationController` inside `module Ns` stays
+/// top-level and no syntactically-ambiguous case is guessed at. A
+/// superclass already written qualified (`Admin::BaseController`) or
+/// absolute (`::Foo`) is left alone. Without this, `ancestor_chain`
+/// matched no parent and the intermediate base's filters (and
+/// ApplicationController's own chain) were dropped from descendants.
+fn qualify_relative_controller_superclasses(app: &mut App) {
+    let known: std::collections::HashSet<crate::ident::ClassId> =
+        app.controllers.iter().map(|c| c.name.clone()).collect();
+    for controller in &mut app.controllers {
+        let Some(parent) = controller.parent.clone() else { continue };
+        let raw = parent.0.as_str();
+        if raw.contains("::") || raw.starts_with("::") {
+            continue;
+        }
+        // The controller's enclosing namespaces, outermost first:
+        // `A::B::XController` → `["A", "B"]`.
+        let name = controller.name.0.as_str();
+        let mut segments: Vec<&str> = name.split("::").collect();
+        segments.pop();
+        // Ruby's lexical lookup walks innermost nesting outward, then
+        // the top level. Rewrite at the first candidate that exists.
+        for depth in (1..=segments.len()).rev() {
+            let candidate = format!("{}::{}", segments[..depth].join("::"), raw);
+            let id = crate::ident::ClassId(crate::ident::Symbol::from(candidate));
+            // `class Admin::NotesController < NotesController` names the
+            // top-level one: a class is never its own superclass.
+            if id == controller.name {
+                continue;
+            }
+            if known.contains(&id) {
+                controller.parent = Some(id);
+                break;
+            }
+        }
+    }
 }
 
 /// Resolve a model's `include <Const>` against Ruby's lexical scope:
