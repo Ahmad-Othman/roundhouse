@@ -175,13 +175,13 @@ jobs:
       - name: Identify fixture inputs
         id: gems
         env:
-          FIXTURE_RECIPE: ${{ hashFiles('bin/rh', 'scripts/create-blog', 'scripts/create-store', '.github/workflows/ci.yml') }}
+          FIXTURE_RECIPE: ${{ hashFiles('bin/rh', 'scripts/create-blog', 'scripts/create-store', 'scripts/test-store', '.github/workflows/ci.yml') }}
         run: |
           echo "$GEM_HOME/bin" >> "$GITHUB_PATH"
           platform="${ImageOS}-$(ruby -e 'print "#{RUBY_ENGINE}-#{RUBY_VERSION}-#{RUBY_PLATFORM}"')"
-          echo "platform=$platform" >> "$GITHUB_OUTPUT"
           echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
           tools="$(ruby -rbundler -e 'print "#{Gem::VERSION}-#{Bundler::VERSION}"')"
+          echo "platform=${platform}-${ImageVersion}-${tools}" >> "$GITHUB_OUTPUT"
           echo "fixture-key=fixture-source-v1-${RUNNER_OS}-${RUNNER_ARCH}-${platform}-${ImageVersion}-${tools}-$(date -u +%F)-${FIXTURE_RECIPE}" >> "$GITHUB_OUTPUT"
       - name: Restore fixture source snapshot
         id: fixture-cache
@@ -203,8 +203,8 @@ jobs:
             echo "generate=true" >> "$GITHUB_OUTPUT"
           fi
       - name: Cache installed fixture gems
-        # A weekly dependency key saves refreshed gems; Ruby patch/platform
-        # and runner OS isolate native extensions. Fresh generation still
+        # Weekly keys refresh dependencies only within the same runner
+        # image version, Ruby patch/platform and RubyGems/Bundler. Generation
         # checks for the latest Rails release, even on a gem-cache hit.
         continue-on-error: true
         uses: actions/cache@v6
@@ -218,8 +218,8 @@ jobs:
             ${{ env.GEM_HOME }}/gems
             ${{ env.GEM_HOME }}/plugins
             ${{ env.GEM_HOME }}/specifications
-          key: fixture-gems-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-${{ steps.gems.outputs.week }}
-          restore-keys: fixture-gems-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-
+          key: fixture-gems-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-${{ steps.gems.outputs.week }}
+          restore-keys: fixture-gems-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-
       - name: Install Rails
         if: steps.fixture.outputs.generate == 'true'
         run: gem install rails --no-document
@@ -236,10 +236,7 @@ jobs:
         # create-store runs these on fresh builds; a source hit is not a
         # test receipt. Install its locked bundle without updating the lock.
         if: steps.fixture.outputs.generate == 'false'
-        run: |
-          cd fixtures/store
-          BUNDLE_FROZEN=true bundle install --quiet
-          bin/rails test test/models/product_test.rb test/mailers/product_mailer_test.rb
+        run: scripts/test-store
       - name: Pack fixtures
         if: steps.fixture.outputs.generate == 'true'
         run: |

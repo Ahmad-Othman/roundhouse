@@ -112,13 +112,14 @@ CI prepares both fixtures once in the `generate-fixture` job and shares
 this run's artifact across the unit job and every per-target job — see
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 Installed gems are cached in an isolated `GEM_HOME`: native
-extensions are keyed by runner image, architecture and exact Ruby
-engine/version/platform. Weekly keys refresh the cache with a compatible
-fallback. Fresh generation still checks for the current Rails release.
+extensions are keyed by runner image version, architecture, exact Ruby
+engine/version/platform and RubyGems/Bundler. Weekly keys refresh with a
+compatible fallback. Fresh generation still checks for the current Rails release.
 
 First-attempt PR runs may restore the packed source fixture with an exact
-key covering the generator scripts, `bin/rh`, this workflow, observed runner
-image/version and architecture, Ruby engine/version/platform, RubyGems,
+key covering the generator scripts, shared `scripts/test-store` validation,
+`bin/rh`, this workflow, observed runner image/version and architecture,
+Ruby engine/version/platform, RubyGems,
 Bundler and UTC day. There are no source-cache fallback keys. The daily
 boundary deliberately snapshots floating gem resolution for less than
 one day; unchanged scripts alone do **not** imply identical generator output.
@@ -128,8 +129,9 @@ Normal GitHub cache scoping isolates PR writes from main and other PRs.
 Missing/unavailable caches fall back to generation; a corrupt restored
 archive fails rather than becoming a successful fixture result.
 
-The store's two guide tests execute on both paths: inside `create-store`
-on fresh generation, or after a frozen install of the restored app's bundle.
+The store's two guide tests execute on both paths through `scripts/test-store`,
+called by `create-store` on fresh generation or by CI after source restoration.
+It installs the app's frozen bundle before testing.
 Only source/database bytes are reused, never a validation result. Unit and
 selected downstream validation retain their own execution/reuse policy
 ([CI coverage and reuse](docs/ci-reuse.md)); no receipt is granted by this cache.
