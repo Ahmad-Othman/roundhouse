@@ -4520,11 +4520,18 @@ fn synthesize_redirect_controller(
             } else {
                 redirect_location_source(&redirect.location)
             };
-            let src = format!(
-                "def __redirect\n  redirect_to({}, status: :{})\nend\n",
-                location,
-                redirect_status_symbol(redirect.status),
-            );
+            let src = if location.contains('\n') || location.contains(';') {
+                format!(
+                    "def __redirect\n  location = begin\n    {location}\n  end\n  redirect_to(location, status: :{})\nend\n",
+                    redirect_status_symbol(redirect.status),
+                )
+            } else {
+                format!(
+                    "def __redirect\n  redirect_to({}, status: :{})\nend\n",
+                    location,
+                    redirect_status_symbol(redirect.status),
+                )
+            };
             let body = crate::runtime_src::parse_methods(&src)
                 .ok()
                 .and_then(|m| m.into_iter().next())

@@ -115,12 +115,19 @@ fn a_redirect_inside_a_namespace_keeps_the_one_controller() {
 #[test]
 fn a_block_that_builds_a_string_is_served() {
     let app = app_with(
-        "  get \"/reports\", to: \"reports#index\"\n  get \"/old\", to: redirect(status: 301) { |params, request| request.query_string.empty? ? \"/reports\" : \"/reports?#{request.query_string}\" }\n  get \"/older\", to: redirect { |_| \"/reports\" }\n  get \"/one\", to: redirect { |params| \"/reports/#{params[:id]}\" }\n",
+        "  get \"/reports\", to: \"reports#index\"\n  get \"/old\", to: redirect(status: 301) { |params, request| request.query_string.empty? ? \"/reports\" : \"/reports?#{request.query_string}\" }\n  get \"/older\", to: redirect { |_| \"/reports\" }\n  get \"/one\", to: redirect { |params| \"/reports/#{params[:id]}\" }\n  get \"/claim\", to: redirect(status: 301) { |_, request| qs = request.query_string; qs.present? ? \"/claim_analysis?#{qs}\" : \"/claim_analysis\" }\n  get \"/parks\", to: redirect { |params, req| query = req.query_string.empty? ? \"\" : \"?#{req.query_string}\"; \"/solar_parks/#{params[:solar_park_slug]}#{query}\" }\n",
     );
     let emitted = redirect_controller(&app);
     assert!(emitted.contains("query_string"), "built path; got:\n{emitted}");
     assert!(emitted.contains("def older"), "unused parameter; got:\n{emitted}");
     assert!(emitted.contains("params[:id]") || emitted.contains("@params"), "one-arg interpolation; got:\n{emitted}");
+    assert!(
+        emitted.contains("claim_analysis") && emitted.contains("strip.empty?"),
+        "multi-statement present?; got:\n{emitted}"
+    );
+    assert!(emitted.contains("status: :moved_permanently"), "status survived; got:\n{emitted}");
+    assert!(emitted.contains("solar_park_slug"), "req and params[]; got:\n{emitted}");
+    assert!(emitted.contains("request.query_string"), "req renamed; got:\n{emitted}");
 }
 
 #[test]

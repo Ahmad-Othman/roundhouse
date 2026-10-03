@@ -370,7 +370,7 @@ fn redirect_literal(node: &Node<'_>) -> Option<(String, u16)> {
         return None;
     }
     if let Some(block) = call.block().and_then(|block| block.as_block_node()) {
-        return redirect_block(block);
+        return redirect_block(block, redirect_status_from_call(&call));
     }
     let Some(arguments) = call.arguments() else { return None };
     let mut location = None;
@@ -401,7 +401,7 @@ fn redirect_literal(node: &Node<'_>) -> Option<(String, u16)> {
 /// `redirect { |params, request| "/path" }` when the block returns a
 /// string. One or two block parameters are accepted. A block that does
 /// not return a string stays unsupported.
-fn redirect_block(block: ruby_prism::BlockNode<'_>) -> Option<(String, u16)> {
+fn redirect_block(block: ruby_prism::BlockNode<'_>, status: u16) -> Option<(String, u16)> {
     let params = block.parameters().and_then(|params| params.as_block_parameters_node());
     let names = params
         .and_then(|params| params.parameters())
@@ -417,27 +417,54 @@ fn redirect_block(block: ruby_prism::BlockNode<'_>) -> Option<(String, u16)> {
         return None;
     }
     let body = block.body()?;
-    let statements: Vec<_> = body.as_statements_node().map(|node| node.body().iter().collect()).unwrap_or_else(|| vec![body]);
-    let [statement] = statements.as_slice() else { return None };
-    if let Some(literal) = string_value(statement) {
-        return Some((literal, 301));
-    }
-    let source = super::expr::ingest_expr(statement, "<redirect>").ok()?;
+    let source = super::expr::ingest_expr(&body, "<redirect>").ok()?;
     if !redirect_expression_is_string(&source) {
         return None;
     }
     let mut rendered = crate::emit::ruby::emit_expr(&source);
-    for name in ["request", "req"] {
-        rendered = rendered.replace(name, "request");
+    // The synthesized action reads the request as `request`. A block
+    // parameter named `req` is the same object.
+    rendered = rendered.replace("req.", "request.");
+    Some((format!("\u{0}{rendered}"), status))
+}
+
+fn redirect_status_from_call(call: &ruby_prism::CallNode<'_>) -> u16 {
+    let Some(arguments) = call.arguments() else { return 301 };
+    for argument in arguments.arguments().iter() {
+        let Some(hash) = argument.as_keyword_hash_node() else { continue };
+        for element in hash.elements().iter() {
+            let Some(assoc) = element.as_assoc_node() else { continue };
+            let Some(key) = symbol_value(&assoc.key()) else { continue };
+            if key.as_str() != "status" {
+                continue;
+            }
+            if let Some(code) = assoc
+                .value()
+                .as_integer_node()
+                .and_then(|i| super::util::integer_i64(&i.value()))
+                .and_then(|i| u16::try_from(i).ok())
+            {
+                return code;
+            }
+        }
     }
-    Some((format!("\u{0}{rendered}"), 301))
+    301
 }
 
 fn redirect_expression_is_string(expr: &crate::expr::Expr) -> bool {
     match &*expr.node {
-        crate::expr::ExprNode::Lit { value: crate::expr::Literal::Str { .. } | crate::expr::Literal::Nil } => true,
-        crate::expr::ExprNode::StringInterp { .. } | crate::expr::ExprNode::If { .. } => true,
-        crate::expr::ExprNode::Send { method, .. } if matches!(method.as_str(), "query_string" | "path" | "fullpath" | "to_s" | "+") => true,
+        crate::expr::ExprNode::Lit { value: crate::expr::Literal::Str { .. } } => true,
+        crate::expr::ExprNode::StringInterp { .. } => true,
+        crate::expr::ExprNode::If { then_branch, else_branch, .. } => {
+            redirect_expression_is_string(then_branch) && redirect_expression_is_string(else_branch)
+        }
+        crate::expr::ExprNode::Send { method, .. } => matches!(
+            method.as_str(),
+            "query_string" | "path" | "fullpath" | "to_s" | "+" | "[]"
+        ),
+        crate::expr::ExprNode::Seq { exprs } => exprs
+            .last()
+            .is_some_and(redirect_expression_is_string),
         _ => false,
     }
 }
