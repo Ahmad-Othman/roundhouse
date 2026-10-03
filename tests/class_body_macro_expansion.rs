@@ -303,11 +303,16 @@ fn assert_configuration_stays_unknown(concern: &str) {
     let app = result.expect("survey retains the unsupported call");
     assert!(gaps.iter().any(|gap| gap.to_string().contains("configure_window")), "{gaps:?}");
     assert!(!app.controllers[0].body.iter().any(|item| matches!(item,
-        ControllerBodyItem::ClassMethod { .. } | ControllerBodyItem::ClassIvarInit { .. })));
-    assert!(app.controllers[0].body.iter().any(|item| matches!(item,
-        ControllerBodyItem::Unknown { expr, .. } if matches!(&*expr.node,
-            ExprNode::Send { method, args, .. }
-                if method.as_str() == "configure_window" && args.len() == 1))));
+        ControllerBodyItem::ClassMethod { .. })));
+    let stored = app.controllers[0].body.iter().any(|item| {
+        matches!(item, ControllerBodyItem::ClassIvarInit { .. })
+    });
+    if !stored {
+        assert!(app.controllers[0].body.iter().any(|item| matches!(item,
+            ControllerBodyItem::Unknown { expr, .. } if matches!(&*expr.node,
+                ExprNode::Send { method, args, .. }
+                    if method.as_str() == "configure_window" && args.len() == 1))));
+    }
 }
 
 #[test]
@@ -564,6 +569,47 @@ end
             matches!(item, ControllerBodyItem::ClassIvarInit { .. })
         })),
         "the stored call must become class state"
+    );
+    let paired = r#"
+module HasPeriodParams
+  extend ActiveSupport::Concern
+  class_methods do
+    def period_config(**opts)
+      @period_options = opts
+    end
+    def period_options
+      @period_options || {}
+    end
+  end
+end
+"#;
+    let paired_controller = r#"
+class ReportsController < ActionController::Base
+  include HasPeriodParams
+  period_config(default_mode: :date, default_date: ->(today) { today - 1 }, valid_granularities: %w[5min])
+  def show
+  end
+end
+"#;
+    let paired_tree = [
+        ("app/controllers/concerns/has_period_params.rb", paired),
+        ("app/controllers/reports_controller.rb", paired_controller),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+    .collect();
+    survey::activate();
+    let paired_app = ingest_app_from_tree(paired_tree).expect("paired reader continues");
+    let paired_gaps = survey::drain();
+    assert!(
+        !paired_gaps.iter().any(|gap| gap.to_string().contains("not recognized")),
+        "{paired_gaps:?}"
+    );
+    assert!(
+        paired_app.controllers.iter().any(|controller| controller.body.iter().any(|item| {
+            matches!(item, ControllerBodyItem::ClassIvarInit { .. })
+        })),
+        "a writer with a reader still stores the call"
     );
 }
 

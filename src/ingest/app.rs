@@ -2885,23 +2885,21 @@ fn expand_class_body_macros(app: &mut App) {
                 expanded.push(item);
                 continue;
             };
-            let slot = match &*macro_def.body.node {
-                crate::expr::ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, .. } => {
-                    Some(name.clone())
-                }
-                _ => None,
-            };
-            let paired_reader = slot.as_ref().is_some_and(|slot| {
-                app.library_classes.iter().any(|lc| {
-                    lc.name == module
-                        && lc.methods.iter().any(|method| {
-                            method.name != macro_def.name
-                                && format!("{:?}", method.body).contains(slot.as_str())
-                        })
-                })
-            });
-            if method_stores_keyword_rest(&macro_def) && !paired_reader {
+            // A reader beside the writer is the normal shape
+            // (`def options; @options || {}; end`). The writer still
+            // only stores the keyword rest, so the call is consumed.
+            // An attached block never reaches this arm.
+            if method_stores_keyword_rest(&macro_def)
+                && !super::class_configuration::configuration_refused(controller.name.0.as_str())
+            {
                 if let Some(init) = stored_options_init(expr, &macro_def) {
+                    survey::record(&IngestError::Unsupported {
+                        file: controller.name.0.as_str().to_string(),
+                        message: format!(
+                            "class configuration call stored: `{}`",
+                            method.as_str()
+                        ),
+                    });
                     expanded.push(ControllerBodyItem::ClassIvarInit {
                         expr: init,
                         carrier: module,
