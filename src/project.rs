@@ -1001,7 +1001,7 @@ pub fn target_files(
             return Err(format!("class-instance-variable initialization is not supported ({})", target.as_str()));
         }
     }
-    let files = match target {
+    let files = crate::timings::phase(format_args!("emit {}: assemble", target.as_str()), || match target {
         BuildTarget::Blog => blog_files(fixture),
         BuildTarget::Spinel => spinel_files(app, fixture).and_then(|(files, _)| spin_shape(files)),
         // The ruby family gets the bundled-library requires too: the
@@ -1024,7 +1024,7 @@ pub fn target_files(
             app,
             &crate::profile::DeploymentProfile::worker(),
         ))),
-    }?;
+    })?;
 
     // Ruby-family trees ship the framework runtime as verbatim text, so
     // their tree-shake runs here, on the finished file set (after
@@ -1043,7 +1043,9 @@ pub fn target_files(
             .map(|s| s.as_str().to_string())
             .collect();
         let mut files = files;
-        emit::ruby::shake::shake_tree(&mut files, &synth_shakeable, target.as_str());
+        crate::timings::phase(format_args!("emit {}: tree shake", target.as_str()), || {
+            emit::ruby::shake::shake_tree(&mut files, &synth_shakeable, target.as_str());
+        });
         files
     } else {
         files
@@ -5460,6 +5462,11 @@ fn trim_gemfile(content: &str, has_js: bool, has_cable: bool) -> String {
 /// comments are skipped: the cookie jar explains a `Set.new` rewrite in
 /// one, and that is not a use.
 fn names_constant(src: &str, konst: &str) -> bool {
+    // Most files never mention this name. Reject those with the optimized
+    // substring search before walking/decoding every line of the runtime.
+    if !src.contains(konst) {
+        return false;
+    }
     src.lines().any(|line| {
         if line.trim_start().starts_with('#') {
             return false;
@@ -5499,6 +5506,9 @@ fn names_constant(src: &str, konst: &str) -> bool {
 /// True where the emitted program defines the constant itself, in which
 /// case the bundled library is not what the name refers to.
 fn defines_constant(src: &str, konst: &str) -> bool {
+    if !src.contains(konst) {
+        return false;
+    }
     src.lines().any(|line| {
         let trimmed = line.trim_start();
         ["class ", "module "].iter().any(|kw| {
@@ -5522,6 +5532,9 @@ fn defines_constant(src: &str, konst: &str) -> bool {
 /// `packages/erb` (a `class`) collided with the shim (a `module`). The
 /// lobsters AOT lane was red for ten days on that comment.
 fn requires_feature(src: &str, require_line: &str) -> bool {
+    if !src.contains(require_line) {
+        return false;
+    }
     src.lines().any(|line| {
         let trimmed = line.trim_start();
         trimmed
