@@ -146,14 +146,14 @@ end"#;
 #[test]
 fn private_class_method_follows_module_function() {
     for source in [
-        "module DerivedBulkWrite\n  module_function\n  def materialize_exact\n    1\n  end\n  private_class_method :materialize_exact\nend\n",
-        "module DerivedBulkWrite\n  def materialize_exact\n    1\n  end\n  module_function :materialize_exact\n  private_class_method :materialize_exact\nend\n",
-        "module DerivedBulkWrite\n  module_function\n  def materialize_exact\n    1\n  end\n  def other\n    2\n  end\n  private_class_method :materialize_exact, :other\nend\n",
+        "module BulkWrite\n  module_function\n  def build_row\n    1\n  end\n  private_class_method :build_row\nend\n",
+        "module BulkWrite\n  def build_row\n    1\n  end\n  module_function :build_row\n  private_class_method :build_row\nend\n",
+        "module BulkWrite\n  module_function\n  def build_row\n    1\n  end\n  def other\n    2\n  end\n  private_class_method :build_row, :other\nend\n",
     ] {
         let classes = ingest_library_classes(source.as_bytes(), "thing.rb").expect(source);
         let methods = &classes[0].methods;
         assert_eq!(
-            visibility(methods, "materialize_exact", MethodReceiver::Class),
+            visibility(methods, "build_row", MethodReceiver::Class),
             MethodVisibility::Private,
             "{source}"
         );
@@ -165,15 +165,15 @@ fn private_class_method_follows_module_function() {
             );
         }
     }
-    let restored = "module DerivedBulkWrite\n  module_function\n  def materialize_exact\n    1\n  end\n  private_class_method :materialize_exact\n  public_class_method :materialize_exact\nend\n";
+    let restored = "module BulkWrite\n  module_function\n  def build_row\n    1\n  end\n  private_class_method :build_row\n  public_class_method :build_row\nend\n";
     let restored_methods = &ingest_library_classes(restored.as_bytes(), "thing.rb")
         .expect("public_class_method")[0]
         .methods;
     assert_eq!(
-        visibility(restored_methods, "materialize_exact", MethodReceiver::Class),
+        visibility(restored_methods, "build_row", MethodReceiver::Class),
         MethodVisibility::Public
     );
-    let undefined = "module DerivedBulkWrite\n  module_function\n  def materialize_exact\n    1\n  end\n  private_class_method :missing\nend\n";
+    let undefined = "module BulkWrite\n  module_function\n  def build_row\n    1\n  end\n  private_class_method :missing\nend\n";
     assert!(
         ingest_library_classes(undefined.as_bytes(), "thing.rb").is_err(),
         "a name module_function never copied stays an error"

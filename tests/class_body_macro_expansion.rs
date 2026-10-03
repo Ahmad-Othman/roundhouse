@@ -534,41 +534,41 @@ fn configuration_refusals_preserve_the_survey_and_original_body() {
 fn store_writer_spellings_are_consumed_or_named() {
     use roundhouse::ingest::survey;
     let shapes = [
-        ("bare keywords", "period_config default_mode: :month, valid_granularities: %w[daily], default_granularity: \"daily\", max_future_days: 0, clamp_range_to_first_date: true"),
-        ("parentheses", "period_config(default_mode: :month, valid_granularities: %w[daily])"),
-        ("lambda arg", "period_config default_date: ->(today) { today - 1 }, default_mode: :date"),
-        ("percent i", "period_config valid_granularities: %i[daily hourly]"),
-        ("string array", "period_config valid_granularities: [\"daily\", \"hourly\"]"),
-        ("symbol array", "period_config only: [:show], except: [:index]"),
-        ("true false nil", "period_config clamp_range_to_first_date: true, max_future_days: 0, empty: nil"),
-        ("multiline", "period_config default_mode: :month,\n    valid_granularities: %w[daily]"),
-        ("included block", "included do\n  helper :period\nend\n  period_config default_mode: :month"),
-        ("block stays", "period_config(default_mode: :month) { :ready }"),
+        ("bare keywords", "configure_window mode: :open, valid_steps: %w[one], default_step: \"one\", max_ahead: 0, clamp_start: true"),
+        ("parentheses", "configure_window(mode: :open, valid_steps: %w[one])"),
+        ("lambda arg", "configure_window default_date: ->(today) { today - 1 }, mode: :closed"),
+        ("percent i", "configure_window valid_steps: %i[one two]"),
+        ("string array", "configure_window valid_steps: [\"one\", \"two\"]"),
+        ("symbol array", "configure_window only: [:show], except: [:index]"),
+        ("true false nil", "configure_window clamp_start: true, max_ahead: 0, empty: nil"),
+        ("multiline", "configure_window mode: :open,\n    valid_steps: %w[one]"),
+        ("included block", "included do\n  helper :current\nend\n  configure_window mode: :open"),
+        ("block stays", "configure_window(mode: :open) { :ready }"),
     ];
     for (label, call) in shapes {
         let concern = r#"
-module HasPeriodParams
+module WindowSettings
   extend ActiveSupport::Concern
   class_methods do
-    def period_config(**opts)
-      @period_options = opts
+    def configure_window(**opts)
+      @window_options = opts
     end
-    def period_options
-      @period_options || {}
+    def window_options
+      @window_options || {}
     end
   end
-  def period
-    @period
+  def current
+    @current
   end
-  helper :period
+  helper :current
 end
 "#;
         let controller = format!(
-            "class DashboardsController < InertiaController\n  include HasPeriodParams\n  {call}\nend\n"
+            "class ReportsController < BaseController\n  include WindowSettings\n  {call}\nend\n"
         );
         let tree = [
-            ("app/controllers/concerns/has_period_params.rb", concern),
-            ("app/controllers/inertia_controller.rb", "class InertiaController < ActionController::Base\nend\n"),
+            ("app/controllers/concerns/window_settings.rb", concern),
+            ("app/controllers/base_controller.rb", "class BaseController < ActionController::Base\nend\n"),
             ("app/controllers/dashboards_controller.rb", controller.as_str()),
         ]
         .into_iter()
@@ -592,31 +592,31 @@ end
 fn a_concern_with_an_instance_method_still_stores_its_writer() {
     use roundhouse::ingest::survey;
     let concern = r#"
-module HasPeriodParams
+module WindowSettings
   extend ActiveSupport::Concern
   class_methods do
-    def period_config(**opts)
-      @period_options = opts
+    def configure_window(**opts)
+      @window_options = opts
     end
-    def period_options
-      @period_options || {}
+    def window_options
+      @window_options || {}
     end
   end
-  def period
-    @period
+  def current
+    @current
   end
-  helper :period
+  helper :current
 end
 "#;
     let controller = r#"
-class DashboardsController < InertiaController
-  include HasPeriodParams
-  period_config default_mode: :month, valid_granularities: %w[daily], default_granularity: "daily"
+class ReportsController < BaseController
+  include WindowSettings
+  configure_window mode: :open, valid_steps: %w[one], default_step: "one"
 end
 "#;
     let tree = [
-        ("app/controllers/concerns/has_period_params.rb", concern),
-        ("app/controllers/inertia_controller.rb", "class InertiaController < ActionController::Base\nend\n"),
+        ("app/controllers/concerns/window_settings.rb", concern),
+        ("app/controllers/base_controller.rb", "class BaseController < ActionController::Base\nend\n"),
         ("app/controllers/dashboards_controller.rb", controller),
     ]
     .into_iter()
@@ -626,7 +626,7 @@ end
     let app = ingest_app_from_tree(tree).expect("concern with instance method");
     let gaps = survey::drain();
     let stored = app.controllers.iter().any(|controller| {
-        controller.name.0.as_str() == "DashboardsController"
+        controller.name.0.as_str() == "ReportsController"
             && controller.body.iter().any(|item| matches!(item, ControllerBodyItem::ClassIvarInit { .. }))
     });
     let verified = format!("{:?}", app.library_classes.iter().map(|lc| lc.name.0.as_str()).collect::<Vec<_>>());
@@ -644,25 +644,25 @@ end
 fn a_store_only_class_method_is_not_an_unrecognized_macro() {
     use roundhouse::ingest::survey;
     let concern = r#"
-module HasPeriodParams
+module WindowSettings
   extend ActiveSupport::Concern
   class_methods do
-    def period_config(**opts)
-      @period_options = opts
+    def configure_window(**opts)
+      @window_options = opts
     end
   end
 end
 "#;
     let controller = r#"
 class ReportsController < ActionController::Base
-  include HasPeriodParams
-  period_config(default_mode: :month, default_date: ->(today) { today - 1 })
+  include WindowSettings
+  configure_window(mode: :open, default_date: ->(today) { today - 1 })
   def show
   end
 end
 "#;
     let tree = [
-        ("app/controllers/concerns/has_period_params.rb", concern),
+        ("app/controllers/concerns/window_settings.rb", concern),
         ("app/controllers/reports_controller.rb", controller),
     ]
     .into_iter()
@@ -682,28 +682,28 @@ end
         "the stored call must become class state"
     );
     let paired = r#"
-module HasPeriodParams
+module WindowSettings
   extend ActiveSupport::Concern
   class_methods do
-    def period_config(**opts)
-      @period_options = opts
+    def configure_window(**opts)
+      @window_options = opts
     end
-    def period_options
-      @period_options || {}
+    def window_options
+      @window_options || {}
     end
   end
 end
 "#;
     let paired_controller = r#"
 class ReportsController < ActionController::Base
-  include HasPeriodParams
-  period_config(default_mode: :date, default_date: ->(today) { today - 1 }, valid_granularities: %w[5min])
+  include WindowSettings
+  configure_window(mode: :closed, default_date: ->(today) { today - 1 }, valid_steps: %w[one])
   def show
   end
 end
 "#;
     let paired_tree = [
-        ("app/controllers/concerns/has_period_params.rb", paired),
+        ("app/controllers/concerns/window_settings.rb", paired),
         ("app/controllers/reports_controller.rb", paired_controller),
     ]
     .into_iter()
@@ -723,16 +723,16 @@ end
         "a writer with a reader still stores the call"
     );
     let inherited = r#"
-class DashboardsController < InertiaController
-  include HasPeriodParams
-  period_config default_mode: :month, valid_granularities: %w[daily], default_granularity: "daily", max_future_days: 0, clamp_range_to_first_date: true
+class ReportsController < BaseController
+  include WindowSettings
+  configure_window mode: :open, valid_steps: %w[one], default_step: "one", max_ahead: 0, clamp_start: true
   def show
   end
 end
 "#;
     let inherited_tree = [
-        ("app/controllers/concerns/has_period_params.rb", paired),
-        ("app/controllers/inertia_controller.rb", "class InertiaController < ActionController::Base\nend\n"),
+        ("app/controllers/concerns/window_settings.rb", paired),
+        ("app/controllers/base_controller.rb", "class BaseController < ActionController::Base\nend\n"),
         ("app/controllers/dashboards_controller.rb", inherited),
     ]
     .into_iter()
@@ -742,15 +742,15 @@ end
     let inherited_app = ingest_app_from_tree(inherited_tree).expect("unparenthesized inherited call");
     let inherited_gaps = survey::drain();
     assert!(
-        !inherited_gaps.iter().any(|gap| gap.to_string().contains("not recognized") && gap.to_string().contains("period_config")),
+        !inherited_gaps.iter().any(|gap| gap.to_string().contains("not recognized") && gap.to_string().contains("configure_window")),
         "{inherited_gaps:?}"
     );
     assert!(
-        inherited_app.controllers.iter().any(|controller| controller.name.0.as_str() == "DashboardsController" && controller.body.iter().any(|item| {
+        inherited_app.controllers.iter().any(|controller| controller.name.0.as_str() == "ReportsController" && controller.body.iter().any(|item| {
             matches!(item, ControllerBodyItem::ClassIvarInit { .. })
         })),
         "unparenthesized call on a subclass must store: {:?}",
-        inherited_app.controllers.iter().find(|c| c.name.0.as_str() == "DashboardsController").map(|c| c.body.iter().map(|item| format!("{item:?}")).collect::<Vec<_>>())
+        inherited_app.controllers.iter().find(|c| c.name.0.as_str() == "ReportsController").map(|c| c.body.iter().map(|item| format!("{item:?}")).collect::<Vec<_>>())
     );
 }
 
