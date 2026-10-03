@@ -19,13 +19,26 @@ spec.loader.exec_module(ci)
 
 @contextmanager
 def git_repository():
+    env = os.environ.copy()
+    for name in (
+        "GIT_DIR",
+        "GIT_COMMON_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_PREFIX",
+    ):
+        env.pop(name, None)
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
 
         def git(*args):
             return (
                 subprocess.check_output(
-                    ["git", "-C", directory, *args], stderr=subprocess.DEVNULL
+                    ["git", "-C", directory, *args],
+                    stderr=subprocess.DEVNULL,
+                    env=env,
                 )
                 .decode()
                 .strip()
@@ -37,7 +50,9 @@ def git_repository():
         previous = os.getcwd()
         try:
             os.chdir(root)
-            yield root, git
+            # Direct planner calls and CLI subprocesses also see the clean env.
+            with patch.dict(os.environ, env, clear=True):
+                yield root, git
         finally:
             os.chdir(previous)
 
@@ -400,6 +415,66 @@ class Results(unittest.TestCase):
 
 
 class MergeTree(unittest.TestCase):
+    def test_fixture_ignores_inherited_git_locations(self):
+        with git_repository() as (outer, outer_git):
+            (outer / "sentinel").write_text("unchanged\n")
+            outer_git("add", ".")
+            outer_git("commit", "-m", "outer")
+            outer_head = outer_git("rev-parse", "HEAD")
+            locations = {
+                "GIT_DIR": str(outer / ".git"),
+                "GIT_COMMON_DIR": str(outer / ".git"),
+                "GIT_WORK_TREE": str(outer),
+                "GIT_INDEX_FILE": str(outer / ".git/index"),
+                "GIT_OBJECT_DIRECTORY": str(outer / ".git/objects"),
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(outer / ".git/objects"),
+                "GIT_PREFIX": "wrong/",
+            }
+            with patch.dict(os.environ, {**locations, "CI_FIXTURE_MARKER": "kept"}):
+                with git_repository() as (root, git):
+                    self.assertEqual(Path(git("rev-parse", "--show-toplevel")), root)
+                    self.assertEqual(os.environ["CI_FIXTURE_MARKER"], "kept")
+                    (root / "README.md").write_text("base\n")
+                    git("add", ".")
+                    git("commit", "-m", "base")
+                    base = git("rev-parse", "HEAD")
+                    (root / "README.md").write_text("changed\n")
+                    git("add", ".")
+                    git("commit", "-m", "docs")
+                    head = git("rev-parse", "HEAD")
+                    self.assertEqual(
+                        ci.changed_inputs({"before": base}, "push", head),
+                        (["README.md"], None),
+                    )
+                    event_path = root / "event.json"
+                    event_path.write_text(json.dumps({"before": base}))
+                    output = subprocess.check_output(
+                        ["python3", "-B", ci.__file__, "plan"],
+                        env={
+                            **os.environ,
+                            "GITHUB_EVENT_PATH": str(event_path),
+                            "GITHUB_EVENT_NAME": "push",
+                            "GITHUB_SHA": head,
+                            "GITHUB_OUTPUT": os.devnull,
+                            "GITHUB_STEP_SUMMARY": os.devnull,
+                            "CI_FULL": "false",
+                            "CI_PUBLISH": "false",
+                            "CI_SPINEL_REVISION": "a" * 40,
+                        },
+                        text=True,
+                    )
+                    jobs = next(
+                        line[5:]
+                        for line in output.splitlines()
+                        if line.startswith("jobs=")
+                    )
+                    self.assertEqual(json.loads(jobs), ci.BASE)
+                self.assertEqual(
+                    {name: os.environ[name] for name in locations}, locations
+                )
+            self.assertEqual(outer_git("rev-parse", "HEAD"), outer_head)
+            self.assertEqual(outer_git("status", "--porcelain"), "")
+
     def test_diff_tracks_both_rename_owners_and_deletions(self):
         with git_repository() as (root, git):
             (root / "src/emit").mkdir(parents=True)
