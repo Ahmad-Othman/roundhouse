@@ -444,7 +444,12 @@ fn configuration_does_not_admit_class_body_reads_or_method_overrides() {
 #[test]
 fn a_module_singleton_is_not_a_concern_carrier() {
     let concern = WINDOW_SETTINGS.replace("class_methods do", "class << self");
-    assert_configuration_stays_unknown(&concern);
+    let app = configuration_app(&concern, "configure_window mode: :month")
+        .expect("class << self is a class-method carrier");
+    assert!(
+        app.controllers[0].body.iter().any(|item| matches!(item, ControllerBodyItem::ClassIvarInit { .. })),
+        "the includer call is stored"
+    );
     for declaration in ["class_methods do", "module ClassMethods"] {
         let concern = WINDOW_SETTINGS
             .replace("class_methods do", declaration)

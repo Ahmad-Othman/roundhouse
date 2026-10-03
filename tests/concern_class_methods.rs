@@ -172,6 +172,7 @@ fn class_shift_self_reaches_the_including_model() {
     );
 }
 
+#[test]
 fn module_own_singletons_do_not_reach_the_includer() {
     let m = message();
     assert!(

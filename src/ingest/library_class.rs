@@ -2519,9 +2519,9 @@ pub fn ingest_concern_class_method_spans(
             // names onto includers exactly as it does for `class_methods
             // do` / `module ClassMethods`.
             if let Some(singleton) = stmt.as_singleton_class_node() {
-                // `class << self` is the class-method carrier, not a
-                // nested singleton that hides the methods from an includer.
-                // `module_function` stays on the module.
+                // `class << self` is a class-method carrier. Record the
+                // defs so an includer receives them. `module_function`
+                // is not this node and stays on the module.
                 if singleton.expression().as_self_node().is_some() {
                     defs_in(singleton.body(), file, &mut spans);
                 }
