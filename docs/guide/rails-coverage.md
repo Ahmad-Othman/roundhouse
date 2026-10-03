@@ -25,7 +25,7 @@ tiers.
 comments, nested routes, validations, Turbo Streams, Action Cable,
 Tailwind, JSON endpoints) is the shared DOM-equivalence fixture for
 **every server target** in full validation. Ordinary PRs/main pushes run
-the compact floor plus selected target lanes; see [CI coverage](../ci-reuse.md).
+the compact floor plus selected target lanes; see [CI coverage](../ci/README.md).
 A passing target's comparison proves the blog's features on that target.
 
 **Campfire** (Basecamp's chat product — file attachments with image

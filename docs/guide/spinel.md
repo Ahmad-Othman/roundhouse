@@ -151,7 +151,7 @@ live updates over the socket — from `docker run -p 3000:3000`.
 [rubys.github.io/roundhouse/campfire/docker.tgz](https://rubys.github.io/roundhouse/campfire/docker.tgz)
 is that archive, refreshed by scheduled full validation or an explicitly
 publishing manual run on canonical main. PR archive checks never publish it;
-see [CI coverage](../ci-reuse.md). It is the fastest way to see the door's
+see [CI publication](../ci/README.md#publication-is-separate). It is the fastest way to see the door's
 end state before pointing it at your own app.
 
 ## What to expect

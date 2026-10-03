@@ -39,7 +39,7 @@ app's model and controller tests and a Playwright `e2e/` suite; the
 The lanes below run across targets in full validation, scheduled every four
 hours or requested manually. Ordinary PRs/main pushes use a compact floor plus
 targeted additions; maintainers can request full PR coverage with `ci:full`.
-See [CI coverage](../ci-reuse.md). The lanes use the blog fixture
+See [CI coverage](../ci/README.md). The lanes use the blog fixture
 (`fixtures/real-blog`: articles, comments,
 nested routes, validations, Turbo Streams over Action Cable, Tailwind)
 unless another app is named. A target's row in

@@ -279,7 +279,7 @@ apps get the same fallback for Sequel-DSL migrations via
 The real-blog fixture generator (`scripts/create-blog`) runs
 `rails db:prepare` after generating migrations, so `schema.rb`
 always exists by the time ingest runs. See
-[`../../DEVELOPMENT.md`](../../DEVELOPMENT.md#fixtures).
+[fixture setup](../development/testing.md#fixtures).
 
 ## Test fixtures: `test/fixtures/*.yml`
 

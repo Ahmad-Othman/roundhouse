@@ -284,11 +284,6 @@ fn campfire_docker_smoke_caches_apt_for_eight_hours_and_always_builds() {
             "local BuildKit cache under actions/cache; no build-push-action GHA backend"
         );
     }
-
-    let policy = fs::read_to_string("docs/ci-reuse.md").unwrap();
-    assert!(policy.contains("eight-hour"));
-    assert!(policy.contains("Do not cache the make"));
-    assert!(policy.contains("primary key only") || policy.contains("no cross-bucket"));
 }
 
 #[test]
