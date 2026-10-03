@@ -79,7 +79,20 @@ helper, without additional Python packages.
 | `wasm/` | WASM build and IDE/playground/studio browser verification |
 | Site/guide sources | Site/archive build and WASM verification, without publishing |
 | Shared compare, framework, archive, or E2E harness | The checks owned by that harness |
+| Proven body-only edits in `src/project.rs`'s interpreted Ruby/JRuby builders | Ruby/JRuby comparison and archive smokes, plus Writebook inventory |
+| Proven body-only edits in its shared Ruby/Spinel builders | Ruby/JRuby owners plus all native Spinel/Campfire consumers and Writebook inventory; no unrelated target or WASM fanout |
 | Cross-target packaging, CI policy/workflows/planner, Cargo/build/toolchain policy, unknown new target | Full validation |
+
+Project assembly is narrowed only when the base and event trees differ solely
+inside the bodies of `ruby_runtime_files`, `jruby_runtime_files`,
+`ruby_family_runtime_files`, `spinel_files` or `spin_shape`. Signatures and
+every byte outside those bodies must remain identical. Shared helpers,
+constants, dispatch, new/deleted functions, mode changes and unrecognized
+source shapes still select full validation. This deliberately conservative
+recognizer is not a Rust parser: raw strings (`r`, `br`, `cr`) within builder
+bodies and block comments retain full coverage. Other changed paths and
+`ci:full` can still expand the combined plan; no last-commit or PR-title inference
+is used.
 
 ### Requesting broader or fresh validation
 
@@ -330,7 +343,7 @@ input makes it ineligible. Do not substitute a PR-wide changed-files filter or
 the last head-commit diff for merge-tree identity. Keep artifact producers fresh
 unless current-run outputs and their provenance can be preserved honestly.
 
-Run `PYTHONDONTWRITEBYTECODE=1 python3 tests/ci_reuse_test.py -v` and
+Run `python3 -B tests/ci_reuse_test.py -v` and
 `cargo test --test workflow_yaml_parses` when changing this policy. The Rust
 workflow tests execute the Python adversarial suite, so normal unit CI gates it.
 For coverage routing, archive evidence or full-workflow changes, also run
