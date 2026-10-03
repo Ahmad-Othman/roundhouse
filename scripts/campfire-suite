@@ -43,7 +43,8 @@
 # bind-mounts a private `tmp/storage` and keeps the emit as its working
 # directory, so `$0`, `Dir.pwd` and `__dir__` stay what a serial run
 # sees. The tally is still printed in file-list order. `--jobs 1`, or a
-# box without `unshare`, runs the files in this process as before.
+# box whose `unshare` cannot mount, runs the files in this process as
+# before.
 #
 # NO STUBS BY DEFAULT ON THAT LANE. walk_stubs.rb is Ruby spliced into
 # boot.rb, which every test requires — under spinel it must also COMPILE,
@@ -57,8 +58,8 @@
 # Options:
 #   --target T   `ruby` (default) or `spinel` — see above.
 #   --jobs N     Parallel spinel compiles, and parallel ruby file runs
-#                (default 8). Ruby runs fall back to serial without
-#                `unshare`. Spinel RUNS stay serial either way.
+#                (default 8). Ruby runs fall back to serial when the
+#                mount probe fails. Spinel RUNS stay serial either way.
 #   --timeout N  Seconds a single spinel binary may run (default 120).
 #   --out DIR    Emit into DIR and keep it (default: a temp dir, removed).
 #   --keep       Keep the temp emit and print its path.
@@ -370,11 +371,17 @@ fail_lines=""
 # emitted source, same autorun shim, same output to parse. The timeout is
 # `perl -e alarm` because a binary that hangs has no analogue on the ruby
 # lane and macOS ships no coreutils `timeout`.
+#
+# Ruby's SECRET_KEY_BASE default lives HERE, not in the parallel wrapper:
+# both paths call this function, so an unset key is the same string
+# either way.
 run_test() {
-    local t="$1"
+    local t="$1" priv="${2:-}"
     export SECRET_KEY_BASE="${SECRET_KEY_BASE:-campfire-suite-secret}"
     if [[ "$TARGET" == spinel ]]; then
         perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" "./build/$t"
+    elif [[ -n "$priv" ]]; then
+        ruby_isolated "$t" "$priv"
     else
         ruby -Itest -r "$REPO_ROOT/scripts/campfire-test-bcrypt.rb" "$t.rb"
     fi
@@ -383,29 +390,38 @@ run_test() {
 # A ruby file's only shared mutable tree is Active Storage's disk root
 # (`tmp/storage` when the harness boots without RAILS_ENV). The sqlite
 # file is already named from `$0`. Bind-mount a private directory over
-# that root and exec the same ruby the serial path uses, so argv0, cwd
-# and the load path do not move. `unshare --map-root-user` is what makes
-# the mount possible without privileges; it does not change `$0`.
+# that root and run the same ruby the serial path uses, so argv0, cwd
+# and the load path do not move.
+#
+# `--map-current-user` keeps the real uid. `--keep-caps` is what lets
+# the mount happen inside that mapping; it also fills every capability
+# set, including the ones a child would inherit. `setpriv` clears the
+# inherited and ambient sets before ruby. Effective and permitted are
+# already empty in the ruby process (it is not privileged), and the
+# bounding set is left as the caller's — clearing it is irreversible
+# and would make the process stricter than a serial run.
 ruby_isolated() {
     local t="$1" priv="$2"
     mkdir -p "$priv" "$OUT/tmp/storage"
-    # Not `exec`: the caller records this function's status, and exec
-    # would replace that caller before the status file existed.
-    unshare --user --map-root-user --mount bash -c '
+    unshare --user --map-current-user --keep-caps --mount bash -c '
         mount --bind "$1" tmp/storage
-        exec ruby -Itest -r "$2" "$3.rb"
+        exec setpriv --inh-caps -all --ambient-caps -all \
+            ruby -Itest -r "$2" "$3.rb"
     ' _ "$priv" "$REPO_ROOT/scripts/campfire-test-bcrypt.rb" "$t"
 }
 
 # True when parallel ruby runs can isolate tmp/storage. Probed once:
 # a missing unshare, or a mount that the kernel refuses, is a serial
-# run rather than a suite of failed files.
+# run rather than a suite of failed files. CAMPFIRE_SUITE_UNSHARE
+# overrides the binary so a test can prove that fallback.
 ruby_parallel_ok() {
-    command -v unshare >/dev/null 2>&1 || return 1
+    local unshare_bin="${CAMPFIRE_SUITE_UNSHARE:-unshare}"
+    command -v "$unshare_bin" >/dev/null 2>&1 || return 1
+    command -v setpriv >/dev/null 2>&1 || return 1
     local probe
     probe="$(mktemp -d -t campfire-suite-unshare.XXXXXX)"
     mkdir -p "$probe/src" "$probe/dst"
-    if unshare --user --map-root-user --mount \
+    if "$unshare_bin" --user --map-current-user --keep-caps --mount \
         mount --bind "$probe/src" "$probe/dst" >/dev/null 2>&1; then
         rm -rf "$probe"
         return 0
@@ -456,24 +472,25 @@ if [[ "$TARGET" == ruby && "$JOBS" -gt 1 ]] && ruby_parallel_ok; then
     RUBY_PARALLEL=1
     RUBY_RUNS="$(mktemp -d -t campfire-suite-runs.XXXXXX)"
     started=$SECONDS
-    # A function is exported because xargs starts a new shell.
-    export -f ruby_isolated
-    export REPO_ROOT SECRET_KEY_BASE OUT
-    # xargs appends each file as $1 and would shift a positional runs
-    # directory out from under it. The directory is an environment
-    # variable for that reason. The slot is the file's index in the
-    # list written beside the logs.
+    # Functions are exported because xargs starts a new shell. The
+    # runs directory is an environment variable: xargs appends each
+    # file as $1 and would shift a positional argument out from under it.
+    export -f ruby_isolated run_test
+    export REPO_ROOT OUT TARGET TIMEOUT
     export RUBY_RUNS
-    printf '%s\n' "${TESTS[@]}" > "$RUBY_RUNS/files"
-    printf '%s\n' "${TESTS[@]}" |
-        xargs -P "$JOBS" -n 1 bash -c '
-            t="$1"
-            slot=0
-            while IFS= read -r candidate; do
-                slot=$((slot + 1))
-                [[ "$candidate" == "$t" ]] && break
-            done < "$RUBY_RUNS/files"
-            if ruby_isolated "$t" "$RUBY_RUNS/$slot" >"$RUBY_RUNS/$slot.out" 2>"$RUBY_RUNS/$slot.err"; then
+    # NUL-separated "<slot> <path>" records. A newline-separated line
+    # cannot carry both without a second parse, and a blank in the path
+    # must not become another argument. `-0` is the read side of that.
+    # `listed` is not local: this block is the script body, and `local`
+    # outside a function is an error.
+    listed=0
+    for t in "${TESTS[@]}"; do
+        listed=$((listed + 1))
+        printf '%s\0%s\0' "$listed" "$t"
+    done | xargs -0 -P "$JOBS" -n 2 bash -c '
+            slot="$1"; t="$2"
+            # One combined stream, the same `2>&1` the serial path uses.
+            if run_test "$t" "$RUBY_RUNS/$slot" >"$RUBY_RUNS/$slot.log" 2>&1; then
                 printf 0 > "$RUBY_RUNS/$slot.status"
             else
                 printf 1 > "$RUBY_RUNS/$slot.status"
@@ -508,9 +525,7 @@ for t in "${TESTS[@]}"; do
         # Missing status is a failed file, not a quiet skip: a worker
         # that died before writing one must not be counted green.
         status="$(cat "$RUBY_RUNS/$ruby_slot.status" 2>/dev/null || echo 1)"
-        out="$(cat "$RUBY_RUNS/$ruby_slot.out" 2>/dev/null || true)"
-        err="$(cat "$RUBY_RUNS/$ruby_slot.err" 2>/dev/null || true)"
-        [[ -n "$err" ]] && out="${out}"$'\n'"${err}"
+        out="$(cat "$RUBY_RUNS/$ruby_slot.log" 2>/dev/null || true)"
         [[ "$status" == 0 ]] && ran_ok=1
     elif out=$(run_test "$t" 2>&1); then
         ran_ok=1

@@ -1,22 +1,36 @@
-"""Ruby campfire-suite runs may overlap without changing the tally.
+"""Ruby campfire-suite runs may overlap without changing the serial contract.
 
-The interpreted lane boots one process per file. Parallelism is only
-acceptable when each file still sees the serial launch contract and the
-folded tally, fail-log and failure rows stay in file-list order.
+Parallelism is acceptable only when each file still sees the serial
+launch: the default SECRET_KEY_BASE, combined stdout/stderr order, the
+real uid, and a private Active Storage root. A missing or refusing
+unshare is a serial run, not a failed suite.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
 import stat
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SUITE = ROOT / "scripts/campfire-suite"
+
+SHIM = textwrap.dedent(
+    """\
+    class {klass}
+      def test_one
+      end
+    end
+    __t = {klass}.new
+    begin
+      __t.test_one
+    end
+    """
+)
 
 
 def write(path: Path, text: str) -> None:
@@ -24,55 +38,32 @@ def write(path: Path, text: str) -> None:
     path.write_text(text)
 
 
+def executable(path: Path, body: str) -> None:
+    write(path, body)
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
 class CampfireSuiteParallelTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="campfire-suite-opt-")
         self.addCleanup(self.tmp.cleanup)
         self.emit = Path(self.tmp.name) / "emit"
-        self._emit_tree()
-
-    def _emit_tree(self) -> None:
-        write(
-            self.emit / "Makefile",
-            "SPINEL_TESTS := test/models/alpha_test \\\n"
-            "\ttest/models/beta_test \\\n"
-            "\ttest/models/gamma_test\n\n",
-        )
         write(self.emit / "db/seed.sql", "")
-        # The isolated runner bind-mounts this directory. Creating it here
-        # is what a real emit's test helper also does on first boot.
         (self.emit / "tmp/storage").mkdir(parents=True)
-        bodies = {
-            "alpha": ("AlphaTest", "1", "0"),
-            "beta": ("BetaTest", "0", "1"),
-            "gamma": ("GammaTest", "1", "0"),
-        }
-        for stem, (klass, passed, failed) in bodies.items():
-            write(
-                self.emit / "test/models" / f"{stem}_test.rb",
-                f"""\
-class {klass}
-  def test_one
-  end
-end
-__t = {klass}.new
-begin
-  __t.test_one
-end
-if {failed} > 0
-  puts "FAIL {klass}#test_one: expected"
-  raise "{klass}: {failed} of 1 tests failed"
-end
-puts "{klass}: {passed} tests passed"
-""",
-            )
 
-    def _run(self, jobs: str) -> subprocess.CompletedProcess[str]:
-        tally = Path(self.tmp.name) / f"tally-{jobs}.txt"
-        fail_log = Path(self.tmp.name) / f"fail-{jobs}.txt"
+    def _run(self, jobs: str, *, env_extra=None, unset=()) -> subprocess.CompletedProcess[str]:
+        tally = Path(self.tmp.name) / f"tally-{jobs}-{os.getpid()}.txt"
+        fail_log = Path(self.tmp.name) / f"fail-{jobs}-{os.getpid()}.txt"
+        # Unique names: two calls with the same jobs value must not share a file.
+        stamp = len(list(Path(self.tmp.name).glob("tally-*.txt")))
+        tally = Path(self.tmp.name) / f"tally-{stamp}.txt"
+        fail_log = Path(self.tmp.name) / f"fail-{stamp}.txt"
         env = os.environ.copy()
-        env["SECRET_KEY_BASE"] = "campfire-suite-secret"
-        return subprocess.run(
+        for key in unset:
+            env.pop(key, None)
+        if env_extra:
+            env.update(env_extra)
+        result = subprocess.run(
             [
                 "bash",
                 str(SUITE),
@@ -90,79 +81,131 @@ puts "{klass}: {passed} tests passed"
             capture_output=True,
             env=env,
         )
+        result.tally_path = tally  # type: ignore[attr-defined]
+        result.fail_path = fail_log  # type: ignore[attr-defined]
+        return result
 
-    def test_parallel_tally_matches_serial_order_and_failures(self):
-        if shutil.which("unshare") is None:
-            self.skipTest("unshare is not available; the suite stays serial")
-        serial = self._run("1")
-        parallel = self._run("3")
-        self.assertEqual(serial.returncode, 0, serial.stderr)
-        self.assertEqual(parallel.returncode, 0, parallel.stderr)
-        serial_tally = (Path(self.tmp.name) / "tally-1.txt").read_text()
-        parallel_tally = (Path(self.tmp.name) / "tally-3.txt").read_text()
-        expected = (
-            "PASS|test/models/alpha_test|1|1|\n"
-            "FAIL|test/models/beta_test|0|1|FAIL BetaTest#test_one: expected\n"
-            "PASS|test/models/gamma_test|1|1|\n"
-        )
-        self.assertEqual(serial_tally, expected)
-        self.assertEqual(parallel_tally, expected)
-        self.assertEqual(
-            (Path(self.tmp.name) / "fail-1.txt").read_text(),
-            (Path(self.tmp.name) / "fail-3.txt").read_text(),
-        )
-        self.assertIn("ruby files ran in", parallel.stdout)
-        self.assertNotIn("ruby files ran in", serial.stdout)
+    def _note(self, tag: str) -> str:
+        return (self.emit / "tmp" / f"note-{tag}.txt").read_text()
 
-    def test_isolated_ruby_keeps_program_name_and_working_directory(self):
-        if shutil.which("unshare") is None:
-            self.skipTest("unshare is not available")
+    def _two_file_emit(self) -> None:
         write(
             self.emit / "Makefile",
-            "SPINEL_TESTS := test/models/contract_test\n\n",
+            "SPINEL_TESTS := test/models/alpha_test \\\n"
+            "\ttest/models/beta_test \\\n"
+            "\ttest/models/noisy_test\n\n",
         )
         write(
-            self.emit / "test/models/contract_test.rb",
-            """\
-raise "program name changed" unless $0 == "test/models/contract_test.rb"
-raise "working directory changed" unless Dir.pwd == ENV.fetch("SUITE_EMIT")
-raise "storage root missing" unless File.directory?("tmp/storage")
-__t = Object.new
-def __t.test_contract; end
-begin
-  __t.test_contract
-end
-puts "ContractTest: 1 tests passed"
-""",
+            self.emit / "test/models/noisy_test.rb",
+            textwrap.dedent(
+                """\
+                warn "STDERR-BEFORE"
+                raise "STDOUT-AFTER"
+                __t = Object.new
+                def __t.test_noise; end
+                begin
+                  __t.test_noise
+                end
+                puts "NoisyTest: 1 tests passed"
+                """
+            ),
         )
-        env = os.environ.copy()
-        env["SECRET_KEY_BASE"] = "campfire-suite-secret"
-        env["SUITE_EMIT"] = str(self.emit)
-        tally = Path(self.tmp.name) / "contract.txt"
-        result = subprocess.run(
-            [
-                "bash",
-                str(SUITE),
-                "--reuse",
-                str(self.emit),
-                "--jobs",
-                "2",
-                "--tally",
-                str(tally),
-            ],
-            check=False,
+        # Both files write and then read the same storage filename. A
+        # shared root would let one file observe the other's bytes.
+        for tag, klass in (("alpha", "AlphaTest"), ("beta", "BetaTest")):
+            write(
+                self.emit / "test/models" / f"{tag}_test.rb",
+                SHIM.format(klass=klass)
+                + textwrap.dedent(
+                    f"""\
+                    warn "STDERR-FIRST-{tag}"
+                    path = "tmp/storage/shared-name"
+                    File.write(path, "{tag}\\n")
+                    sleep 0.3
+                    seen = File.read(path)
+                    raise "shared storage leaked: " + seen.inspect unless seen == "{tag}\\n"
+                    puts "STDOUT-SECOND-{tag}"
+                    File.write("tmp/note-{tag}.txt", [
+                      "uid=#{{Process.uid}}",
+                      "euid=#{{Process.euid}}",
+                      "secret=#{{ENV.fetch("SECRET_KEY_BASE")}}",
+                    ].join("\\n") + "\\n" + File.read("/proc/self/status").lines.grep(/^Cap/).join)
+                    puts "{klass}: 1 tests passed"
+                    """
+                ),
+            )
+
+    def test_parallel_isolation_matches_serial_contract(self):
+        if not Path("/usr/bin/unshare").exists() or not Path("/usr/bin/setpriv").exists():
+            self.skipTest("unshare or setpriv is not installed")
+        self._two_file_emit()
+        serial = self._run("1", unset=("SECRET_KEY_BASE",))
+        parallel = self._run("2", unset=("SECRET_KEY_BASE",))
+        self.assertEqual(serial.returncode, 0, serial.stderr + serial.stdout)
+        self.assertEqual(parallel.returncode, 0, parallel.stderr + parallel.stdout)
+        self.assertEqual(serial.tally_path.read_text(), parallel.tally_path.read_text())
+        noisy = parallel.tally_path.read_text().split("noisy_test|", 1)[1]
+        # The first-error column is the first non-blank line of the
+        # combined stream. STDERR must still precede the raise.
+        self.assertIn("STDERR-BEFORE", noisy)
+        self.assertNotIn("STDOUT-AFTER", noisy.split("STDERR-BEFORE", 1)[0])
+        self.assertIn("PASS|test/models/alpha_test|1|1|", parallel.tally_path.read_text())
+        self.assertIn("PASS|test/models/beta_test|1|1|", parallel.tally_path.read_text())
+        self.assertIn("ruby files ran in", parallel.stdout)
+        self.assertNotIn("ruby files ran in", serial.stdout)
+        # Isolation is the overlapping write of the same storage name.
+        # Both files passed, so neither saw the other's bytes.
+        note = self._note("alpha")
+        self.assertIn(f"uid={os.getuid()}", note)
+        self.assertIn(f"euid={os.geteuid()}", note)
+        self.assertIn("secret=campfire-suite-secret", note)
+        # Capability lines from the test process, not from the mount helper.
+        # Inherited and ambient must be clear; the bounding set must still
+        # be the caller's, which an ordinary process also has.
+        ordinary = subprocess.run(
+            ["ruby", "-e", 'puts File.read("/proc/self/status").lines.grep(/^Cap/)'],
+            check=True,
             text=True,
             capture_output=True,
-            env=env,
+        ).stdout
+        for line in note.splitlines():
+            if line.startswith("Cap"):
+                self.assertIn(line, ordinary.splitlines(), line)
+
+    def test_refusing_unshare_falls_back_to_serial(self):
+        self._two_file_emit()
+        # Installed unshare that cannot mount. The suite must run the
+        # files in this process and still pass, not skip and not fail.
+        fake = Path(self.tmp.name) / "unshare"
+        executable(
+            fake,
+            "#!/bin/sh\n"
+            "echo 'mount: permission denied' >&2\n"
+            "exit 1\n",
+        )
+        result = self._run(
+            "2",
+            env_extra={"CAMPFIRE_SUITE_UNSHARE": str(fake)},
+            unset=("SECRET_KEY_BASE",),
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertTrue(
-            tally.read_text().startswith("PASS|test/models/contract_test|1|1|"),
-            tally.read_text(),
+        self.assertNotIn("ruby files ran in", result.stdout)
+        self.assertIn("PASS|test/models/alpha_test|1|1|", result.tally_path.read_text())
+        self.assertIn("secret=campfire-suite-secret", self._note("alpha"))
+        self.assertIn(f"uid={os.getuid()}", self._note("alpha"))
+
+    def test_missing_unshare_falls_back_to_serial(self):
+        self._two_file_emit()
+        missing = Path(self.tmp.name) / "missing-unshare"
+        result = self._run(
+            "2",
+            env_extra={"CAMPFIRE_SUITE_UNSHARE": str(missing)},
+            unset=("SECRET_KEY_BASE",),
         )
-        # The suite script itself must stay executable for the bcrypt
-        # launcher regression, which invokes it the same way CI does.
-        self.assertTrue(SUITE.stat().st_mode & stat.S_IXUSR)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertNotIn("ruby files ran in", result.stdout)
+        self.assertIn("PASS|test/models/alpha_test|1|1|", result.tally_path.read_text())
+        self.assertIn("secret=campfire-suite-secret", self._note("alpha"))
 
 
 if __name__ == "__main__":
