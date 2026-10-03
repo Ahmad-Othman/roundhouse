@@ -602,24 +602,24 @@ fn campfire_comparisons_require_an_uploaded_binary_and_report_blocking() {
 
 #[cfg(unix)]
 #[test]
-fn unit_debug_roundhouse_reaches_campfire_consumers_via_roundhouse_bin() {
+fn shared_debug_roundhouse_reaches_campfire_consumers_via_roundhouse_bin() {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let workflow: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
-    let unit = &workflow["jobs"]["unit"];
+    let producer = &workflow["jobs"]["build-roundhouse"];
     assert_eq!(
-        unit["outputs"]["roundhouse-bin-artifact-id"].as_str(),
+        producer["outputs"]["roundhouse-bin-artifact-id"].as_str(),
         Some("${{ steps.roundhouse-bin.outputs.artifact-id }}")
     );
-    let upload = unit["steps"]
+    let upload = producer["steps"]
         .as_sequence()
         .unwrap()
         .iter()
         .find(|step| step["id"].as_str() == Some("roundhouse-bin"))
-        .expect("unit uploads the debug binary");
+        .expect("producer uploads the debug binary");
     assert_eq!(
         upload["with"]["name"].as_str(),
         Some("roundhouse-debug-bin")
@@ -1100,16 +1100,16 @@ fn pr_reuse_never_masks_validation_failures_or_changes_the_job_graph() {
         let validation_ids: &[&str] = match name {
             "store-check" => {
                 assert_eq!(job["needs"][0].as_str(), Some("generate-fixture"));
-                assert_eq!(job["needs"][1].as_str(), Some("unit"));
+                assert_eq!(job["needs"][1].as_str(), Some("plan"));
                 &["build", "check"]
             }
             "writebook-inventory" => {
-                assert_eq!(job["needs"][0].as_str(), Some("unit"));
+                assert_eq!(job["needs"].as_str(), Some("plan"));
                 &["inventory", "report"]
             }
             "browser-smoke-typescript" => {
                 assert_eq!(job["needs"][0].as_str(), Some("generate-fixture"));
-                assert_eq!(job["needs"][1].as_str(), Some("unit"));
+                assert_eq!(job["needs"][1].as_str(), Some("plan"));
                 &["browser"]
             }
             "smoke" => {

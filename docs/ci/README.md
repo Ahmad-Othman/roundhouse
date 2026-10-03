@@ -8,15 +8,22 @@ The workflows and their tests own implementation details, not this handbook.
 
 Ready PRs and ordinary main pushes run a compact floor: fixture preparation,
 unit tests, Store analysis, Ruby/Rust/TypeScript comparisons against Rails,
-SharedWorker browser tests, and Campfire conformance/comparison. The unit job
-runs all package test targets in batches; ignored integrations need selected
-toolchain lanes. Framework and toolchain suites also run inside comparison
-jobs, not necessarily as standalone checks.
+SharedWorker browser tests, and Campfire conformance/comparison. Three unit
+shards cover all package test targets in bounded batches; ignored integrations
+need selected toolchain lanes. Framework and toolchain suites also run inside
+comparison jobs, not necessarily as standalone checks.
+
+Selected lanes start once their inputs are ready, without waiting for unit
+tests to pass. Campfire consumes an independently built same-run debug compiler.
+Speculative work may therefore finish even when a unit shard fails; the final
+gate still requires all selected non-advisory checks, including the unit matrix.
 
 Additional checks are selected from the changed inputs. Target-specific
 changes select owning lanes; shared emit, build, packaging, and CI-policy
-changes can select full coverage. Analyzer/lowerer changes do not automatically
-select every target: request full coverage when the risk warrants it.
+implementation changes can select full coverage. Changes only to CI contract
+tests retain the compact floor rather than expanding to every target.
+Analyzer/lowerer changes do not automatically select every target: request
+full coverage when the risk warrants it.
 The planner uses the actual PR merge tree against its base, includes both
 sides of a rename, and expands uncertain diff identity to full coverage.
 See the run's **plan** job for its selected jobs and reasons.

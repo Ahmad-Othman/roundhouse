@@ -8,30 +8,43 @@ fn unit_batches_all_targets_without_reducing_coverage() {
     assert!(unit.get("if").is_none());
     assert!(unit.get("continue-on-error").is_none());
     assert_eq!(unit["runs-on"].as_str(), Some("ubuntu-latest"));
+    assert_eq!(unit["strategy"]["fail-fast"].as_bool(), Some(false));
+    assert_eq!(unit["strategy"]["max-parallel"].as_u64(), Some(3));
+    assert_eq!(
+        unit["strategy"]["matrix"]["shard"],
+        serde_yaml_ng::from_str::<serde_yaml_ng::Value>("[0, 1, 2]").unwrap()
+    );
+    assert!(
+        unit.get("outputs").is_none(),
+        "no racing matrix artifact output"
+    );
     assert_eq!(
         unit["env"]["CARGO_PROFILE_TEST_SPLIT_DEBUGINFO"].as_str(),
         Some("unpacked")
     );
-    assert!(ci["env"].get("CARGO_PROFILE_TEST_SPLIT_DEBUGINFO").is_none());
+    assert!(ci["env"]
+        .get("CARGO_PROFILE_TEST_SPLIT_DEBUGINFO")
+        .is_none());
     let steps = unit["steps"].as_sequence().unwrap();
     let tests = steps
         .iter()
-        .position(|step| {
-            step["name"].as_str() == Some("Build and run all test targets in batches")
-        })
+        .position(|step| step["name"].as_str() == Some("Build and run all test targets in batches"))
         .expect("batch every lib/bin/integration target through Cargo");
     assert!(steps[tests].get("if").is_none());
     assert!(steps[tests].get("continue-on-error").is_none());
     let body = steps[tests]["run"].as_str().unwrap();
     assert!(body.contains("--out \"$RUNNER_TEMP/unit-resources/tests\" --"));
     assert!(body.contains("python3 scripts/ci-unit-tests.py"));
+    assert!(body.contains("--shard-index ${{ matrix.shard }} --shard-count 3"));
     assert!(
         !body.contains("cargo test --locked --all-targets"),
         "all-target peak must not rebuild every integration executable at once"
     );
     let timings = steps
         .iter()
-        .find(|step| step["with"]["name"].as_str() == Some("unit-build-timings"))
+        .find(|step| {
+            step["with"]["name"].as_str() == Some("unit-build-timings-${{ matrix.shard }}")
+        })
         .expect("retain build timings for investigation");
     assert_eq!(timings["if"].as_str(), Some("always()"));
     assert_eq!(
@@ -45,7 +58,7 @@ fn unit_batches_all_targets_without_reducing_coverage() {
                 == Some("Emit every bench lane in the debug profile (scripts/bench's shape)")
         })
         .expect("retain the independent dev-profile stack-overflow gate");
-    assert!(bench.get("if").is_none());
+    assert_eq!(bench["if"].as_str(), Some("matrix.shard == 0"));
     assert!(bench.get("continue-on-error").is_none());
     let body = bench["run"].as_str().unwrap();
     assert!(body.contains("bash -euo pipefail -c"));
@@ -53,27 +66,110 @@ fn unit_batches_all_targets_without_reducing_coverage() {
     assert!(body.contains("cargo run --quiet --bin emit_preview -- --target"));
     let resources = steps
         .iter()
-        .find(|step| step["with"]["name"].as_str() == Some("unit-resources"))
+        .find(|step| step["with"]["name"].as_str() == Some("unit-resources-${{ matrix.shard }}"))
         .expect("retain phase samples even when a command fails");
     assert_eq!(resources["if"].as_str(), Some("always()"));
     assert_eq!(
         resources["with"]["path"].as_str(),
         Some("${{ runner.temp }}/unit-resources/")
     );
+}
+
+#[test]
+fn speculative_fanout_retains_selection_and_real_prerequisites() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let jobs = &ci["jobs"];
+    assert_eq!(jobs["unit"]["needs"].as_str(), Some("generate-fixture"));
+    for name in [
+        "build-roundhouse",
+        "build-wasm",
+        "build-spinel",
+        "writebook-inventory",
+    ] {
+        assert_eq!(jobs[name]["needs"].as_str(), Some("plan"), "{name}");
+    }
+    for name in [
+        "store-check",
+        "browser-smoke-typescript",
+        "compare",
+        "compare-extra",
+        "compare-ruby",
+        "compare-jruby",
+    ] {
+        assert_eq!(
+            jobs[name]["needs"],
+            serde_yaml_ng::from_str::<serde_yaml_ng::Value>("[generate-fixture, plan]").unwrap(),
+            "{name} must not wait for tests, or lose its fixture/selection"
+        );
+    }
+    for name in [
+        "build-roundhouse",
+        "build-wasm",
+        "build-spinel",
+        "writebook-inventory",
+        "store-check",
+        "browser-smoke-typescript",
+        "compare",
+        "compare-extra",
+        "compare-ruby",
+        "compare-jruby",
+    ] {
+        assert_eq!(
+            jobs[name]["if"].as_str(),
+            Some(
+                format!("${{{{ contains(fromJSON(needs.plan.outputs.jobs), '{name}') }}}}")
+                    .as_str()
+            ),
+            "earlier fanout must still skip unselected jobs: {name}"
+        );
+    }
+    for name in ["compact-required", "ci-summary"] {
+        let needs = jobs[name]["needs"].as_sequence().unwrap();
+        for required in [
+            "unit",
+            "build-roundhouse",
+            "campfire-conformance",
+            "campfire-compare",
+        ] {
+            assert!(
+                needs.iter().any(|v| v.as_str() == Some(required)),
+                "{name}: {required}"
+            );
+        }
+        assert_eq!(jobs[name]["if"].as_str(), Some("always()"));
+    }
+}
+
+#[test]
+fn shared_debug_compiler_is_selected_and_built_without_waiting_for_tests() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let producer = &ci["jobs"]["build-roundhouse"];
+    assert_eq!(producer["needs"].as_str(), Some("plan"));
+    assert_eq!(
+        producer["if"].as_str(),
+        Some("${{ contains(fromJSON(needs.plan.outputs.jobs), 'build-roundhouse') }}")
+    );
+    assert!(producer.get("continue-on-error").is_none());
+    let steps = producer["steps"].as_sequence().unwrap();
     // #317: current-run debug compiler for Campfire consumers.
     assert_eq!(
-        unit["outputs"]["roundhouse-bin-artifact-id"].as_str(),
+        producer["outputs"]["roundhouse-bin-artifact-id"].as_str(),
         Some("${{ steps.roundhouse-bin.outputs.artifact-id }}")
     );
     let stage = steps
         .iter()
         .find(|step| step["name"].as_str() == Some("Stage current-run debug roundhouse binary"))
-        .expect("stage the debug bin after tests/bench emission");
+        .expect("stage the debug bin before any consumer");
     let stage_body = stage["run"].as_str().unwrap();
     assert!(stage_body.contains("cargo build --locked --bin roundhouse"));
     assert!(stage_body.contains("roundhouse-debug-bin/identity.txt"));
     assert!(stage_body.contains("profile=debug"));
     assert!(stage_body.contains("source_sha=${GITHUB_SHA}"));
+    assert!(stage_body.contains("producer_job=build-roundhouse"));
+    assert!(stage.get("if").is_none());
+    assert!(stage.get("continue-on-error").is_none());
     let upload = steps
         .iter()
         .find(|step| step["id"].as_str() == Some("roundhouse-bin"))
@@ -87,10 +183,6 @@ fn unit_batches_all_targets_without_reducing_coverage() {
         Some("roundhouse-debug-bin")
     );
     assert_eq!(upload["with"]["retention-days"].as_u64(), Some(1));
-    let resources_pos = steps
-        .iter()
-        .position(|step| step["with"]["name"].as_str() == Some("unit-resources"))
-        .unwrap();
     let stage_pos = steps
         .iter()
         .position(|step| step["name"].as_str() == Some("Stage current-run debug roundhouse binary"))
@@ -99,25 +191,21 @@ fn unit_batches_all_targets_without_reducing_coverage() {
         .iter()
         .position(|step| step["id"].as_str() == Some("roundhouse-bin"))
         .unwrap();
-    assert!(resources_pos < stage_pos && stage_pos < upload_pos);
+    assert!(stage_pos < upload_pos);
 }
 
 #[test]
-fn campfire_consumers_require_unit_debug_binary_and_do_not_rebuild() {
+fn campfire_consumers_require_shared_debug_binary_and_do_not_rebuild() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     for job_name in ["campfire-compare", "campfire-conformance"] {
         let job = &ci["jobs"][job_name];
-        assert_eq!(job["needs"][0].as_str(), Some("unit"));
+        assert_eq!(job["needs"][0].as_str(), Some("build-roundhouse"));
         assert_eq!(job["needs"][1].as_str(), Some("plan"));
         let expected_if = format!(
-            "${{{{ contains(fromJSON(needs.plan.outputs.jobs), '{job_name}') && needs.unit.outputs.roundhouse-bin-artifact-id != '' }}}}"
+            "${{{{ contains(fromJSON(needs.plan.outputs.jobs), '{job_name}') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}}}"
         );
-        assert_eq!(
-            job["if"].as_str(),
-            Some(expected_if.as_str()),
-            "{job_name}"
-        );
+        assert_eq!(job["if"].as_str(), Some(expected_if.as_str()), "{job_name}");
         let steps = job["steps"].as_sequence().unwrap();
         assert!(
             steps.iter().all(|step| {
@@ -126,7 +214,7 @@ fn campfire_consumers_require_unit_debug_binary_and_do_not_rebuild() {
                     .map(|u| !u.contains("setup-rust") && !u.contains("rust-cache"))
                     .unwrap_or(true)
             }),
-            "{job_name} must not install Rust; it consumes the unit binary"
+            "{job_name} must not install Rust; it consumes the shared binary"
         );
         let download = steps
             .iter()

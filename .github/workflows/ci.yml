@@ -76,7 +76,7 @@ jobs:
         run: python3 scripts/ci-plan.py plan
 
   writebook-inventory:
-    needs: [unit, plan]
+    needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'writebook-inventory') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -277,7 +277,7 @@ jobs:
   # goes red it is the analyzer's next entry, not noise.
   # -------------------------------------------------------------------
   store-check:
-    needs: [generate-fixture, unit, plan]
+    needs: [generate-fixture, plan]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'store-check') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -332,16 +332,15 @@ jobs:
   # Build the in-browser compiler wasm (roundhouse_wasm.wasm) from source
   # and upload it as an artifact for build-site. Runs in PARALLEL with
   # generate-fixture — they're independent (the wasm embeds the compiler;
-  # the fixture is runtime input fed in the browser), so this multi-minute
-  # LTO build hides behind work build-site already waits on, adding ~0 to
-  # the critical path to deploy. Rebuilds via the in-repo vendored
+  # the fixture is runtime input fed in the browser). Neither producer
+  # waits for unit tests. Rebuilds via the in-repo vendored
   # ruby-rbs-sys (wasm/vendor/ — wasm32 build support upstream-pending as
   # ruby/rbs#2992), so the 3.8 MB binary is NOT committed and the published
   # demos (/playground/, /studio/) always track main. The only external
   # need is the WASI SDK (a manual tarball, cached here).
   # -------------------------------------------------------------------
   build-wasm:
-    needs: [unit, plan]
+    needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'build-wasm') }}
     runs-on: ubuntu-latest
     # The job normally finishes in a few minutes; a hung apt install
@@ -402,7 +401,7 @@ jobs:
   # A failed lookup falls back to fresh master and cannot save a checkpoint.
   # -------------------------------------------------------------------
   build-spinel:
-    needs: [unit, plan]
+    needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'build-spinel') }}
     outputs:
       artifact-id: ${{ steps.toolchain.outputs.artifact-id }}
@@ -532,10 +531,12 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Current-run debug compiler for compatible Campfire consumers (#317).
-    # Empty artifact-id means the consumers must not run as selected greens.
-    outputs:
-      roundhouse-bin-artifact-id: ${{ steps.roundhouse-bin.outputs.artifact-id }}
+    strategy:
+      # A failed shard must not cancel coverage or diagnostic output from others.
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        shard: [0, 1, 2]
     env:
       # Share first-party split DWARF instead of copying it into every test
       # executable. Integration sidecars are freed with their finished batch;
@@ -592,12 +593,12 @@ jobs:
       - name: Build and run all test targets in batches
         run: |
           python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-resources/tests" -- \
-            python3 scripts/ci-unit-tests.py
+            python3 scripts/ci-unit-tests.py --shard-index ${{ matrix.shard }} --shard-count 3
       - name: Upload test build timings
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: unit-build-timings
+          name: unit-build-timings-${{ matrix.shard }}
           path: target/cargo-timings/
           if-no-files-found: ignore
       # scripts/bench emits nine of its lanes with `cargo run --bin
@@ -608,6 +609,7 @@ jobs:
       # off the published bench page. This is the harness's own shape,
       # run here so the next one fails a PR instead of a nightly.
       - name: Emit every bench lane in the debug profile (scripts/bench's shape)
+        if: matrix.shard == 0
         run: |
           python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-resources/bench" -- \
             bash -euo pipefail -c '
@@ -619,17 +621,25 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: unit-resources
+          name: unit-resources-${{ matrix.shard }}
           path: ${{ runner.temp }}/unit-resources/
           if-no-files-found: ignore
-      # Share the Debug-profile compiler with Campfire conformance and
-      # comparison/db-differential (#317). Same profile as cargo test and
-      # the harness scripts' historical `cargo run` (not release). The
-      # binary alone is not enough: consumers must set ROUNDHOUSE_BIN so
-      # scripts/lib/roundhouse-bin.sh execs it instead of rebuilding.
-      # cargo test builds integration harnesses under profile.test; the
-      # `roundhouse` bin itself is profile.dev — rebuild is a cache hit
-      # after the bench emit step and guarantees the staged path exists.
+
+  # Only selected consumers need this compiler. Produce it without waiting
+  # for fixtures/tests; their success remains independently required at the gate.
+  build-roundhouse:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'build-roundhouse') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      roundhouse-bin-artifact-id: ${{ steps.roundhouse-bin.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+      # Keep the historical dev profile for Campfire, not a release substitute.
+      # Consumers must set ROUNDHOUSE_BIN so the harness does not rebuild it.
       - name: Stage current-run debug roundhouse binary
         run: |
           set -euo pipefail
@@ -642,7 +652,7 @@ jobs:
             echo "source_sha=${GITHUB_SHA}"
             echo "profile=debug"
             echo "binary=roundhouse"
-            echo "producer_job=unit"
+            echo "producer_job=build-roundhouse"
             echo "rustc_host=$(rustc -vV | awk '/^host:/{print $2}')"
             echo "rustc_release=$(rustc -vV | awk '/^release:/{print $2}')"
             ./roundhouse-debug-bin/roundhouse --version | sed 's/^/version=/'
@@ -689,7 +699,7 @@ jobs:
   # NOT from the published archive. Playwright config gates on $CI
   # (GitHub sets it) → fresh server + forbidOnly + github reporter.
   browser-smoke-typescript:
-    needs: [generate-fixture, unit, plan]
+    needs: [generate-fixture, plan]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'browser-smoke-typescript') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -996,10 +1006,10 @@ jobs:
   # walk against the compiled binary and stay advisory, because spinel
   # is tracked unpinned.
   campfire-compare:
-    needs: [unit, plan]
-    # Require the unit producer's debug binary artifact id so a missing
+    needs: [build-roundhouse, plan]
+    # Require the producer's debug binary artifact id so a missing
     # upload cannot skip into a green compact gate (#317).
-    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-compare') && needs.unit.outputs.roundhouse-bin-artifact-id != '' }}
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-compare') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -1012,7 +1022,7 @@ jobs:
       BUNDLE_PATH: vendor/bundle
     steps:
       - uses: actions/checkout@v5
-      # No setup-rust: emission uses the unit job's current-run debug binary.
+      # No setup-rust: emission uses the current-run debug binary.
       - uses: actions/download-artifact@v8
         with:
           name: roundhouse-debug-bin
@@ -1367,15 +1377,15 @@ jobs:
       - *advisory-result
 
   campfire-conformance:
-    needs: [unit, plan]
-    # Require the unit producer's debug binary artifact id so a missing
+    needs: [build-roundhouse, plan]
+    # Require the producer's debug binary artifact id so a missing
     # upload cannot skip into a green compact gate (#317).
-    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-conformance') && needs.unit.outputs.roundhouse-bin-artifact-id != '' }}
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'campfire-conformance') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
-      # No setup-rust: strict-emit and campfire-suite use the unit debug binary.
+      # No setup-rust: strict-emit and campfire-suite use the shared debug binary.
       - uses: actions/download-artifact@v8
         with:
           name: roundhouse-debug-bin
@@ -1525,7 +1535,7 @@ jobs:
       # (rubys/roundhouse#71). This step is the run the ledger's
       # "zero errors" invariant is actually about.
       #
-      # Same debug binary as the suite (ROUNDHOUSE_BIN from unit), so the
+      # Same debug binary as the suite (ROUNDHOUSE_BIN from build-roundhouse), so the
       # compiler is shared rather than paid twice (#317).
       - name: Enforce the strict-emit ceiling
         env:
@@ -1941,7 +1951,7 @@ jobs:
   # below: two setup-ruby steps / an extra build-spinel dependency don't
   # fit this shape.
   compare:
-    needs: [generate-fixture, unit, plan]
+    needs: [generate-fixture, plan]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -2088,7 +2098,7 @@ jobs:
   # with the Rust/TypeScript publication floor. Anchors preserve physical job
   # names used by the existing strict PR-local execution receipts.
   compare-extra:
-    needs: [generate-fixture, unit, plan]
+    needs: [generate-fixture, plan]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare-extra') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -2109,7 +2119,7 @@ jobs:
   # for tailwindcss asset compilation; no target compile step
   # (Ruby is interpreted).
   compare-ruby:
-    needs: [generate-fixture, unit, plan]
+    needs: [generate-fixture, plan]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare-ruby') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -2160,7 +2170,7 @@ jobs:
   # assets aren't built (the DOM diff compares asset tags, not files —
   # see scripts/compare's jruby branch).
   compare-jruby:
-    needs: [generate-fixture, unit, plan]
+    needs: [generate-fixture, plan]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare-jruby') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -3402,7 +3412,7 @@ jobs:
         run: echo 'ready=true' >> "$GITHUB_OUTPUT"
 
   compact-required:
-    needs: [plan, generate-fixture, unit, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare]
+    needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -3422,7 +3432,7 @@ jobs:
   # Informational validation summary; no branch-protection or merge policy.
   ci-summary:
     name: CI summary
-    needs: [plan, generate-fixture, unit, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, writebook-inventory, build-spinel, framework-tests-spinel, build-campfire-compare-spinel, campfire-compare-spinel, campfire-db-differential-spinel, toolchain-spinel, compare-spinel, smoke-spinel, build-campfire-archive, smoke-campfire, smoke-campfire-docker, archive-results, assemble-site]
+    needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, writebook-inventory, build-spinel, framework-tests-spinel, build-campfire-compare-spinel, campfire-compare-spinel, campfire-db-differential-spinel, toolchain-spinel, compare-spinel, smoke-spinel, build-campfire-archive, smoke-campfire, smoke-campfire-docker, archive-results, assemble-site]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
