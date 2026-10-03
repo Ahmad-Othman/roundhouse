@@ -2003,9 +2003,12 @@ pub(super) fn ingest_library_method(
                         // campfire's `avatar_tag(user, **options)` is
                         // called with one argument from the message row,
                         // the user list and the sidebar.
+                        // `target(**params)` forwards. `skip_before_action :name,
+                        // **options` consumes the hash as filter options and
+                        // must keep the flattened positional binding.
                         let body_forwards_rest = def.body().is_some_and(|body| {
-                            let text = body.location().as_slice();
-                            text.windows(s.len() + 2).any(|window| window == format!("**{s}").as_bytes())
+                            let text = String::from_utf8_lossy(body.location().as_slice());
+                            text.contains(&format!("(**{s})")) || text.contains(&format!(", **{s})"))
                         });
                         if keeps_keywords || body_forwards_rest {
                             // The keyword group is kept in this def, so

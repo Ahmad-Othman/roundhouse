@@ -520,6 +520,29 @@ fn configuration_refusals_preserve_the_survey_and_original_body() {
 }
 
 #[test]
+fn readable_class_methods_store_keywords_blocks_and_filter_options() {
+    let shapes = [
+        ("configure_window mode: :month, days: 3", true),
+        ("configure_window only: [:show], except: [:index], if: :ready?, unless: :draft?", true),
+        ("configure_window auth: -> { current_user }", true),
+        ("configure_window mode: helper", false),
+        ("configure_window(mode: :month) { :ready }", false),
+    ];
+    for (call, readable) in shapes {
+        let result = configuration_app(WINDOW_SETTINGS, call);
+        if readable {
+            let app = result.expect(call);
+            assert!(
+                app.controllers[0].body.iter().any(|item| matches!(item, ControllerBodyItem::ClassIvarInit { .. })),
+                "{call} was not stored"
+            );
+        } else {
+            assert!(result.is_err(), "{call} should stay ledgered whole");
+        }
+    }
+}
+
+#[test]
 fn finite_configuration_does_not_admit_unrelated_controller_singletons() {
     assert!(configuration_app(WINDOW_SETTINGS, "def self.unrelated; eval('1'); end").is_err());
 }

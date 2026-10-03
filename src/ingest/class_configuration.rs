@@ -316,7 +316,7 @@ fn expand_controller(
                             kwargs: false,
                         },
                     ),
-                    [hash] if finite_keyword_hash(hash) => hash.clone(),
+                    [hash] if readable_keyword_hash(hash) => hash.clone(),
                     _ => {
                         return Err(refuse(
                             "class configuration needs literal keyword arguments",
@@ -424,7 +424,7 @@ fn reader_slot(method: &MethodDef) -> Option<Symbol> {
         .then(|| name.clone())
 }
 
-fn finite_keyword_hash(expr: &Expr) -> bool {
+fn readable_keyword_hash(expr: &Expr) -> bool {
     let ExprNode::Hash {
         entries,
         kwargs: true,
@@ -438,6 +438,21 @@ fn finite_keyword_hash(expr: &Expr) -> bool {
             ExprNode::Lit {
                 value: Literal::Sym { .. }
             }
-        ) && matches!(&*value.node, ExprNode::Lit { .. })
+        ) && readable_config_value(value)
     })
+}
+
+/// A value the writer stores as data. Filter options, symbols, and a
+/// lambda are readable. A method call or splat is not, and the whole
+/// configuration stays ledgered rather than storing half of it.
+fn readable_config_value(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::Lit { .. } | ExprNode::Lambda { .. } => true,
+        ExprNode::Array { elements, .. } => elements.iter().all(readable_config_value),
+        ExprNode::Hash { entries, kwargs: true } => entries.iter().all(|(key, value)| {
+            matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { .. } })
+                && readable_config_value(value)
+        }),
+        _ => false,
+    }
 }
