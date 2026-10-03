@@ -925,7 +925,17 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // parameter of `page` / `per`. The full-context gate in
     // runtime_src_integration counts three. What it buys: Kaminari's
     // `page` / `per` chains and readers run.
-    const CEILING: usize = 1179;
+    // 2026-10-03 1179 -> 1209, +30, MEASURED by method with and without
+    // the new file: active_record/token_for.rb (has_secure_password's
+    // reset token), and nothing else. generate 8, secure_password_data 9,
+    // data_id 8, verified_data 5 — every one a read of a parameter
+    // (`data_json`, `purpose`, `expires_in`, `digest`, `token`, `data`)
+    // or a call taking one, which this probe leaves as a TyVar where
+    // token_for.rbs declares String/Integer. The full-context gate in
+    // runtime_src_integration counts ONE site (`Time.now + expires_in`).
+    // What it buys: the Rails 8 authentication generator's password
+    // reset flow, in Rails' own token format.
+    const CEILING: usize = 1209;
 
     assert!(
         all_untyped.len() <= CEILING,
