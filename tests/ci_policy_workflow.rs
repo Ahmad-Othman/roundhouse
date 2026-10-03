@@ -318,8 +318,12 @@ fn test_backtraces_retain_library_and_integration_source_locations() {
 
 #[test]
 #[cfg(target_os = "linux")]
-fn resource_and_unit_batch_helpers_preserve_failures_and_contracts() {
-    for test in ["tests/ci_resources_test.py", "tests/ci_unit_tests_test.py"] {
+fn resource_and_harness_helpers_preserve_failures_and_contracts() {
+    for test in [
+        "tests/ci_resources_test.py",
+        "tests/ci_unit_tests_test.py",
+        "tests/ci_campfire_optimization_test.py",
+    ] {
         let result = std::process::Command::new("python3")
             .args(["-B", test, "-v"])
             .output()

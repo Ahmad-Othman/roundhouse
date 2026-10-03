@@ -402,9 +402,9 @@ run_test() {
 # and would make the process stricter than a serial run.
 ruby_isolated() {
     local t="$1" priv="$2"
-    mkdir -p "$priv" "$OUT/tmp/storage"
+    mkdir -p "$priv" "$OUT/tmp/storage" || return
     unshare --user --map-current-user --keep-caps --mount bash -c '
-        mount --bind "$1" tmp/storage
+        mount --bind "$1" tmp/storage || exit $?
         exec setpriv --inh-caps -all --ambient-caps -all \
             ruby -Itest -r "$2" "$3.rb"
     ' _ "$priv" "$REPO_ROOT/scripts/campfire-test-bcrypt.rb" "$t"
@@ -412,16 +412,14 @@ ruby_isolated() {
 
 # True when parallel ruby runs can isolate tmp/storage. Probed once:
 # a missing unshare, or a mount that the kernel refuses, is a serial
-# run rather than a suite of failed files. CAMPFIRE_SUITE_UNSHARE
-# overrides the binary so a test can prove that fallback.
+# run rather than a suite of failed files.
 ruby_parallel_ok() {
-    local unshare_bin="${CAMPFIRE_SUITE_UNSHARE:-unshare}"
-    command -v "$unshare_bin" >/dev/null 2>&1 || return 1
+    command -v unshare >/dev/null 2>&1 || return 1
     command -v setpriv >/dev/null 2>&1 || return 1
     local probe
     probe="$(mktemp -d -t campfire-suite-unshare.XXXXXX)"
     mkdir -p "$probe/src" "$probe/dst"
-    if "$unshare_bin" --user --map-current-user --keep-caps --mount \
+    if unshare --user --map-current-user --keep-caps --mount \
         mount --bind "$probe/src" "$probe/dst" >/dev/null 2>&1; then
         rm -rf "$probe"
         return 0
@@ -468,7 +466,7 @@ build_error() {
 # Spinel stays in the loop: its binaries share one sqlite file.
 RUBY_PARALLEL=0
 RUBY_RUNS=""
-if [[ "$TARGET" == ruby && "$JOBS" -gt 1 ]] && ruby_parallel_ok; then
+if [[ "$TARGET" == ruby && "$JOBS" -gt 1 && ${#TESTS[@]} -gt 0 ]] && ruby_parallel_ok; then
     RUBY_PARALLEL=1
     RUBY_RUNS="$(mktemp -d -t campfire-suite-runs.XXXXXX)"
     started=$SECONDS
@@ -478,11 +476,7 @@ if [[ "$TARGET" == ruby && "$JOBS" -gt 1 ]] && ruby_parallel_ok; then
     export -f ruby_isolated run_test
     export REPO_ROOT OUT TARGET TIMEOUT
     export RUBY_RUNS
-    # NUL-separated "<slot> <path>" records. A newline-separated line
-    # cannot carry both without a second parse, and a blank in the path
-    # must not become another argument. `-0` is the read side of that.
-    # `listed` is not local: this block is the script body, and `local`
-    # outside a function is an error.
+    # NUL-separated slot/path pairs preserve each file's position and name.
     listed=0
     for t in "${TESTS[@]}"; do
         listed=$((listed + 1))

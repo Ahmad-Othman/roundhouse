@@ -9,6 +9,7 @@ unshare is a serial run, not a failed suite.
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -52,8 +53,6 @@ class CampfireSuiteParallelTests(unittest.TestCase):
         (self.emit / "tmp/storage").mkdir(parents=True)
 
     def _run(self, jobs: str, *, env_extra=None, unset=()) -> subprocess.CompletedProcess[str]:
-        tally = Path(self.tmp.name) / f"tally-{jobs}-{os.getpid()}.txt"
-        fail_log = Path(self.tmp.name) / f"fail-{jobs}-{os.getpid()}.txt"
         # Unique names: two calls with the same jobs value must not share a file.
         stamp = len(list(Path(self.tmp.name).glob("tally-*.txt")))
         tally = Path(self.tmp.name) / f"tally-{stamp}.txt"
@@ -87,6 +86,21 @@ class CampfireSuiteParallelTests(unittest.TestCase):
 
     def _note(self, tag: str) -> str:
         return (self.emit / "tmp" / f"note-{tag}.txt").read_text()
+
+    def _require_mounts(self):
+        if not shutil.which("unshare") or not shutil.which("setpriv"):
+            self.skipTest("unshare or setpriv is not installed")
+        source = Path(self.tmp.name) / "probe-source"
+        destination = Path(self.tmp.name) / "probe-destination"
+        source.mkdir()
+        destination.mkdir()
+        probe = subprocess.run(
+            ["unshare", "--user", "--map-current-user", "--keep-caps", "--mount",
+             "mount", "--bind", str(source), str(destination)],
+            capture_output=True,
+        )
+        if probe.returncode:
+            self.skipTest("this host refuses unprivileged bind mounts")
 
     def _two_file_emit(self) -> None:
         write(
@@ -136,14 +150,15 @@ class CampfireSuiteParallelTests(unittest.TestCase):
             )
 
     def test_parallel_isolation_matches_serial_contract(self):
-        if not Path("/usr/bin/unshare").exists() or not Path("/usr/bin/setpriv").exists():
-            self.skipTest("unshare or setpriv is not installed")
+        self._require_mounts()
         self._two_file_emit()
         serial = self._run("1", unset=("SECRET_KEY_BASE",))
+        serial_note = self._note("alpha")
         parallel = self._run("2", unset=("SECRET_KEY_BASE",))
         self.assertEqual(serial.returncode, 0, serial.stderr + serial.stdout)
         self.assertEqual(parallel.returncode, 0, parallel.stderr + parallel.stdout)
         self.assertEqual(serial.tally_path.read_text(), parallel.tally_path.read_text())
+        self.assertEqual(serial.fail_path.read_text(), parallel.fail_path.read_text())
         noisy = parallel.tally_path.read_text().split("noisy_test|", 1)[1]
         # The first-error column is the first non-blank line of the
         # combined stream. STDERR must still precede the raise.
@@ -156,6 +171,7 @@ class CampfireSuiteParallelTests(unittest.TestCase):
         # Isolation is the overlapping write of the same storage name.
         # Both files passed, so neither saw the other's bytes.
         note = self._note("alpha")
+        self.assertEqual(serial_note, note)
         self.assertIn(f"uid={os.getuid()}", note)
         self.assertIn(f"euid={os.geteuid()}", note)
         self.assertIn("secret=campfire-suite-secret", note)
@@ -176,7 +192,7 @@ class CampfireSuiteParallelTests(unittest.TestCase):
         self._two_file_emit()
         # Installed unshare that cannot mount. The suite must run the
         # files in this process and still pass, not skip and not fail.
-        fake = Path(self.tmp.name) / "unshare"
+        fake = Path(self.tmp.name) / "bin" / "unshare"
         executable(
             fake,
             "#!/bin/sh\n"
@@ -185,7 +201,7 @@ class CampfireSuiteParallelTests(unittest.TestCase):
         )
         result = self._run(
             "2",
-            env_extra={"CAMPFIRE_SUITE_UNSHARE": str(fake)},
+            env_extra={"PATH": f"{fake.parent}:{os.environ['PATH']}"},
             unset=("SECRET_KEY_BASE",),
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -196,16 +212,44 @@ class CampfireSuiteParallelTests(unittest.TestCase):
 
     def test_missing_unshare_falls_back_to_serial(self):
         self._two_file_emit()
-        missing = Path(self.tmp.name) / "missing-unshare"
+        missing = Path(self.tmp.name) / "missing-unshare.sh"
+        # Simulate a failed command lookup without changing the suite's API
+        # or hiding the other tools that a serial run needs.
+        write(missing, """command() {
+    if [[ "$1" == -v && "$2" == unshare ]]; then return 1; fi
+    builtin command "$@"
+}
+""")
         result = self._run(
             "2",
-            env_extra={"CAMPFIRE_SUITE_UNSHARE": str(missing)},
+            env_extra={"BASH_ENV": str(missing)},
             unset=("SECRET_KEY_BASE",),
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertNotIn("ruby files ran in", result.stdout)
         self.assertIn("PASS|test/models/alpha_test|1|1|", result.tally_path.read_text())
         self.assertIn("secret=campfire-suite-secret", self._note("alpha"))
+
+    def test_worker_mount_failure_cannot_run_with_shared_storage(self):
+        self._require_mounts()
+        self._two_file_emit()
+        fake = Path(self.tmp.name) / "bin" / "mount"
+        executable(fake, f"""#!/bin/sh
+if [ "$3" = tmp/storage ]; then
+    echo 'storage mount refused' >&2
+    exit 1
+fi
+exec "{shutil.which('mount')}" "$@"
+""")
+        result = self._run(
+            "2", env_extra={"PATH": f"{fake.parent}:{os.environ['PATH']}"},
+            unset=("SECRET_KEY_BASE",),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("ruby files ran in", result.stdout)
+        self.assertNotIn("PASS|", result.tally_path.read_text())
+        self.assertEqual(result.tally_path.read_text().count("storage mount refused"), 3)
+        self.assertFalse((self.emit / "tmp/storage/shared-name").exists())
 
 
 if __name__ == "__main__":
