@@ -7,6 +7,12 @@ fn unit_separates_build_timing_without_reducing_coverage() {
     let unit = &ci["jobs"]["unit"];
     assert!(unit.get("if").is_none());
     assert!(unit.get("continue-on-error").is_none());
+    assert_eq!(unit["runs-on"].as_str(), Some("ubuntu-latest"));
+    assert_eq!(
+        unit["env"]["CARGO_PROFILE_TEST_SPLIT_DEBUGINFO"].as_str(),
+        Some("unpacked")
+    );
+    assert!(ci["env"].get("CARGO_PROFILE_TEST_SPLIT_DEBUGINFO").is_none());
     let steps = unit["steps"].as_sequence().unwrap();
     let build = steps
         .iter()
@@ -62,6 +68,48 @@ fn unit_separates_build_timing_without_reducing_coverage() {
         resources["with"]["path"].as_str(),
         Some("${{ runner.temp }}/unit-resources/")
     );
+}
+
+#[test]
+#[cfg(all(target_os = "linux", debug_assertions))]
+fn test_backtraces_retain_library_and_integration_source_locations() {
+    const PROBE: &str = "ROUNDHOUSE_TEST_BACKTRACE_PROBE";
+    if std::env::var_os(PROBE).is_some() {
+        // The child runs outside the checkout: this deliberately panics in
+        // first-party library code, with an integration-test frame above it.
+        roundhouse::fixtures::real_blog();
+        panic!("missing-fixture probe unexpectedly returned");
+    }
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "roundhouse-backtrace-{}-{unique}", std::process::id()
+    ));
+    fs::create_dir(&root).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "test_backtraces_retain_library_and_integration_source_locations",
+            "--nocapture",
+        ])
+        .env(PROBE, "1")
+        .env("RUST_BACKTRACE", "1")
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    fs::remove_dir(&root).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(101), "{stderr}");
+    for source in ["src/fixtures.rs:", "tests/ci_policy_workflow.rs:"] {
+        // The panic header includes a location even without debug info.
+        // Require symbolicated stack frames, not just that header.
+        assert!(
+            stderr.lines().any(|line| line.trim_start().starts_with("at ") && line.contains(source)),
+            "missing file/line backtrace for {source}:\n{stderr}"
+        );
+    }
 }
 
 #[test]

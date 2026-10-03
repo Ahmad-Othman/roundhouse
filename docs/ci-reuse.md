@@ -18,6 +18,14 @@ including on failures when a report is available. Test results are never reused.
 The test profile keeps file/line backtraces with `line-tables-only` debug info;
 the independent dev-profile bench emission gate remains unchanged.
 
+The Linux unit job also sets `CARGO_PROFILE_TEST_SPLIT_DEBUGINFO=unpacked`.
+First-party split DWARF sidecars can be shared instead of repeated in every
+integration-test executable. Keep these files alongside the build until tests
+finish; deleting them early can break backtrace symbolication. Disk comparisons
+must include sidecars and object files, not only executable sizes. This override
+does not change local platform defaults, dev or release profiles. The policy
+suite checks real library and integration-test file/line backtraces.
+
 Build, execution and debug-bench phases also retain `unit-resources`: five-second
 CSV samples of whole-runner CPU busy/I/O wait, available RAM and workspace
 filesystem space, plus per-phase JSON summaries and Cargo `deps`/`incremental`/
@@ -34,8 +42,10 @@ time; child peak RSS is the largest single process, **not** concurrent tree RAM.
 Five-second samples can miss shorter spikes. To reproduce a Linux measurement:
 
 ```bash
+CARGO_PROFILE_TEST_SPLIT_DEBUGINFO=unpacked CARGO_INCREMENTAL=0 \
 python3 scripts/ci-resources.py --out /tmp/unit-resources/build -- \
   cargo test --locked --all-targets --no-run --timings
+CARGO_PROFILE_TEST_SPLIT_DEBUGINFO=unpacked CARGO_INCREMENTAL=0 \
 python3 scripts/ci-resources.py --out /tmp/unit-resources/tests -- \
   cargo test --locked --all-targets
 ```

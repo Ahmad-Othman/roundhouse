@@ -458,6 +458,11 @@ jobs:
     needs: generate-fixture
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Share first-party split DWARF instead of copying it into every test
+      # executable. Keep sidecars until all tests finish; code stays unoptimized.
+      # Test-profile-only, Linux-job-only: dev, release and other hosts unchanged.
+      CARGO_PROFILE_TEST_SPLIT_DEBUGINFO: unpacked
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-rust
