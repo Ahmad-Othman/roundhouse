@@ -73,6 +73,118 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
     assert!(ci["permissions"].get("id-token").is_none());
 }
 
+#[test]
+fn fixture_cache_reuses_only_compatible_gems_and_never_skips_generation() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let job = &ci["jobs"]["generate-fixture"];
+    assert!(job.get("if").is_none());
+    assert_eq!(
+        job["env"]["GEM_HOME"].as_str(),
+        Some("${{ runner.temp }}/fixture-gems")
+    );
+    assert_eq!(job["env"]["GEM_PATH"], job["env"]["GEM_HOME"]);
+    let steps = job["steps"].as_sequence().unwrap();
+    let identity = steps.iter().find(|step| step["id"] == "gems").unwrap();
+    let body = identity["run"].as_str().unwrap();
+    for input in ["ImageOS", "RUBY_ENGINE", "RUBY_VERSION", "RUBY_PLATFORM"] {
+        assert!(body.contains(input), "missing native gem identity: {input}");
+    }
+    assert!(body.contains("date -u +%G-%V"));
+    assert!(body.contains("echo \"$GEM_HOME/bin\" >> \"$GITHUB_PATH\""));
+    let cache = steps
+        .iter()
+        .find(|step| step["uses"] == "actions/cache@v6")
+        .unwrap();
+    assert_eq!(cache["continue-on-error"].as_bool(), Some(true));
+    assert_eq!(
+        cache["with"]["path"].as_str().unwrap(),
+        "${{ env.GEM_HOME }}/bin\n${{ env.GEM_HOME }}/build_info\n${{ env.GEM_HOME }}/extensions\n${{ env.GEM_HOME }}/gems\n${{ env.GEM_HOME }}/plugins\n${{ env.GEM_HOME }}/specifications\n"
+    );
+    let prefix =
+        "fixture-gems-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-";
+    assert_eq!(cache["with"]["restore-keys"].as_str(), Some(prefix));
+    assert_eq!(
+        cache["with"]["key"].as_str().unwrap(),
+        format!("{prefix}${{{{ steps.gems.outputs.week }}}}")
+    );
+    for command in [
+        "gem install rails --no-document",
+        "bin/rh fixture",
+        "cd fixtures && ../scripts/create-store store",
+    ] {
+        let step = steps.iter().find(|step| step["run"] == command).unwrap();
+        assert!(step.get("if").is_none(), "must execute on a hit: {command}");
+        assert!(step.get("continue-on-error").is_none());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_archive_omits_scratch_but_keeps_source_and_seeded_blog_database() {
+    use std::process::Command;
+
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let steps = ci["jobs"]["generate-fixture"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let pack = steps
+        .iter()
+        .find(|step| step["name"] == "Pack fixtures")
+        .unwrap();
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("fixture-pack-{}-{unique}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let retained = [
+        "fixtures/real-blog/app/models/article.rb",
+        "fixtures/real-blog/storage/development.sqlite3",
+        "fixtures/store/app/models/product.rb",
+        "fixtures/store/db/schema.rb",
+        "fixtures/store/test/models/product_test.rb",
+        "fixtures/store/Gemfile.lock",
+    ];
+    let omitted = [
+        "fixtures/real-blog/tmp/cache/bootsnap/compiled",
+        "fixtures/real-blog/log/development.log",
+        "fixtures/store/tmp/cache/bootsnap/compiled",
+        "fixtures/store/log/test.log",
+        "fixtures/store/storage/development.sqlite3",
+    ];
+    for path in retained.iter().chain(&omitted) {
+        let file = root.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, path).unwrap();
+    }
+    let result = Command::new("bash")
+        .args(["-e", "-o", "pipefail", "-c", pack["run"].as_str().unwrap()])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    let unpacked = root.join("unpacked");
+    fs::create_dir(&unpacked).unwrap();
+    let result = Command::new("tar")
+        .args(["-xzf", "real-blog.tar.gz", "-C", "unpacked"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    for path in retained {
+        assert_eq!(fs::read_to_string(unpacked.join(path)).unwrap(), path);
+    }
+    for path in omitted {
+        assert!(
+            !unpacked.join(path).exists(),
+            "scratch was archived: {path}"
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn focused_framework_loop_runs_every_selection_and_preserves_failure() {

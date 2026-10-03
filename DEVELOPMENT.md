@@ -111,6 +111,15 @@ first model it cannot find.
 CI regenerates the fixture once per run in the `generate-fixture` job
 and shares the artifact across the unit job and every per-target
 job — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+Only installed gems are cached, in an isolated `GEM_HOME`: native
+extensions are keyed by runner image, architecture and exact Ruby
+engine/version/platform. Weekly keys refresh the cache with a compatible
+fallback; `gem install rails` still checks for the current release and
+both generators (including the store's guide tests) always execute.
+There is no committed fixture lockfile or generated-source/result cache.
+The artifact excludes temporary caches, logs and store storage, but retains
+the seeded blog database used by the Rails comparisons. Gems themselves
+are not shipped in the fixture artifact; consumers install their own bundle.
 
 `tests/real_blog.rs` pairs against the generated tree; its
 load-bearing gates:

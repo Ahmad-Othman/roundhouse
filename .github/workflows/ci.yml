@@ -159,14 +159,43 @@ jobs:
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Isolate installed gems from the Ruby distribution and fixture trees.
+      GEM_HOME: ${{ runner.temp }}/fixture-gems
+      GEM_PATH: ${{ runner.temp }}/fixture-gems
+      BUNDLE_JOBS: '4'
     steps:
       - uses: actions/checkout@v5
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
+      - name: Identify compatible fixture gems
+        id: gems
+        run: |
+          echo "$GEM_HOME/bin" >> "$GITHUB_PATH"
+          echo "platform=${ImageOS}-$(ruby -e 'print "#{RUBY_ENGINE}-#{RUBY_VERSION}-#{RUBY_PLATFORM}"')" >> "$GITHUB_OUTPUT"
+          echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - name: Cache installed fixture gems
+        # Cache dependencies, never generated apps or test results. A weekly
+        # key saves refreshed gems; Ruby patch/platform and runner OS isolate
+        # native extensions. Installation and generation still run on a hit.
+        continue-on-error: true
+        uses: actions/cache@v6
+        with:
+          # Downloaded .gem archives and documentation are not needed to use
+          # installed gems; omitting them keeps cache transfers smaller.
+          path: |
+            ${{ env.GEM_HOME }}/bin
+            ${{ env.GEM_HOME }}/build_info
+            ${{ env.GEM_HOME }}/extensions
+            ${{ env.GEM_HOME }}/gems
+            ${{ env.GEM_HOME }}/plugins
+            ${{ env.GEM_HOME }}/specifications
+          key: fixture-gems-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-${{ steps.gems.outputs.week }}
+          restore-keys: fixture-gems-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-
       - name: Install Rails
-        run: gem install rails
+        run: gem install rails --no-document
       - name: Generate fixtures/real-blog
         run: bin/rh fixture
       # The Rails Guides store rides the same artifact: the /ide/
@@ -176,17 +205,18 @@ jobs:
         run: cd fixtures && ../scripts/create-store store
       - name: Pack fixtures
         run: |
-          tar --exclude='./fixtures/real-blog/tmp' \
-              --exclude='./fixtures/real-blog/log' \
-              --exclude='./fixtures/store/tmp' \
-              --exclude='./fixtures/store/log' \
-              --exclude='./fixtures/store/storage' \
+          tar --exclude='fixtures/real-blog/tmp' \
+              --exclude='fixtures/real-blog/log' \
+              --exclude='fixtures/store/tmp' \
+              --exclude='fixtures/store/log' \
+              --exclude='fixtures/store/storage' \
               -czf real-blog.tar.gz fixtures/real-blog fixtures/store
       - name: Upload fixture
         uses: actions/upload-artifact@v7
         with:
           name: real-blog-fixture
           path: real-blog.tar.gz
+          compression-level: 0
           retention-days: 1
 
   # -------------------------------------------------------------------
