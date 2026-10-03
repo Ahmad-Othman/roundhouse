@@ -302,7 +302,7 @@ input makes it ineligible. Do not substitute a PR-wide changed-files filter or
 the last head-commit diff for merge-tree identity. Keep artifact producers fresh
 unless current-run outputs and their provenance can be preserved honestly.
 
-Run `PYTHONDONTWRITEBYTECODE=1 python3 tests/ci_reuse_test.py -v` and
+Run `python3 -B tests/ci_reuse_test.py -v` and
 `cargo test --test workflow_yaml_parses` when changing this policy. The Rust
 workflow tests execute the Python adversarial suite, so normal unit CI gates it.
 For coverage routing, archive evidence or full-workflow changes, also run
