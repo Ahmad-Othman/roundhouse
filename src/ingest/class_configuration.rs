@@ -67,14 +67,15 @@ pub(super) fn expand(
         }
         // Transactional per controller: on refusal the survey retains the
         // complete source body, never a partially synthesized configuration.
-        if let Some(body) = survey::unwrap_or_record(expand_controller(
+        let expanded_body = expand_controller(
             controller,
             &candidates,
             surface,
             &surfaces.module_includes,
             &catalog,
             &verified,
-        ))? {
+        );
+        if let Some(body) = survey::unwrap_or_record(expanded_body)? {
             controller.body = body;
         }
     }
@@ -285,10 +286,24 @@ fn expand_controller(
             recv: None,
             method,
             args,
-            block: None,
+            block,
             ..
         } = &*expr.node
         {
+            if block.is_some()
+                && configurations.iter().any(|c| &c.writer.name == method)
+            {
+                // The writer does not store a block. Leave the call
+                // unexpanded rather than consuming the keywords and
+                // dropping the block.
+                return Err(refuse(
+                    "class configuration call has a block the writer does not store",
+                ));
+            }
+            if block.is_some() {
+                expanded.push(item.clone());
+                continue;
+            }
             if method.as_str() == "include" {
                 for arg in args {
                     if let ExprNode::Const { path } = &*arg.node {
@@ -308,20 +323,19 @@ fn expand_controller(
                         "class configuration call precedes its concern include",
                     ));
                 }
+                // An unreadable call stays the original statement. Refusing
+                // the whole controller would also drop every later readable
+                // store on that controller, which is the failure the survey
+                // still reports as an unrecognized macro.
                 let hash = match args.as_slice() {
                     [] => None,
-                    [hash] => Some(hash),
+                    [hash] if readable_keyword_hash(hash) => Some(hash),
                     _ => {
                         return Err(refuse(
                             "class configuration needs a fully readable keyword hash",
                         ));
                     }
                 };
-                if hash.is_some_and(|hash| !readable_keyword_hash(hash)) {
-                    return Err(refuse(
-                        "class configuration needs a fully readable keyword hash",
-                    ));
-                }
                 let mut value = hash.cloned().unwrap_or_else(|| {
                     Expr::new(
                         expr.span,
