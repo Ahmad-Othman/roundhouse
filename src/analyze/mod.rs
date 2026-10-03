@@ -3898,6 +3898,7 @@ impl Analyzer {
         // that, and spinel gave the param an `sp_SymPolyHash *`.
         let mut sites: Vec<(ClassId, Symbol, Vec<Ty>, SiteKeywords)> = Vec::new();
         let params_by_method = Self::param_shapes(app);
+        let defined = Self::defined_methods(app);
         for model in &app.models {
             for method in model.methods() {
                 self.collect_send_sites(&method.body, Some(&model.name), helpers, &mut sites);
@@ -3951,6 +3952,9 @@ impl Analyzer {
                 self.fold_concern_param_sites(app);
             }
             for (class_id, method, arg_tys, kw_tys) in sites {
+                // Before the keywords are placed: the callee's shape is
+                // keyed to the class that defines it.
+                let class_id = self.inherited_param_owner(&defined, class_id, &method);
                 let arg_tys = Self::place_keyword_args(
                     params_by_method.get(&(class_id.clone(), method.clone())),
                     arg_tys,
@@ -3974,6 +3978,92 @@ impl Analyzer {
                 }
             }
         }
+    }
+
+    /// Every `(class, method)` the app defines, by name.
+    fn defined_methods(app: &App) -> BTreeSet<(ClassId, Symbol)> {
+        let mut defined: BTreeSet<(ClassId, Symbol)> = BTreeSet::new();
+        for lc in &app.library_classes {
+            for m in &lc.methods {
+                defined.insert((lc.name.clone(), m.name.clone()));
+            }
+        }
+        for model in &app.models {
+            for m in model.methods() {
+                defined.insert((model.name.clone(), m.name.clone()));
+            }
+        }
+        for c in &app.controllers {
+            for a in c.actions() {
+                defined.insert((c.name.clone(), a.name.clone()));
+            }
+        }
+        defined
+    }
+
+    /// The class whose `def` a call keyed to `class` reaches.
+    ///
+    /// A receiverless call is keyed to the class it is written in, and
+    /// the `def` may sit on an ancestor: a base controller defines
+    /// `sign_in_and_render(user)` and only its subclasses call it, so
+    /// the observation matched no `def` and the parameter stayed `Var`.
+    ///
+    /// Walks Ruby's lookup order: the class, the modules it includes,
+    /// then its parent. A class that defines the method keeps the site.
+    /// A site that reaches an included module first stays where it is —
+    /// `fold_concern_param_sites` owns that case — as does a chain with
+    /// no definer.
+    fn inherited_param_owner(
+        &self,
+        defined: &BTreeSet<(ClassId, Symbol)>,
+        class: ClassId,
+        method: &Symbol,
+    ) -> ClassId {
+        let mut cur = class.clone();
+        for _ in 0..32 {
+            if defined.contains(&(cur.clone(), method.clone())) {
+                return cur;
+            }
+            let Some(info) = self.classes.get(&cur) else { break };
+            let mut modules: Vec<&ClassId> = info.includes.iter().collect();
+            let mut seen: BTreeSet<&ClassId> = BTreeSet::new();
+            while let Some(module) = modules.pop() {
+                if !seen.insert(module) {
+                    continue;
+                }
+                if defined.contains(&(module.clone(), method.clone())) {
+                    return class;
+                }
+                if let Some(m) = self.classes.get(module) {
+                    modules.extend(m.includes.iter());
+                }
+            }
+            let Some(parent) = &info.parent else { break };
+            cur = self.lexical_parent(&cur, parent);
+        }
+        class
+    }
+
+    /// Parents are recorded as written, so `module Api; class
+    /// AuthsController < BaseController` records `BaseController` for
+    /// the class the registry keys `Api::BaseController`. Qualify a
+    /// single-segment parent against the child's enclosing namespaces,
+    /// innermost first — Ruby's lexical rule.
+    fn lexical_parent(&self, child: &ClassId, parent: &ClassId) -> ClassId {
+        if self.classes.contains_key(parent) || parent.0.as_str().contains("::") {
+            return parent.clone();
+        }
+        let mut segs: Vec<&str> = child.0.as_str().split("::").collect();
+        segs.pop();
+        while !segs.is_empty() {
+            let candidate =
+                ClassId(Symbol::from(format!("{}::{}", segs.join("::"), parent.0.as_str()).as_str()));
+            if self.classes.contains_key(&candidate) {
+                return candidate;
+            }
+            segs.pop();
+        }
+        parent.clone()
     }
 
     /// The param-table twin of `fold_concern_surfaces`.
