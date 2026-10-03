@@ -2134,6 +2134,11 @@ jobs:
       - name: cargo test --test uuid_key_ruby -- --ignored
         if: ${{ !cancelled() }}
         run: cargo test --test uuid_key_ruby -- --ignored --nocapture
+      # Only the passing CRuby cases: tests named after an open issue are
+      # ignored too, and a blanket --ignored would select them (#321).
+      - name: cargo test --test tiny_api cruby_gate_ -- --ignored
+        if: ${{ !cancelled() }}
+        run: cargo test --test tiny_api cruby_gate_ -- --ignored --nocapture
       - name: scripts/compare ruby
         if: ${{ !cancelled() }}
         run: scripts/compare ruby
