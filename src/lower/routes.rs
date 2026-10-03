@@ -837,25 +837,18 @@ fn nest_path(
     match rscope {
         // `member do get "reply" end` → `/comments/:id/reply` (`:id`, the
         // record's own key — what a controller's `find` reads as
-        // `params[:id]`). An already-structured path inside `member`
-        // (`get "/comments/:id" => …`, a leading-slash absolute route) is
-        // used verbatim, matching Rails' escape from the nesting.
+        // `params[:id]`). Rails prepends the member scope to EVERY path
+        // written inside the block, a structured one included:
+        // `get "pages/:page"` is `/comments/:id/pages/:page` and even a
+        // leading-slash `get "/comments/:id" => …` comes out as
+        // `/comments/:id/comments/:id` (measured against Rails 8.1).
         ResourceScope::Member => {
-            if is_bare_child_segment(path) {
-                params.push(innermost.param.clone());
-                (format!("{prefix}/{parent_plural}/:{}{path}", innermost.param), params)
-            } else {
-                (path.to_string(), vec![])
-            }
+            params.push(innermost.param.clone());
+            (format!("{prefix}/{parent_plural}/:{}{path}", innermost.param), params)
         }
-        // `collection do get "search" end` → `/photos/search` (no id).
-        ResourceScope::Collection => {
-            if is_bare_child_segment(path) {
-                (format!("{prefix}/{parent_plural}{path}"), params)
-            } else {
-                (path.to_string(), vec![])
-            }
-        }
+        // `collection do get "search" end` → `/photos/search` (no id);
+        // `get "/(:name)"` → `/photos(/:name)`, never a bare `/:name`.
+        ResourceScope::Collection => (format!("{prefix}/{parent_plural}{path}"), params),
         // Bare verb declared directly in the block, or a nested resource's
         // own actions: Rails nests under the parent's `/:<singular>_id`
         // — unless the parent is SINGULAR, which has no id to nest under.
@@ -869,15 +862,6 @@ fn nest_path(
             (full, params)
         }
     }
-}
-
-/// A single bare path segment like `/reply` (from a `get "reply"`
-/// shortcut) — no interior `/` and no `:param`. Such a member/collection
-/// child is nested under the parent; a structured path (`/comments/:id`)
-/// is an absolute override used as-is.
-fn is_bare_child_segment(path: &str) -> bool {
-    let trimmed = path.trim_matches('/');
-    !trimmed.is_empty() && !trimmed.contains('/') && !trimmed.contains(':')
 }
 
 /// Expand a Rails path with optional `(…)` groups into the concrete
@@ -1006,15 +990,17 @@ mod tests {
     }
 
     #[test]
-    fn member_route_absolute_path_used_verbatim() {
-        // `get "/comments/:id" => …` inside a member block escapes nesting.
+    fn member_route_structured_path_still_nests() {
+        // Rails prepends the member scope even to a leading-slash path:
+        // `get "/comments/:id" => …` inside `member do` is served at
+        // `/comments/:id/comments/:id`.
         let (path, params) = nest_path(
             "/comments/:id",
             &plural("comment", "comments"),
             ResourceScope::Member,
         );
-        assert_eq!(path, "/comments/:id");
-        assert!(params.is_empty());
+        assert_eq!(path, "/comments/:id/comments/:id");
+        assert_eq!(params, vec!["id".to_string()]);
     }
 
     #[test]

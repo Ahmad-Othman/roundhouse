@@ -755,6 +755,85 @@ fn a_concern_class_reference_survives_the_copy_into_its_controller() {
         .assert_passes();
 }
 
+/// A concern that includes another concern inside its `included do`
+/// block: ActiveSupport::Concern runs that block on the includer, so
+/// the model gets the inner concern's methods too.
+#[test]
+fn a_concern_included_from_an_included_block_reaches_the_model() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/signing.rb",
+            "module Signing\n  extend ActiveSupport::Concern\n\n  included do\n    include Signing::Codes\n  end\nend\n",
+        )
+        .write(
+            "app/models/concerns/signing/codes.rb",
+            "module Signing::Codes\n  extend ActiveSupport::Concern\n\n  def shout\n    title.upcase\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Signing\n",
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n",
+            "    @articles = Article.includes(:comments).order(created_at: :desc)\n    @loudest = @articles.first&.shout\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\nraise a.shout unless a.shout == \"HI\"",
+        )
+        .assert_passes();
+}
+
+/// Ruby's lookup order for a module included from `included do`: the
+/// block runs on the includer after the outer module is appended, so
+/// the inner module sits AHEAD of the outer one and its method wins.
+#[test]
+fn an_include_from_an_included_block_takes_precedence_over_its_concern() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/signing.rb",
+            "module Signing\n  extend ActiveSupport::Concern\n\n  included do\n    include Signing::Codes\n  end\n\n  def shout\n    \"outer\"\n  end\nend\n",
+        )
+        .write(
+            "app/models/concerns/signing/codes.rb",
+            "module Signing::Codes\n  extend ActiveSupport::Concern\n\n  def shout\n    \"inner\"\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Signing\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\nraise a.shout unless a.shout == \"inner\"",
+        )
+        .assert_passes();
+}
+
+/// The inner concern's own `included do` runs on the includer too: its
+/// scope is declared on the model.
+#[test]
+fn an_include_from_an_included_block_brings_its_own_included_items() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/signing.rb",
+            "module Signing\n  extend ActiveSupport::Concern\n\n  included do\n    include Signing::Codes\n  end\nend\n",
+        )
+        .write(
+            "app/models/concerns/signing/codes.rb",
+            "module Signing::Codes\n  extend ActiveSupport::Concern\n\n  included do\n    scope :titled, ->(title) { where(title: title) }\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Signing\n",
+        )
+        .run_ruby(
+            "Article.create!(title: \"Hi\", body: \"Body text here\")\nraise \"scope missing\" unless Article.titled(\"Hi\").count == 1",
+        )
+        .assert_passes();
+}
+
 /// Integer serialization is not blindly String#to_i: nonnumeric labels
 /// must not alias an existing row zero. Invalid IDs still count toward the
 /// array finder's required cardinality, except when pagination excludes them.
@@ -3353,4 +3432,104 @@ fn rails_root_join_takes_any_number_of_parts() {
     let run = rails_root_join::overlay().run_ruby(rails_root_join::ASSERTIONS);
     run.assert_passes();
     assert!(run.stdout.contains("Rails.root.join contract passed"));
+}
+
+/// An Active Job argument serializer extends a Rails base that the
+/// runtime does not port. The emit drops the class with a
+/// `lower_residue` warning, so the tree still loads. Before, the class
+/// was kept, and `app/models.rb` raised `uninitialized constant
+/// ActiveJob::Serializers` at boot.
+#[test]
+fn an_active_job_object_serializer_does_not_stop_the_boot() {
+    emit_and_run::real_blog()
+        .write(
+            "app/serializers/article_serializer.rb",
+            r#"class ArticleSerializer < ActiveJob::Serializers::ObjectSerializer
+  def klass
+    Article
+  end
+
+  def serialize(article)
+    super("id" => article.id)
+  end
+
+  def deserialize(hash)
+    Article.find(hash["id"])
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+/// `include ActiveSupport::NumberHelper` in a helper gives it the same
+/// number helpers as `ActionView::Helpers::NumberHelper`. No target
+/// ships that namespace, so the include must not reach the emitted
+/// module. Before, `application_helper.rb` raised `uninitialized
+/// constant ActiveSupport::NumberHelper` at boot.
+#[test]
+fn an_active_support_number_helper_include_does_not_stop_the_boot() {
+    emit_and_run::real_blog()
+        .write(
+            "app/helpers/application_helper.rb",
+            r#"module ApplicationHelper
+  include ActiveSupport::NumberHelper
+
+  def article_total(count)
+    number_with_delimiter(count)
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"raise "delimiter" unless ApplicationHelper.article_total(1234567) == "1,234,567"
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
+/// `javascript_include_tag :application` names the source with a
+/// Symbol, as Rails allows. The call is hoisted to a constant, so it
+/// runs at load. Before, the runtime called `include?` on the Symbol,
+/// and the layout raised `NoMethodError` at boot.
+#[test]
+fn a_symbol_source_for_javascript_include_tag_renders_a_script_tag() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/views/layouts/application.html.erb",
+            "    <%= javascript_importmap_tags %>\n",
+            "    <%= javascript_importmap_tags %>\n    <%= javascript_include_tag :application %>\n",
+        )
+        .write(
+            "app/views/articles/_scripts.html.erb",
+            "<%= javascript_include_tag :admin, defer: true %>",
+        )
+        .run_ruby(
+            r#"html = Views::Articles.scripts(nil)
+raise "script tag: #{html}" unless html == %(<script src="/assets/admin.js" defer="defer"></script>)
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
+/// A Symbol source that a value holds, not a literal, reaches the
+/// runtime as a Symbol. Before, the runtime called `include?` on it and
+/// raised `NoMethodError`.
+#[test]
+fn a_symbol_source_in_a_value_for_javascript_include_tag_renders_a_script_tag() {
+    emit_and_run::real_blog()
+        .write(
+            "app/views/articles/_scripts.html.erb",
+            "<% source = :admin %><%= javascript_include_tag source %>",
+        )
+        .run_ruby(
+            r#"html = Views::Articles.scripts(nil)
+raise "script tag: #{html}" unless html == %(<script src="/assets/admin.js"></script>)
+puts "ok"
+"#,
+        )
+        .assert_passes();
 }

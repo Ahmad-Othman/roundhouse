@@ -1619,7 +1619,6 @@ end
     // joins `dir`); map-VFS trees pass `""` and register app-relative.
     app.root = dir.display().to_string().trim_end_matches('/').to_string();
 
-    resolve_polymorphic_targets(&mut app);
     // Before the splice: it (and every later consumer) looks concerns up
     // by ClassId, so the lexical-scope resolution has to have happened.
     qualify_relative_model_includes(&mut app);
@@ -1646,6 +1645,9 @@ end
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
     qualify_model_class_method_ar_calls(&mut app);
+    // After the splice too: the inverse `has_many …, as: :owner` may be
+    // declared in a concern's `included do`.
+    resolve_polymorphic_targets(&mut app);
     // `allow_browser` becomes a filter plus the method it runs, on the
     // concern (before the splice carries both to the includer) or on
     // the controller that called it directly.
@@ -1789,6 +1791,12 @@ fn splice_concerns_into_models(app: &mut App) {
     use crate::expr::ExprNode;
 
     for model in &mut app.models {
+        // Concerns already spliced into this model. A spliced item may
+        // itself be an `include` (a concern's `included do include
+        // Other end`), whose own items are spliced in turn; a concern
+        // is spliced once, so an include cycle terminates.
+        let mut spliced: std::collections::HashSet<crate::ident::ClassId> =
+            std::collections::HashSet::new();
         let mut i = 0;
         while i < model.body.len() {
             // `include Attachment, Broadcasts, Mentionee` is one
@@ -1823,6 +1831,7 @@ fn splice_concerns_into_models(app: &mut App) {
             let model_name = model.name.clone();
             let items: Vec<ModelBodyItem> = concern_ids
                 .iter()
+                .filter(|id| spliced.insert((*id).clone()))
                 .filter_map(|id| app.concern_model_items.get(id).map(|items| (id, items)))
                 .flat_map(|(id, items)| {
                     items.iter().map(|item| rehome_default_fk(item, id, &model_name))
@@ -1832,9 +1841,8 @@ fn splice_concerns_into_models(app: &mut App) {
                 i += 1;
                 continue;
             }
-            let n = items.len();
             model.body.splice(i + 1..i + 1, items);
-            i += n + 1;
+            i += 1;
         }
     }
 }

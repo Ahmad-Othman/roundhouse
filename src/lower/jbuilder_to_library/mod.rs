@@ -35,6 +35,9 @@
 //!                                       partial render of ONE object
 //!   9. `json.cache! key do … end`      → transparent: the block's
 //!                                       statements ARE the object's
+//!  10. `if c … else … end` and the `if`/`unless` modifiers around any
+//!      of the above                    → the same `if`, each branch's
+//!                                       pairs appended inside it
 //!
 //! (6)-(9) arrived together with campfire's bot API, which is six
 //! jbuilder templates written in exactly that dialect.
@@ -402,6 +405,14 @@ enum JbStmt<'a> {
     /// `json.<key> do … end` — one pair whose value is a nested object,
     /// built by re-entering the object walker on the block's body.
     Nested { key: Symbol, body: &'a Expr },
+    /// `if c … else … end`, `unless`, or a statement under an `if` /
+    /// `unless` modifier — the same branch, its pairs appended inside
+    /// it. (`unless` ingests as an `If` with the branches swapped.)
+    Cond {
+        cond: &'a Expr,
+        then_branch: &'a Expr,
+        else_branch: &'a Expr,
+    },
     /// Unrecognized DSL or non-Send statement. Surfaces as an empty io
     /// append so the lowered body stays well-formed.
     Unknown,
@@ -482,10 +493,74 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
 
     // Object form — wrap accumulated pair-emitting statements in
     // `{` … `}`. Comma is inserted between pairs; the lowerer knows
-    // statically how many pairs to emit, so no runtime "first" flag.
+    // statically whether a pair is the first, except after a branch
+    // that may or may not have emitted one (`Sep::Unknown`).
     let mut out: Vec<Expr> = Vec::new();
     out.push(io_append_lit(&ctx.accumulator, "{"));
-    let mut emitted = 0usize;
+    emit_pairs(&classified, raw_stmts, ctx, &mut out, Sep::First);
+    out.push(io_append_lit(&ctx.accumulator, "}"));
+    out
+}
+
+/// Whether the next pair of an object takes a `,` before it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sep {
+    /// No pair yet: no comma.
+    First,
+    /// At least one pair on every path here: a comma.
+    After,
+    /// Some paths emitted a pair and some did not (a conditional with
+    /// pairs in one branch only): decided when the template runs.
+    Unknown,
+}
+
+/// The comma before a pair, per `sep`. `Unknown` asks the accumulator
+/// (`io << "," if !io.end_with?("{")`):
+/// the object's pairs are the only thing appended after its `{`, and
+/// no complete JSON value ends in `{`, so the last character is `{`
+/// exactly when no pair has been emitted yet.
+fn push_separator(out: &mut Vec<Expr>, ctx: &Ctx, sep: Sep) {
+    match sep {
+        Sep::First => {}
+        Sep::After => out.push(io_append_lit(&ctx.accumulator, ",")),
+        Sep::Unknown => {
+            let opened = send(
+                Some(var_ref(Symbol::from(ctx.accumulator.as_str()))),
+                "end_with?",
+                vec![lit_str("{".to_string())],
+                None,
+                true,
+            );
+            out.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond: send(Some(opened), "!", Vec::new(), None, false),
+                    then_branch: io_append_lit(&ctx.accumulator, ","),
+                    else_branch: seq(Vec::new()),
+                },
+            ));
+        }
+    }
+}
+
+/// The statements of an `if` branch. A missing `else` (and the empty
+/// side of a modifier) ingests as `nil`, which has no pairs.
+fn branch_stmts(branch: &Expr) -> Vec<&Expr> {
+    match &*branch.node {
+        ExprNode::Lit { value: Literal::Nil } => Vec::new(),
+        _ => flatten_cache_blocks(stmts_of(branch)),
+    }
+}
+
+/// Append the pairs of an object's statements to `out`, starting from
+/// `sep`, and answer the separator state after them.
+fn emit_pairs(
+    classified: &[JbStmt<'_>],
+    raw_stmts: &[&Expr],
+    ctx: &Ctx,
+    out: &mut Vec<Expr>,
+    mut sep: Sep,
+) -> Sep {
     for (stmt, src) in classified.iter().zip(raw_stmts.iter()) {
         // Synthesis choke point: everything pushed for this DSL
         // statement (key/comma appends, encode_value calls) attributes
@@ -496,9 +571,7 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
             JbStmt::Extract { obj, attrs } => {
                 let obj_is_arg = obj_is_named_local(obj, &ctx.arg_name);
                 for attr in attrs {
-                    if emitted > 0 {
-                        out.push(io_append_lit(&ctx.accumulator, ","));
-                    }
+                    push_separator(out, ctx, sep);
                     out.push(io_append_lit(
                         &ctx.accumulator,
                         &format!("\"{}\":", attr.as_str()),
@@ -540,13 +613,11 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
                         json_builder_encode(value)
                     };
                     out.push(io_append_call(&ctx.accumulator, encoded));
-                    emitted += 1;
+                    sep = Sep::After;
                 }
             }
             JbStmt::Pair { key, value } => {
-                if emitted > 0 {
-                    out.push(io_append_lit(&ctx.accumulator, ","));
-                }
+                push_separator(out, ctx, sep);
                 out.push(io_append_lit(
                     &ctx.accumulator,
                     &format!("\"{}\":", key.as_str()),
@@ -568,24 +639,20 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
                     None => json_builder_encode(rewrite_h_escape(&rewrite_route_helpers(value, ctx))),
                 };
                 out.push(io_append_call(&ctx.accumulator, encoded));
-                emitted += 1;
+                sep = Sep::After;
             }
             JbStmt::PairPartial { key, partial_path, arg } => {
-                if emitted > 0 {
-                    out.push(io_append_lit(&ctx.accumulator, ","));
-                }
+                push_separator(out, ctx, sep);
                 out.push(io_append_lit(
                     &ctx.accumulator,
                     &format!("\"{}\":", key.as_str()),
                 ));
                 let arg = rewrite_h_escape(&rewrite_route_helpers(arg, ctx));
                 out.extend(emit_partial_call(partial_path, &arg, ctx));
-                emitted += 1;
+                sep = Sep::After;
             }
             JbStmt::Nested { key, body } => {
-                if emitted > 0 {
-                    out.push(io_append_lit(&ctx.accumulator, ","));
-                }
+                push_separator(out, ctx, sep);
                 out.push(io_append_lit(
                     &ctx.accumulator,
                     &format!("\"{}\":", key.as_str()),
@@ -594,13 +661,40 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
                     &flatten_cache_blocks(stmts_of(body)),
                     ctx,
                 ));
-                emitted += 1;
+                sep = Sep::After;
             }
             JbStmt::ArrayPartial { .. } | JbStmt::Partial { .. } => {
                 // These shouldn't appear in an object template, but if
                 // they do (mixed with pair-emitting stmts), drop a
                 // TODO marker rather than emit malformed JSON.
                 out.push(io_append_lit(&ctx.accumulator, ""));
+            }
+            JbStmt::Cond { cond, then_branch, else_branch } => {
+                let branch = |body: &Expr| {
+                    let stmts = branch_stmts(body);
+                    let classified: Vec<JbStmt<'_>> = stmts.iter().map(|s| classify(s)).collect();
+                    let mut appends = Vec::new();
+                    let after = emit_pairs(&classified, &stmts, ctx, &mut appends, sep);
+                    (seq(appends), after)
+                };
+                let (then_appends, then_sep) = branch(then_branch);
+                let (else_appends, else_sep) = branch(else_branch);
+                let is_empty = |e: &Expr| matches!(&*e.node, ExprNode::Seq { exprs } if exprs.is_empty());
+                // `x if c` keeps its `if`; `x unless c` ingests as an
+                // `if c` with an empty then-branch, which reads better
+                // as `if !c`.
+                let (cond, then_appends, else_appends) =
+                    if is_empty(&then_appends) && !is_empty(&else_appends) {
+                        let negated = send(Some((*cond).clone()), "!", Vec::new(), None, false);
+                        (negated, else_appends, then_appends)
+                    } else {
+                        ((*cond).clone(), then_appends, else_appends)
+                    };
+                out.push(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If { cond, then_branch: then_appends, else_branch: else_appends },
+                ));
+                sep = if then_sep == else_sep { then_sep } else { Sep::Unknown };
             }
             JbStmt::Unknown => {
                 out.push(io_append_lit(&ctx.accumulator, ""));
@@ -610,11 +704,13 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
             e.inherit_span(src.span);
         }
     }
-    out.push(io_append_lit(&ctx.accumulator, "}"));
-    out
+    sep
 }
 
 fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
+    if let ExprNode::If { cond, then_branch, else_branch } = &*stmt.node {
+        return JbStmt::Cond { cond, then_branch, else_branch };
+    }
     let ExprNode::Send {
         recv: Some(recv),
         method,
