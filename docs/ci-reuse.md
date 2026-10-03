@@ -156,17 +156,25 @@ resolution or a cache-hit skip; floating dependencies still resolve normally.
 Missing caches only cost downloads. Downstream receipts continue to fingerprint
 the actual installed modules and built output, not the npm cache key.
 
-Fixture input is a separate, bounded exception: first-attempt PR runs may
-restore the packed blog/store source under an exact recipe/environment/UTC-day
-key, without fallback keys. This intentionally holds floating gem resolution
-within one day; it does not prove unchanged scripts produce identical source.
-The store's guide tests still execute, and every run uploads its own fixture
-artifact. Main, scheduled/manual runs and reruns always regenerate. Successful
-fresh default-branch output can seed the cache; PR writes remain PR-scoped.
-Full PR coverage does not disable this input cache; rerunning forces fresh
-generation. See [fixture inputs](../DEVELOPMENT.md#real-blog) for key details.
-This cache contains no compiled output or successful-check receipt and does
-not relax the downstream fingerprints below.
+### Fixture inputs
+
+Installed gems use an isolated `GEM_HOME`, keyed by observed runner image
+version/architecture, exact Ruby engine/version/platform and RubyGems/Bundler.
+Weekly fallback keys stay within that compatibility boundary. Fresh generation
+still checks for the current Rails release; gems are not shipped in the artifact.
+
+First-attempt PRs may restore packed blog/store source under an exact key combining
+`bin/rh`, generator/validation scripts, `ci.yml`, the same observed environment
+and UTC day, without fallback keys. This deliberately holds floating gem resolution
+within one day, not a claim of deterministic generation. Main, scheduled/manual
+runs and reruns always regenerate; full PR coverage alone does not disable reuse.
+Successful default-branch output can seed PR reads; PR writes remain PR-scoped.
+Missing/unavailable caches fall back to generation; corrupt source fails closed.
+
+`scripts/test-store` installs the frozen bundle and runs both guide tests on fresh
+and restored paths. Every run uploads its own artifact, excluding scratch/logs and
+Store storage but retaining the seeded Blog database. The source snapshot contains
+no compiled output or test receipt; downstream fingerprints remain unchanged.
 
 ## What must match
 
