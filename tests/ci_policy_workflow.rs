@@ -1,7 +1,7 @@
 use std::fs;
 
 #[test]
-fn unit_separates_build_timing_without_reducing_coverage() {
+fn unit_batches_all_targets_without_reducing_coverage() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let unit = &ci["jobs"]["unit"];
@@ -14,29 +14,21 @@ fn unit_separates_build_timing_without_reducing_coverage() {
     );
     assert!(ci["env"].get("CARGO_PROFILE_TEST_SPLIT_DEBUGINFO").is_none());
     let steps = unit["steps"].as_sequence().unwrap();
-    let build = steps
+    let tests = steps
         .iter()
-        .position(|step| step["name"].as_str() == Some("Build all test targets"))
-        .expect("compile every target with timings");
-    let run = steps
-        .iter()
-        .position(|step| step["name"].as_str() == Some("Run all test targets"))
-        .expect("execute every non-ignored test, not just compile it");
-    assert!(build < run);
-    for (index, phase, command) in [
-        (
-            build,
-            "build",
-            "cargo test --locked --all-targets --no-run --timings",
-        ),
-        (run, "tests", "cargo test --locked --all-targets"),
-    ] {
-        assert!(steps[index].get("if").is_none());
-        assert!(steps[index].get("continue-on-error").is_none());
-        let body = steps[index]["run"].as_str().unwrap();
-        assert!(body.contains(&format!("--out \"$RUNNER_TEMP/unit-resources/{phase}\" --")));
-        assert!(body.trim_end().ends_with(command));
-    }
+        .position(|step| {
+            step["name"].as_str() == Some("Build and run all test targets in batches")
+        })
+        .expect("batch every lib/bin/integration target through Cargo");
+    assert!(steps[tests].get("if").is_none());
+    assert!(steps[tests].get("continue-on-error").is_none());
+    let body = steps[tests]["run"].as_str().unwrap();
+    assert!(body.contains("--out \"$RUNNER_TEMP/unit-resources/tests\" --"));
+    assert!(body.contains("python3 scripts/ci-unit-tests.py"));
+    assert!(
+        !body.contains("cargo test --locked --all-targets"),
+        "all-target peak must not rebuild every integration executable at once"
+    );
     let timings = steps
         .iter()
         .find(|step| step["with"]["name"].as_str() == Some("unit-build-timings"))
@@ -114,17 +106,19 @@ fn test_backtraces_retain_library_and_integration_source_locations() {
 
 #[test]
 #[cfg(target_os = "linux")]
-fn resource_monitor_preserves_failures_and_metric_meanings() {
-    let result = std::process::Command::new("python3")
-        .args(["-B", "tests/ci_resources_test.py", "-v"])
-        .output()
-        .expect("CI helper tests require python3");
-    assert!(
-        result.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
-    );
+fn resource_and_unit_batch_helpers_preserve_failures_and_contracts() {
+    for test in ["tests/ci_resources_test.py", "tests/ci_unit_tests_test.py"] {
+        let result = std::process::Command::new("python3")
+            .args(["-B", test, "-v"])
+            .output()
+            .expect("CI helper tests require python3");
+        assert!(
+            result.status.success(),
+            "{test}:\n{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
 }
 
 #[test]

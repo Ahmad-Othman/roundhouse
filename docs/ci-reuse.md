@@ -4,36 +4,48 @@
 
 `.github/workflows/ci.yml` runs a compact floor on PRs and main pushes:
 
-- Fixture generation and `unit` (`cargo test --all-targets`, including emitted
-  Ruby execution tests and the debug-profile bench emission checks).
+- Fixture generation and `unit` (every `cargo test --all-targets` identity,
+  including emitted Ruby execution tests and the debug-profile bench emission
+  checks).
 - Store analysis, Ruby/Rust/TypeScript comparisons against live Rails.
 - TypeScript SharedWorker browser tests, Campfire conformance, and Campfire
   comparison including its model/database differential.
 
-The unit job compiles with `cargo test --locked --all-targets --no-run --timings`
-and then executes `cargo test --locked --all-targets` against those binaries.
-Separate step durations distinguish build/link cost from test execution; the
-`unit-build-timings` artifact retains Cargo's per-target HTML build report,
-including on failures when a report is available. Test results are never reused.
-The test profile keeps file/line backtraces with `line-tables-only` debug info;
-the independent dev-profile bench emission gate remains unchanged.
+The unit job runs `scripts/ci-unit-tests.py`: library and package binaries first,
+then integration targets in bounded Cargo batches (default 20; override with
+`--batch-size` or `ROUNDHOUSE_UNIT_BATCH_SIZE`). Each batch is still
+`cargo test --locked --test …` for build and execution — identities, failure
+propagation, and local `cargo test --test NAME` selection stay intact.
+After a successful integration batch, only that batch's integration executables
+and their own unpacked split-DWARF sidecars are deleted. Shared libraries,
+package binaries (including `CARGO_BIN_EXE` helpers), fingerprints, and
+dependency artifacts remain for later batches and for the independent
+dev-profile bench emission gate. Test results are never reused or cached.
+Compile-everything-before-any-execute is intentionally not preserved: a later
+batch can fail to compile after earlier batches have already run. The
+`unit-build-timings` artifact still retains Cargo's HTML report when produced
+(lib/bin build and the first integration wave). The test profile keeps file/line
+backtraces with `line-tables-only` debug info.
 
 The Linux unit job also sets `CARGO_PROFILE_TEST_SPLIT_DEBUGINFO=unpacked`.
 First-party split DWARF sidecars can be shared instead of repeated in every
-integration-test executable. Keep these files alongside the build until tests
-finish; deleting them early can break backtrace symbolication. Disk comparisons
-must include sidecars and object files, not only executable sizes. This override
-does not change local platform defaults, dev or release profiles. The policy
-suite checks real library and integration-test file/line backtraces.
+integration-test executable. Sidecars for a finished integration target are
+freed with that target after its batch succeeds; shared library/bin sidecars
+stay. Disk comparisons must include sidecars and object files, not only
+executable sizes. This override does not change local platform defaults, dev or
+release profiles. The policy suite checks real library and integration-test
+file/line backtraces and the batch orchestrator's coverage/reclaim rules.
 
-Build, execution and debug-bench phases also retain `unit-resources`: five-second
+Build/execution and debug-bench phases also retain `unit-resources`: five-second
 CSV samples of whole-runner CPU busy/I/O wait, available RAM and workspace
 filesystem space, plus per-phase JSON summaries and Cargo `deps`/`incremental`/
-`build` allocated sizes. Initial/final samples cover short commands too. Reports
-are outside the Cargo cache and uploaded on failure; commands and exit codes
-are preserved. Measurement/report I/O failures are best-effort warnings, never
-replacements for the command result. No cleanup runs while test binaries are
-still needed.
+`build` allocated sizes. Because batches free finished integration artifacts,
+JSON also records `disk_used_peak_bytes` and a roughly once-per-minute
+`deps_peak` sample so end-of-phase sizes are not mistaken for the high-water
+mark. Initial/final samples cover short commands too. Reports are outside the
+Cargo cache and uploaded on failure; commands and exit codes are preserved.
+Measurement/report I/O failures are best-effort warnings, never replacements
+for the command result.
 
 These are resource measurements, not a performance gate. CPU percentages and
 available RAM include other runner processes and the OS; available RAM excludes
@@ -43,11 +55,8 @@ Five-second samples can miss shorter spikes. To reproduce a Linux measurement:
 
 ```bash
 CARGO_PROFILE_TEST_SPLIT_DEBUGINFO=unpacked CARGO_INCREMENTAL=0 \
-python3 scripts/ci-resources.py --out /tmp/unit-resources/build -- \
-  cargo test --locked --all-targets --no-run --timings
-CARGO_PROFILE_TEST_SPLIT_DEBUGINFO=unpacked CARGO_INCREMENTAL=0 \
 python3 scripts/ci-resources.py --out /tmp/unit-resources/tests -- \
-  cargo test --locked --all-targets
+  python3 scripts/ci-unit-tests.py
 ```
 
 These are nine validation executions, plus three small orchestration jobs
