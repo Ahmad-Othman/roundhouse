@@ -26,21 +26,6 @@ struct Configuration {
     reader: MethodDef,
 }
 
-thread_local! {
-    static REFUSED_CONFIGURATION: std::cell::RefCell<std::collections::HashSet<String>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
-}
-
-pub(super) fn configuration_refused(controller: &str) -> bool {
-    REFUSED_CONFIGURATION.with(|set| set.borrow().contains(controller))
-}
-
-fn note_configuration_refused(controller: &str) {
-    REFUSED_CONFIGURATION.with(|set| {
-        set.borrow_mut().insert(controller.to_string());
-    });
-}
-
 pub(super) fn expand(
     app: &mut App,
     carriers: &[ConcernClassMethodSpans],
@@ -68,8 +53,6 @@ pub(super) fn expand(
     if configurations.is_empty() {
         return Ok(());
     }
-    REFUSED_CONFIGURATION.with(|set| set.borrow_mut().clear());
-
     let surfaces = controller_concern_surfaces(app);
     let verified = verified_concerns(app, carriers, &surfaces.module_includes, framework_shadows);
     for controller in &mut app.controllers {
@@ -91,9 +74,8 @@ pub(super) fn expand(
             &catalog,
             &verified,
         );
-        match survey::unwrap_or_record(expanded_body)? {
-            Some(body) => controller.body = body,
-            None => note_configuration_refused(controller.name.0.as_str()),
+        if let Some(body) = survey::unwrap_or_record(expanded_body)? {
+            controller.body = body;
         }
     }
     Ok(())

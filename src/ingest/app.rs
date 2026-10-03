@@ -2889,9 +2889,21 @@ fn expand_class_body_macros(app: &mut App) {
             // (`def options; @options || {}; end`). The writer still
             // only stores the keyword rest, so the call is consumed.
             // An attached block never reaches this arm.
-            if method_stores_keyword_rest(&macro_def)
-                && !super::class_configuration::configuration_refused(controller.name.0.as_str())
-            {
+            // A refused concern is not executed. A method whose body is
+            // only the keyword-rest store is still consumed: the other
+            // statements stay unexpanded.
+            let another_unreadable = controller.body.iter().any(|other| {
+                let ControllerBodyItem::Unknown { expr: other_expr, .. } = other else {
+                    return false;
+                };
+                let ExprNode::Send { recv: None, method: other_method, args, block: None, .. } =
+                    &*other_expr.node
+                else {
+                    return false;
+                };
+                other_method == method && stored_options_init(other_expr, &macro_def).is_none() && !args.is_empty()
+            });
+            if method_stores_keyword_rest(&macro_def) && !another_unreadable {
                 if let Some(init) = stored_options_init(expr, &macro_def) {
                     survey::record(&IngestError::Unsupported {
                         file: controller.name.0.as_str().to_string(),

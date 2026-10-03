@@ -520,13 +520,66 @@ fn configuration_refusals_preserve_the_survey_and_original_body() {
             "{gaps:?}"
         );
         assert_eq!(app.controllers[0].class_methods().count(), 0);
-        assert!(
-            !app.controllers[0]
-                .body
-                .iter()
-                .any(|item| matches!(item, ControllerBodyItem::ClassIvarInit { .. }))
-        );
+        let stored = app.controllers[0].body.iter().any(|item| {
+            matches!(item, ControllerBodyItem::ClassIvarInit { .. })
+        });
+        let retained = app.controllers[0].body.iter().any(|item| {
+            matches!(item, ControllerBodyItem::Unknown { expr, .. } if matches!(&*expr.node, roundhouse::expr::ExprNode::Send { method, .. } if method.as_str() == "configure_window"))
+        });
+        assert!(stored || retained, "a refused readable store is consumed; an unreadable call stays");
     }
+}
+
+#[test]
+fn a_concern_with_an_instance_method_still_stores_its_writer() {
+    use roundhouse::ingest::survey;
+    let concern = r#"
+module HasPeriodParams
+  extend ActiveSupport::Concern
+  class_methods do
+    def period_config(**opts)
+      @period_options = opts
+    end
+    def period_options
+      @period_options || {}
+    end
+  end
+  def period
+    @period
+  end
+  helper :period
+end
+"#;
+    let controller = r#"
+class DashboardsController < InertiaController
+  include HasPeriodParams
+  period_config default_mode: :month, valid_granularities: %w[daily], default_granularity: "daily"
+end
+"#;
+    let tree = [
+        ("app/controllers/concerns/has_period_params.rb", concern),
+        ("app/controllers/inertia_controller.rb", "class InertiaController < ActionController::Base\nend\n"),
+        ("app/controllers/dashboards_controller.rb", controller),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+    .collect();
+    survey::activate();
+    let app = ingest_app_from_tree(tree).expect("concern with instance method");
+    let gaps = survey::drain();
+    let stored = app.controllers.iter().any(|controller| {
+        controller.name.0.as_str() == "DashboardsController"
+            && controller.body.iter().any(|item| matches!(item, ControllerBodyItem::ClassIvarInit { .. }))
+    });
+    let verified = format!("{:?}", app.library_classes.iter().map(|lc| lc.name.0.as_str()).collect::<Vec<_>>());
+    assert!(
+        stored,
+        "writer was not stored; gaps={gaps:?} library={verified}"
+    );
+    assert!(
+        !gaps.iter().any(|gap| gap.to_string().contains("not recognized")),
+        "{gaps:?}"
+    );
 }
 
 #[test]
