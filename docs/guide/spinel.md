@@ -54,7 +54,7 @@ calls it the Campfire tier for that reason.
   `brew install vips`) — only when the app declares image variants
   (`has_one_attached` with `variant`), in which case `spin.toml` lists
   `ruby-vips`.
-- **Node.js 18+** — when the app builds Tailwind (the asset step runs
+- **Node.js 24+** — when the app builds Tailwind (the asset step runs
   `npx @tailwindcss/cli`), and for the browser end-to-end suite.
 
 ## Build and run
@@ -195,7 +195,7 @@ live updates over the socket — from `docker run -p 3000:3000`.
 [rubys.github.io/roundhouse/campfire/docker.tgz](https://rubys.github.io/roundhouse/campfire/docker.tgz)
 is that archive, refreshed by scheduled full validation or an explicitly
 publishing manual run on canonical main. PR archive checks never publish it;
-see [CI coverage](../ci-reuse.md). It is the fastest way to see the door's
+see [CI publication](../ci/README.md#publication-is-separate). It is the fastest way to see the door's
 end state before pointing it at your own app.
 
 ## What to expect

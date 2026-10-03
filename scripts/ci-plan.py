@@ -21,9 +21,10 @@ TARGETS = [
     "ruby",
     "jruby",
 ]
+DRAFT_FLOOR = ["generate-fixture", "unit"]
 BASE = [
-    "generate-fixture",
-    "unit",
+    *DRAFT_FLOOR,
+    "build-roundhouse",
     "store-check",
     "compare",
     "compare-ruby",
@@ -166,9 +167,9 @@ def archive_and_campfire_jobs(path, interpreter_only):
 
 
 def select(paths, *, draft=False, full=False, publish=False, project_scope=None):
-    if draft:
+    if draft and not full:
         return finish(
-            BASE[:2],
+            DRAFT_FLOOR,
             [],
             [],
             False,
@@ -196,11 +197,6 @@ def select(paths, *, draft=False, full=False, publish=False, project_scope=None)
             "scripts/ci-plan.py",
             "scripts/ci-reuse.py",
             "scripts/ci-archive-evidence.py",
-            "tests/ci_plan_test.py",
-            "tests/ci_archive_evidence_test.py",
-            "tests/workflow_yaml_parses.rs",
-            "tests/ci_policy_workflow.rs",
-            "tests/ci_fixture_workflow.rs",
             "src/project.rs",
             "src/bin/roundhouse.rs",
             "Cargo.toml",
@@ -479,7 +475,7 @@ def changed_inputs(event, event_name, sha):
 
 def check_results(plan, needs, *, compact=False):
     required = (
-        BASE[:2] if plan["jobs"] == BASE[:2] else BASE if compact else plan["required"]
+        DRAFT_FLOOR if plan["jobs"] == DRAFT_FLOOR else BASE if compact else plan["required"]
     )
     failures = [
         f"{j}: {needs.get(j, {}).get('result', 'missing')}"
