@@ -2518,6 +2518,14 @@ pub fn ingest_concern_class_method_spans(
             // above this function) so the concern fold copies these
             // names onto includers exactly as it does for `class_methods
             // do` / `module ClassMethods`.
+            if let Some(singleton) = stmt.as_singleton_class_node() {
+                // `class << self` is the class-method carrier, not a
+                // nested singleton that hides the methods from an includer.
+                // `module_function` stays on the module.
+                if singleton.expression().as_self_node().is_some() {
+                    defs_in(singleton.body(), file, &mut spans);
+                }
+            }
             if let Some(def) = super::visibility::definition(&stmt) {
                 if let Some(singleton_body) = included_hook_class_methods_body(&def) {
                     defs_in(Some(singleton_body), file, &mut spans);
