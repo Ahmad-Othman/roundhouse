@@ -41,7 +41,9 @@ class RhVerifyTest < Minitest::Test
         exit 0
       end
       File.open(ENV.fetch('VERIFY_LOG'), 'a') do |f|
-        f.puts JSON.generate(args: ARGV, cwd: Dir.pwd, jobs: ENV['CARGO_BUILD_JOBS'], debug: ENV['CARGO_PROFILE_TEST_DEBUG'])
+        f.puts JSON.generate(args: ARGV, cwd: Dir.pwd, jobs: ENV['CARGO_BUILD_JOBS'], debug: ENV['CARGO_PROFILE_TEST_DEBUG'],
+          dev_strip: ENV['CARGO_PROFILE_DEV_STRIP'], test_strip: ENV['CARGO_PROFILE_TEST_STRIP'],
+          dev_opt: ENV['CARGO_PROFILE_DEV_OPT_LEVEL'], test_opt: ENV['CARGO_PROFILE_TEST_OPT_LEVEL'])
       end
       puts 'child stdout'
       warn 'child stderr'
@@ -82,7 +84,9 @@ class RhVerifyTest < Minitest::Test
 
   def invoke(*args, env: {})
     Open3.capture3({ 'PATH' => "#{@root}/mocks:#{ENV.fetch('PATH')}", 'VERIFY_LOG' => @log,
-      'CARGO_BUILD_JOBS' => nil, 'CARGO_PROFILE_TEST_DEBUG' => nil }.merge(env),
+      'CARGO_BUILD_JOBS' => nil, 'CARGO_PROFILE_TEST_DEBUG' => nil,
+      'CARGO_PROFILE_DEV_STRIP' => nil, 'CARGO_PROFILE_TEST_STRIP' => nil,
+      'CARGO_PROFILE_DEV_OPT_LEVEL' => nil, 'CARGO_PROFILE_TEST_OPT_LEVEL' => nil }.merge(env),
       RbConfig.ruby, File.join(@root, 'bin/rh'), 'verify', *args, chdir: '/')
   end
 
@@ -154,6 +158,20 @@ class RhVerifyTest < Minitest::Test
     assert status.success?, err
     assert_equal '3', JSON.parse(out)['build_environment']['CARGO_BUILD_JOBS']
     assert calls.all? { |c| c['jobs'] == '3' && c['debug'] == '1' }
+  end
+
+  def test_optional_profile_settings_are_reported_without_changing_defaults
+    settings = {
+      'CARGO_PROFILE_DEV_STRIP' => 'none', 'CARGO_PROFILE_TEST_STRIP' => 'symbols',
+      'CARGO_PROFILE_DEV_OPT_LEVEL' => '2', 'CARGO_PROFILE_TEST_OPT_LEVEL' => '1'
+    }
+    out, err, status = invoke('--plan', '--json')
+    assert status.success?, err
+    settings.each_key { |key| refute JSON.parse(out)['build_environment'].key?(key) }
+    out, err, status = invoke('--json', env: settings)
+    assert status.success?, err
+    settings.each { |key, value| assert_equal value, JSON.parse(out)['build_environment'][key] }
+    assert_equal ['none', 'symbols', '2', '1'], calls.first.values_at('dev_strip', 'test_strip', 'dev_opt', 'test_opt')
   end
 
   def test_missing_fixtures_are_reported_without_blocking_unrelated_checks

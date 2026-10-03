@@ -128,6 +128,43 @@ other processes and shared caches affect free space. Existing artifacts are
 retained; selecting fewer suites prevents unnecessary new builds but does not
 remove old ones. Check disk space with your platform tools before large runs.
 
+For a smaller build footprint, Cargo can omit symbol tables when readable
+native backtraces/debugging are not needed. This is opt-in, target-dependent,
+and does not change optimization, debug assertions or overflow checks. Set
+both profile variables using your shell's environment syntax; POSIX example:
+
+```sh
+CARGO_PROFILE_DEV_STRIP=symbols CARGO_PROFILE_TEST_STRIP=symbols \
+  bin/rh verify --test ingest --json > verification.json
+```
+
+No separate `rh` option or stripping of existing executables is needed.
+Caller-supplied dev/test `STRIP` and `OPT_LEVEL` environment values are
+included in `build_environment`; absent values leave Cargo configuration
+alone. That report is not a complete effective Cargo configuration.
+Changing profile settings can create additional cached artifact variants;
+stripping does not shrink old binaries or dependency archives. Higher
+optimization can reduce artifact size but increase compile time: measure
+the cold-build and repeated-run tradeoff before choosing it for a CI loop.
+
+For an occasional package-cache reset, **first stop all builds, tests and
+generated programs using it**, confirm the target directory from the report,
+and do not clean a directory shared with other checkouts. Preview Cargo's
+dev/test package cleanup before executing it:
+
+```sh
+cargo clean --package roundhouse --profile dev --offline --locked --dry-run --verbose
+# Only after inspecting the preview, remove --dry-run to perform cleanup.
+```
+
+Use `--target-dir PATH` when necessary to identify the dedicated cache
+explicitly. The default dev and test profiles share Cargo's `debug/`
+output directory, so `--profile dev` covers both here. Package cleanup
+retains dependency artifacts but removes Roundhouse dev/test programs,
+which must be rebuilt. Do not clean after
+every run: stable build settings and reuse of a dedicated cache are faster.
+The verifier never performs this cleanup automatically.
+
 `--json` sends a report to stdout and child output to stderr. The report names
 HEAD, changed paths, base, build settings, each command, its exit code/time and
 `passed`, `failed` or `not-run` status. `disk_space` contains before/after
