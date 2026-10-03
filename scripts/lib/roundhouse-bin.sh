@@ -8,6 +8,10 @@
 # harness that should share the producer must call roundhouse_run rather than
 # hard-coding cargo.
 #
+# Both branches run with cwd = REPO_ROOT when REPO_ROOT is set, so relative
+# input/output paths mean the same thing whether CI supplied a binary or the
+# local path rebuilds through cargo.
+#
 # Usage (after REPO_ROOT is set):
 #
 #     . "$REPO_ROOT/scripts/lib/roundhouse-bin.sh"
@@ -38,9 +42,11 @@ roundhouse_run() {
         printf ' %q' "${cmd[@]}" "$@" >&2
         printf '\n' >&2
     fi
-    if [[ -n "${ROUNDHOUSE_BIN:-}" ]]; then
-        "${cmd[@]}" "$@"
-    else
+    # Same cwd for both branches: cargo historically ran under REPO_ROOT, and
+    # a prebuilt binary must resolve relative paths the same way.
+    if [[ -n "${REPO_ROOT:-}" ]]; then
         (cd "$REPO_ROOT" && "${cmd[@]}" "$@")
+    else
+        "${cmd[@]}" "$@"
     fi
 }
