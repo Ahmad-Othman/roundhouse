@@ -3383,3 +3383,30 @@ end
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
 }
+
+/// `include ActiveSupport::NumberHelper` in a helper gives it the same
+/// number helpers as `ActionView::Helpers::NumberHelper`. No target
+/// ships that namespace, so the include must not reach the emitted
+/// module. Before, `application_helper.rb` raised `uninitialized
+/// constant ActiveSupport::NumberHelper` at boot.
+#[test]
+fn an_active_support_number_helper_include_does_not_stop_the_boot() {
+    emit_and_run::real_blog()
+        .write(
+            "app/helpers/application_helper.rb",
+            r#"module ApplicationHelper
+  include ActiveSupport::NumberHelper
+
+  def article_total(count)
+    number_with_delimiter(count)
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"raise "delimiter" unless ApplicationHelper.article_total(1234567) == "1,234,567"
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
