@@ -23,7 +23,7 @@
 
 use std::cell::RefCell;
 
-use super::IngestError;
+use super::{IngestError, IngestResult};
 
 thread_local! {
     static SURVEY_STATE: RefCell<Option<Vec<IngestError>>> = const { RefCell::new(None) };
@@ -51,6 +51,18 @@ pub(super) fn without_recording<T>(f: impl FnOnce() -> T) -> T {
         SURVEY_STATE.with(|s| s.borrow_mut().as_mut().unwrap().truncate(length));
     }
     result
+}
+
+/// Record `err` when survey mode is active and continue. Strict mode
+/// returns it, so a ledgered gap never becomes a silent success and
+/// never claims the construct is supported.
+pub(super) fn continue_or_fail(err: IngestError) -> IngestResult<()> {
+    if is_active() {
+        record(&err);
+        Ok(())
+    } else {
+        Err(err)
+    }
 }
 
 /// Push an ingest error into the per-thread collector. No-op if
