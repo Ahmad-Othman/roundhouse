@@ -2735,6 +2735,10 @@ const CONCERN_MODEL_MACROS: &[&str] = &[
     "has_json",
     "typed_store",
     "broadcasts_to",
+    // `included do include Other end` runs on the includer: spliced
+    // after the includer's own `include` line, `Other` sits ahead of
+    // this concern in the lookup order, as in Ruby.
+    "include",
 ];
 
 /// True when an Unknown body item is one of [`CONCERN_MODEL_MACROS`].
