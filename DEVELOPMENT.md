@@ -240,9 +240,9 @@ with the generating command when the directory is absent; and
 returning an empty app, so a wrong path fails at the path, not at the
 first model it cannot find.
 
-CI regenerates the fixture once per run in the `generate-fixture` job
-and shares the artifact across the unit job and every per-target
-job — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+CI prepares both fixtures in `generate-fixture` and shares this run's artifact
+across unit and per-target jobs. Cache and freshness rules are documented in
+[CI coverage and reuse](docs/ci-reuse.md#fixture-inputs).
 
 `tests/real_blog.rs` pairs against the generated tree; its
 load-bearing gates:
