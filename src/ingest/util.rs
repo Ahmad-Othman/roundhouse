@@ -631,7 +631,8 @@ pub(super) fn slice_has_blank_line(bytes: &[u8], from: usize, to: usize) -> bool
 }
 
 /// `ActionView::Helpers::*` (SanitizeHelper, NumberHelper) in an
-/// include list. No target ships the namespace, so the `include` is an
+/// include list, or `ActiveSupport::NumberHelper`, which gives the same
+/// number helpers. No target ships the namespace, so the `include` is an
 /// `uninitialized constant` at class-definition time — before any
 /// request, which means it takes the whole tree's boot with it, not one
 /// route. It contributes nothing either way: every member the app calls
@@ -643,7 +644,7 @@ pub(super) fn slice_has_blank_line(bytes: &[u8], from: usize, to: usize) -> bool
 /// walk for everything else — because the same source line means the
 /// same thing in either.
 pub(crate) fn is_view_helper_marker_include(path: &[&str]) -> bool {
-    matches!(path, ["ActionView", "Helpers", ..])
+    matches!(path, ["ActionView", "Helpers", ..] | ["ActiveSupport", "NumberHelper"])
 }
 
 /// `ActiveModel::*` (Validations / Conversion / AttributeMethods /
