@@ -1872,6 +1872,13 @@ jobs:
           working-directory: ./runtime/spinel/scaffold
       - name: cargo test --test spinel_toolchain -- --ignored
         run: cargo test --test spinel_toolchain -- --ignored --nocapture
+      # fixtures/tiny-api, the API-only app (#321): `spin build` of the
+      # app entry, HTTP requests to the binary, and the model script
+      # compiled natively. Filtered by name, so the ignored test named
+      # after an open issue (#163) is not selected.
+      - name: cargo test --test tiny_api spinel_gate_ -- --ignored
+        if: ${{ !cancelled() }}
+        run: cargo test --test tiny_api spinel_gate_ -- --ignored --nocapture
 
       # On failure, capture spinel's actual generated C for the failing
       # controller test. The failure is at RUNTIME (the C compiles under
