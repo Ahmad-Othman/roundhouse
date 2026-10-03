@@ -113,10 +113,50 @@ fn a_redirect_inside_a_namespace_keeps_the_one_controller() {
 }
 
 #[test]
+fn a_string_block_redirect_is_served() {
+    let app = app_with(
+        "  get \"/reports\", to: \"reports#index\"\n  get \"/old\", to: redirect { |params, request| \"/reports\" }\n  get \"/older\", to: redirect { |request| \"/reports\" }\n  root to: redirect(\"/reports\")\n",
+    );
+    let emitted = redirect_controller(&app);
+    assert!(emitted.contains("def old"), "one-arg block redirect; got:\n{emitted}");
+    assert!(emitted.contains("def older"), "two-arg block redirect; got:\n{emitted}");
+    assert!(emitted.contains("redirect_to(\"/reports\", status: :moved_permanently)"), "{emitted}");
+}
+
+#[test]
+fn via_and_regexp_constraints_stay_on_a_string_target() {
+    let app = app_with(
+        "  match \"/reports\", to: \"reports#index\", via: %i[get post delete], constraints: { id: /\\d+/ }\n",
+    );
+    let methods: Vec<_> = app.routes.entries.iter().filter_map(|entry| match entry {
+        roundhouse::dialect::RouteSpec::Explicit { method, constraints, .. } => Some((format!("{method:?}"), constraints.len())),
+        roundhouse::dialect::RouteSpec::Scope { entries, .. } => {
+            assert!(entries.len() >= 3, "{entries:?}");
+            None
+        }
+        _ => None,
+    }).collect();
+    assert!(methods.len() >= 3 || app.routes.entries.iter().any(|entry| matches!(entry, roundhouse::dialect::RouteSpec::Scope { entries, .. } if entries.len() >= 3)), "{:?}", app.routes.entries);
+}
+
+#[test]
+fn engine_routes_stay_explicit_gaps() {
+    let mounted = app_with("  mount Sidekiq::Web, at: \"/sidekiq\"\n");
+    assert!(!format!("{:?}", mounted.routes.entries).contains("Sidekiq"));
+    let err = ingest_app_from_tree({
+        let mut tree = std::collections::HashMap::new();
+        tree.insert(std::path::PathBuf::from("config/routes.rb"), b"Rails.application.routes.draw do\n  use_doorkeeper\nend\n".to_vec());
+        tree.insert(std::path::PathBuf::from("app/controllers/application_controller.rb"), b"class ApplicationController < ActionController::Base\nend\n".to_vec());
+        tree
+    });
+    assert!(err.expect_err("use_doorkeeper").to_string().contains("use_doorkeeper"));
+}
+
+#[test]
 fn a_block_redirect_is_still_dropped_with_its_ledger_line() {
     // There is no literal to serve, so the #82 contract stands.
     let app = app_with(
-        "  get \"/reports\", to: \"reports#index\"\n  get \"/old\", to: redirect { |params, request| \"/reports\" }\n",
+        "  get \"/reports\", to: \"reports#index\"\n  get \"/old\", to: redirect { |params, request| request.path }\n",
     );
     assert!(
         !app.routes.entries.iter().any(|e| matches!(

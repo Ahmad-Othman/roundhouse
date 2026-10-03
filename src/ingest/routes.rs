@@ -365,12 +365,10 @@ fn redirect_literal(node: &Node<'_>) -> Option<(String, u16)> {
     if constant_id_str(&name) != "redirect" {
         return None;
     }
-    // A block form (`redirect { |params, req| … }`) has no literal to
-    // carry and stays dropped.
-    if call.block().is_some() {
-        return None;
+    if let Some(block) = call.block().and_then(|block| block.as_block_node()) {
+        return redirect_block(block);
     }
-    let arguments = call.arguments()?;
+    let Some(arguments) = call.arguments() else { return None };
     let mut location = None;
     let mut status = 301;
     for argument in arguments.arguments().iter() {
@@ -396,6 +394,21 @@ fn redirect_literal(node: &Node<'_>) -> Option<(String, u16)> {
     Some((location?, status))
 }
 
+/// `redirect { |params, request| "/path" }` when the block returns a
+/// string. One or two block parameters are accepted. A block that does
+/// not return a string stays unsupported.
+fn redirect_block(block: ruby_prism::BlockNode<'_>) -> Option<(String, u16)> {
+    let params = block.parameters().and_then(|params| params.as_block_parameters_node());
+    let count = params.map(|params| params.parameters().map(|list| list.requireds().len()).unwrap_or(0)).unwrap_or(0);
+    if count > 2 {
+        return None;
+    }
+    let body = block.body()?;
+    let statements: Vec<_> = body.as_statements_node().map(|node| node.body().iter().collect()).unwrap_or_else(|| vec![body]);
+    let [statement] = statements.as_slice() else { return None };
+    Some((string_value(statement)?, 301))
+}
+
 fn ingest_route_call(
     call: &ruby_prism::CallNode<'_>,
     method: &str,
@@ -408,7 +421,23 @@ fn ingest_route_call(
     // for shapes it intentionally drops (today: `to: redirect(...)`
     // helpers — not bench-critical, not modeled in `RouteSpec`).
     if let Some(http) = http_method_from(method) {
-        return ingest_explicit_route(call, http, file, parent);
+        let via = via_methods(call);
+        if via.is_empty() {
+            return ingest_explicit_route(call, http, file, parent);
+        }
+        let mut entries = Vec::new();
+        for method in via {
+            if let Some(route) = ingest_explicit_route(call, method, file, parent)? {
+                entries.push(route);
+            }
+        }
+        return Ok(Some(entries.into_iter().reduce(|left, right| match (left, right) {
+            (RouteSpec::Scope { mut entries, .. }, route) => {
+                entries.push(route);
+                RouteSpec::Scope { path: None, module: None, as_prefix: None, defaults: IndexMap::new(), nest: false, entries }
+            }
+            (left, right) => RouteSpec::Scope { path: None, module: None, as_prefix: None, defaults: IndexMap::new(), nest: false, entries: vec![left, right] },
+        }).expect("via produced a route")));
     }
     match method {
         "root" => ingest_root_route(call, file),
@@ -471,6 +500,22 @@ fn ingest_route_call(
             message: format!("unsupported routes DSL: `{method}`"),
         }),
     }
+}
+
+fn via_methods(call: &ruby_prism::CallNode<'_>) -> Vec<HttpMethod> {
+    let Some(args) = call.arguments() else { return Vec::new() };
+    for arg in args.arguments().iter() {
+        let Some(hash) = arg.as_keyword_hash_node() else { continue };
+        for element in hash.elements().iter() {
+            let Some(assoc) = element.as_assoc_node() else { continue };
+            if symbol_value(&assoc.key()).as_deref() != Some("via") {
+                continue;
+            }
+            let values = assoc.value().as_array_node().map(|array| array.elements().iter().collect()).unwrap_or_else(|| vec![assoc.value()]);
+            return values.iter().filter_map(|value| symbol_value(value).as_deref().and_then(http_method_from)).collect();
+        }
+    }
+    Vec::new()
 }
 
 fn http_method_from(name: &str) -> Option<HttpMethod> {
