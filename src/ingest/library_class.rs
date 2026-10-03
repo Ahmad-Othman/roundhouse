@@ -2003,12 +2003,19 @@ pub(super) fn ingest_library_method(
                         // campfire's `avatar_tag(user, **options)` is
                         // called with one argument from the message row,
                         // the user list and the sidebar.
-                        if keeps_keywords {
+                        let body_forwards_rest = def.body().is_some_and(|body| {
+                            let text = body.location().as_slice();
+                            text.windows(s.len() + 2).any(|window| window == format!("**{s}").as_bytes())
+                        });
+                        if keeps_keywords || body_forwards_rest {
                             // The keyword group is kept in this def, so
                             // `**rest` stays a keyword-rest: flattened to
                             // `rest = {}` after a `name:` it does not parse
                             // and dropping it beside `*args` changes the
                             // rest array even when the keyword-rest is unread.
+                            // A body that forwards `**rest` needs the same
+                            // retention: flattening it makes the call pass
+                            // one positional hash.
                             let mut p = Param::keyword(Symbol::from(s), None);
                             p.rest = true;
                             params.push(p);
@@ -2048,6 +2055,11 @@ pub(super) fn ingest_library_method(
     };
 
     params.extend(formals.anonymous.map(super::forwarding::AnonymousFormal::into_param));
+    super::forwarding::require_anonymous_keyword_declaration(
+        formals.anonymous,
+        &body,
+        file,
+    )?;
 
     Ok(MethodDef {
         name_span: super::util::def_name_span(def, file),
