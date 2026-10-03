@@ -1775,7 +1775,7 @@ fn normalize_classvars_to_ivars(e: &mut Expr) {
 /// last `old` already walked on the same side (instance, or class inside
 /// `class << self`). None when either name is not a literal symbol or
 /// the body has not defined `old`.
-fn alias_keyword_name(node: &ruby_prism::Node<'_>) -> Option<String> {
+pub(super) fn alias_keyword_name(node: &ruby_prism::Node<'_>) -> Option<String> {
     if let Some(symbol) = symbol_value(node) {
         return Some(symbol);
     }

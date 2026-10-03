@@ -76,6 +76,14 @@ fn alias_keyword_copies_a_defined_method_in_a_class_and_module() {
             assert!(names.iter().any(|name| name == "next_name"), "{names:?}");
         }
     }
+    let model = "class FaultAlarm < ApplicationRecord\n  def display_name\n    \"shown\"\n  end\n  alias translated_fault_name display_name\nend\n";
+    let ingested = roundhouse::ingest::ingest_model(
+        model.as_bytes(),
+        "app/models/fault_alarm.rb",
+        &roundhouse::schema::Schema::default(),
+        &Default::default(),
+    ).expect("model alias").expect("model");
+    assert!(ingested.methods().any(|method| method.name.as_str() == "translated_fault_name"));
     let err = roundhouse::ingest::ingest_library_classes(
         b"class Probe\n  alias missing gone\nend\n",
         "probe.rb",
