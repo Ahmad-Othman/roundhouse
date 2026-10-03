@@ -151,9 +151,9 @@ jobs:
           if-no-files-found: error
 
   # -------------------------------------------------------------------
-  # Generate the real-blog fixture once, upload as artifact. Every
-  # downstream test job downloads + extracts it — pay the Ruby/Rails
-  # install cost once per CI run instead of in each of seven jobs.
+  # Share both fixtures through this run's artifact. First-attempt PRs
+  # may reuse a daily source snapshot; main/scheduled/manual/rerun builds
+  # always generate freshly. Store guide tests execute on either path.
   # -------------------------------------------------------------------
   generate-fixture:
     needs: plan
@@ -172,16 +172,40 @@ jobs:
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
-      - name: Identify compatible fixture gems
+      - name: Identify fixture inputs
         id: gems
+        env:
+          FIXTURE_RECIPE: ${{ hashFiles('bin/rh', 'scripts/create-blog', 'scripts/create-store', '.github/workflows/ci.yml') }}
         run: |
           echo "$GEM_HOME/bin" >> "$GITHUB_PATH"
-          echo "platform=${ImageOS}-$(ruby -e 'print "#{RUBY_ENGINE}-#{RUBY_VERSION}-#{RUBY_PLATFORM}"')" >> "$GITHUB_OUTPUT"
+          platform="${ImageOS}-$(ruby -e 'print "#{RUBY_ENGINE}-#{RUBY_VERSION}-#{RUBY_PLATFORM}"')"
+          echo "platform=$platform" >> "$GITHUB_OUTPUT"
           echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+          tools="$(ruby -rbundler -e 'print "#{Gem::VERSION}-#{Bundler::VERSION}"')"
+          echo "fixture-key=fixture-source-v1-${RUNNER_OS}-${RUNNER_ARCH}-${platform}-${ImageVersion}-${tools}-$(date -u +%F)-${FIXTURE_RECIPE}" >> "$GITHUB_OUTPUT"
+      - name: Restore fixture source snapshot
+        id: fixture-cache
+        if: github.event_name == 'pull_request' && github.run_attempt == 1
+        continue-on-error: true
+        uses: actions/cache/restore@v6
+        with:
+          path: real-blog.tar.gz
+          key: ${{ steps.gems.outputs.fixture-key }}
+      - name: Select fresh generation or restored source
+        id: fixture
+        env:
+          RESTORED: ${{ steps.fixture-cache.outcome == 'success' && steps.fixture-cache.outputs.cache-hit == 'true' }}
+        run: |
+          if [ "$RESTORED" = true ]; then
+            tar -xzf real-blog.tar.gz
+            echo "generate=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "generate=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Cache installed fixture gems
-        # Cache dependencies, never generated apps or test results. A weekly
-        # key saves refreshed gems; Ruby patch/platform and runner OS isolate
-        # native extensions. Installation and generation still run on a hit.
+        # A weekly dependency key saves refreshed gems; Ruby patch/platform
+        # and runner OS isolate native extensions. Fresh generation still
+        # checks for the latest Rails release, even on a gem-cache hit.
         continue-on-error: true
         uses: actions/cache@v6
         with:
@@ -197,15 +221,27 @@ jobs:
           key: fixture-gems-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-${{ steps.gems.outputs.week }}
           restore-keys: fixture-gems-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-
       - name: Install Rails
+        if: steps.fixture.outputs.generate == 'true'
         run: gem install rails --no-document
       - name: Generate fixtures/real-blog
+        if: steps.fixture.outputs.generate == 'true'
         run: bin/rh fixture
       # The Rails Guides store rides the same artifact: the /ide/
       # default app and a picker entry, so build-site and
       # browser-smoke-ide bundle it without a second Rails install.
       - name: Generate fixtures/store by following the guide
+        if: steps.fixture.outputs.generate == 'true'
         run: cd fixtures && ../scripts/create-store store
+      - name: Run guide tests on restored store
+        # create-store runs these on fresh builds; a source hit is not a
+        # test receipt. Install its locked bundle without updating the lock.
+        if: steps.fixture.outputs.generate == 'false'
+        run: |
+          cd fixtures/store
+          BUNDLE_FROZEN=true bundle install --quiet
+          bin/rails test test/models/product_test.rb test/mailers/product_mailer_test.rb
       - name: Pack fixtures
+        if: steps.fixture.outputs.generate == 'true'
         run: |
           tar --exclude='fixtures/real-blog/tmp' \
               --exclude='fixtures/real-blog/log' \
@@ -213,6 +249,15 @@ jobs:
               --exclude='fixtures/store/log' \
               --exclude='fixtures/store/storage' \
               -czf real-blog.tar.gz fixtures/real-blog fixtures/store
+      - name: Save fresh fixture source snapshot
+        # Main/full cycles never restore, but can seed the default-branch
+        # cache for PRs. Never save failed generation or guide-test results.
+        if: success() && steps.fixture.outputs.generate == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: real-blog.tar.gz
+          key: ${{ steps.gems.outputs.fixture-key }}
       - name: Upload fixture
         uses: actions/upload-artifact@v7
         with:

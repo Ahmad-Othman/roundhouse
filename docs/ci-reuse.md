@@ -96,7 +96,8 @@ the same producer bytes, without later re-emission.
 Every cycle executes freshly; validation results are not cached. Spinel master
 is resolved once per run, and evidence records the compiler revision actually
 used. Its lanes remain advisory. Ordinary build caches and the conservative PR
-execution receipts described below are unchanged.
+execution receipts described below are unchanged. Full cycles also regenerate
+both Rails fixtures: the PR-only source snapshot cache is never restored here.
 
 Archive producers upload with `always()`, preserving any files already produced
 if a later producer step fails. The outcome report names the source SHA, run and
@@ -129,9 +130,21 @@ fanouts, **not** total repository concurrency or a guaranteed PR runner priority
 `scripts/ci-reuse.py` can reuse **executed, successful** checks from the same
 pull request. The allowlist is `store-check`, `writebook-inventory`, Rust archive
 smoke, SharedWorker browser smoke, and the Rust inflector framework suite.
-Unit tests, fixture generation, artifact producers, DOM comparisons, other
-selected toolchain lanes and all selected main-branch checks execute freshly.
+Unit tests, emitted-artifact producers, DOM comparisons, other selected
+toolchain lanes and all selected main-branch checks execute freshly.
 Routing changes the required coverage, not the execution-receipt trust rules.
+
+Fixture input is a separate, bounded exception: first-attempt PR runs may
+restore the packed blog/store source under an exact recipe/environment/UTC-day
+key, without fallback keys. This intentionally holds floating gem resolution
+within one day; it does not prove unchanged scripts produce identical source.
+The store's guide tests still execute, and every run uploads its own fixture
+artifact. Main, scheduled/manual runs and reruns always regenerate. Successful
+fresh default-branch output can seed the cache; PR writes remain PR-scoped.
+Full PR coverage does not disable this input cache; rerunning forces fresh
+generation. See [fixture inputs](../DEVELOPMENT.md#real-blog) for key details.
+This cache contains no compiled output or successful-check receipt and does
+not relax the downstream fingerprints below.
 
 ## What must match
 
@@ -158,8 +171,10 @@ SHA-stamped WASM and its consumers are **not** eligible.
 
 Any shared compiler change invalidates both jobs. A change only to an unrelated
 Rust integration test can reuse Writebook. Store reuse will often miss because
-fresh Rails generation changes its actual contents; that is intentional, not a
-reason to pretend identical generator scripts produced identical inputs.
+fresh Rails generation changes its actual contents. A PR source-cache hit
+preserves actual source bytes (including migration names and generated
+credentials); receipt reuse still checks those bytes and the compiler inputs,
+never just the generator recipe.
 
 ## Downstream consumers
 
