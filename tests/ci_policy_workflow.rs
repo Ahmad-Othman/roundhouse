@@ -200,6 +200,68 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
     assert!(ci["permissions"].get("id-token").is_none());
 }
 
+#[test]
+fn generated_npm_projects_cache_downloads_without_skipping_preparation() {
+    let workflow: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let cached_jobs: std::collections::BTreeSet<_> = workflow["jobs"]
+        .as_mapping()
+        .unwrap()
+        .iter()
+        .filter(|(_, job)| {
+            job["steps"].as_sequence().unwrap().iter().any(|step| {
+                step["uses"] == "actions/setup-node@v5" && step["with"]["cache"] == "npm"
+            })
+        })
+        .map(|(name, _)| name.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        cached_jobs,
+        std::collections::BTreeSet::from(["browser-smoke-typescript", "build-site"])
+    );
+    for (job, lockfile, preparations) in [
+        (
+            "browser-smoke-typescript",
+            "tests/browser_smoke/package-lock.json",
+            [
+                "Install harness deps",
+                "Emit and build current SharedWorker project",
+            ],
+        ),
+        (
+            "build-site",
+            "e2e/package-lock.json",
+            [
+                "Build static asset graph for archives",
+                "Build selected archives or the complete site",
+            ],
+        ),
+    ] {
+        let steps = workflow["jobs"][job]["steps"].as_sequence().unwrap();
+        let setup = steps
+            .iter()
+            .position(|step| step["uses"] == "actions/setup-node@v5")
+            .unwrap();
+        assert!(steps[setup].get("if").is_none());
+        assert_eq!(steps[setup]["with"]["cache"], "npm");
+        let inputs: Vec<_> = steps[setup]["with"]["cache-dependency-path"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .collect();
+        assert_eq!(inputs, [lockfile, "src/emit/typescript/package.rs"]);
+        assert!(inputs
+            .iter()
+            .all(|input| std::path::Path::new(input).is_file()));
+        for name in preparations {
+            let prepare = steps.iter().position(|step| step["name"] == name).unwrap();
+            assert!(setup < prepare);
+            assert!(steps[prepare].get("if").is_none());
+            assert!(steps[prepare].get("continue-on-error").is_none());
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn focused_framework_loop_runs_every_selection_and_preserves_failure() {
@@ -309,13 +371,11 @@ fn spinel_jobs_are_selected_explicitly_and_archive_evidence_reaches_pages() {
         "smoke-campfire",
         "smoke-campfire-docker",
     ] {
-        assert!(
-            report["needs"]
-                .as_sequence()
-                .unwrap()
-                .iter()
-                .any(|need| need.as_str() == Some(dependency))
-        );
+        assert!(report["needs"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .any(|need| need.as_str() == Some(dependency)));
     }
     let report_steps = report["steps"].as_sequence().unwrap();
     assert_eq!(
@@ -336,13 +396,11 @@ fn spinel_jobs_are_selected_explicitly_and_archive_evidence_reaches_pages() {
     );
 
     let assemble = &jobs["assemble-site"];
-    assert!(
-        assemble["needs"]
-            .as_sequence()
-            .unwrap()
-            .iter()
-            .any(|need| need.as_str() == Some("archive-results"))
-    );
+    assert!(assemble["needs"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .any(|need| need.as_str() == Some("archive-results")));
     let steps = assemble["steps"].as_sequence().unwrap();
     let verify = steps.iter().position(|step| step["run"].as_str() == Some("python3 scripts/ci-archive-evidence.py verify --root _site --report _site/ci/archive-results.json")).expect("archive verification step");
     let pages = steps
@@ -354,13 +412,11 @@ fn spinel_jobs_are_selected_explicitly_and_archive_evidence_reaches_pages() {
         })
         .unwrap();
     assert!(verify < pages);
-    assert!(
-        jobs["ci-summary"]["needs"]
-            .as_sequence()
-            .unwrap()
-            .iter()
-            .any(|need| need.as_str() == Some("archive-results"))
-    );
+    assert!(jobs["ci-summary"]["needs"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .any(|need| need.as_str() == Some("archive-results")));
 }
 
 #[test]
@@ -421,12 +477,10 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
     );
     assert!(deploy.get("continue-on-error").is_none());
     assert_eq!(deploy["permissions"]["pages"].as_str(), Some("write"));
-    assert!(
-        deploy["steps"][0]["run"]
-            .as_str()
-            .unwrap()
-            .contains("$VALIDATED_SHA")
-    );
+    assert!(deploy["steps"][0]["run"]
+        .as_str()
+        .unwrap()
+        .contains("$VALIDATED_SHA"));
 }
 
 #[cfg(unix)]
