@@ -160,12 +160,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      # Isolate installed gems from the Ruby distribution and fixture trees.
-      GEM_HOME: ${{ runner.temp }}/fixture-gems
-      GEM_PATH: ${{ runner.temp }}/fixture-gems
       BUNDLE_JOBS: '4'
     steps:
       - uses: actions/checkout@v5
+      - name: Isolate fixture gems
+        # Runner paths are available in steps, not in job-level env expressions.
+        run: |
+          echo "GEM_HOME=$RUNNER_TEMP/fixture-gems" >> "$GITHUB_ENV"
+          echo "GEM_PATH=$RUNNER_TEMP/fixture-gems" >> "$GITHUB_ENV"
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:

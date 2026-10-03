@@ -79,11 +79,9 @@ fn fixture_cache_reuses_only_compatible_gems_and_never_skips_generation() {
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let job = &ci["jobs"]["generate-fixture"];
     assert!(job.get("if").is_none());
-    assert_eq!(
-        job["env"]["GEM_HOME"].as_str(),
-        Some("${{ runner.temp }}/fixture-gems")
-    );
-    assert_eq!(job["env"]["GEM_PATH"], job["env"]["GEM_HOME"]);
+    assert!(job["env"].get("GEM_HOME").is_none());
+    assert!(job["env"].get("GEM_PATH").is_none());
+    assert_eq!(job["env"]["BUNDLE_JOBS"].as_str(), Some("4"));
     let steps = job["steps"].as_sequence().unwrap();
     let identity = steps.iter().find(|step| step["id"] == "gems").unwrap();
     let body = identity["run"].as_str().unwrap();
@@ -97,9 +95,25 @@ fn fixture_cache_reuses_only_compatible_gems_and_never_skips_generation() {
         .find(|step| step["uses"] == "actions/cache@v6")
         .unwrap();
     assert_eq!(cache["continue-on-error"].as_bool(), Some(true));
+    let paths: std::collections::BTreeSet<_> = cache["with"]["path"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .map(|path| {
+            path.strip_prefix("${{ env.GEM_HOME }}/")
+                .expect("only isolated installed-gem paths may be cached")
+        })
+        .collect();
     assert_eq!(
-        cache["with"]["path"].as_str().unwrap(),
-        "${{ env.GEM_HOME }}/bin\n${{ env.GEM_HOME }}/build_info\n${{ env.GEM_HOME }}/extensions\n${{ env.GEM_HOME }}/gems\n${{ env.GEM_HOME }}/plugins\n${{ env.GEM_HOME }}/specifications\n"
+        paths,
+        std::collections::BTreeSet::from([
+            "bin",
+            "build_info",
+            "extensions",
+            "gems",
+            "plugins",
+            "specifications",
+        ])
     );
     let prefix =
         "fixture-gems-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-";
@@ -117,6 +131,58 @@ fn fixture_cache_reuses_only_compatible_gems_and_never_skips_generation() {
         assert!(step.get("if").is_none(), "must execute on a hit: {command}");
         assert!(step.get("continue-on-error").is_none());
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_gem_environment_is_exported_before_ruby_setup() {
+    use std::process::Command;
+
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    let steps = ci["jobs"]["generate-fixture"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let setup = steps
+        .iter()
+        .position(|step| step["name"] == "Isolate fixture gems")
+        .unwrap();
+    let ruby = steps
+        .iter()
+        .position(|step| step["uses"] == "ruby/setup-ruby@v1")
+        .unwrap();
+    assert!(setup < ruby);
+    assert!(steps[setup].get("if").is_none());
+    assert!(steps[setup].get("continue-on-error").is_none());
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("fixture-env-{}-{unique}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let runner_temp = root.join("runner temp");
+    let env_file = root.join("env");
+    let result = Command::new("bash")
+        .args([
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            steps[setup]["run"].as_str().unwrap(),
+        ])
+        .env("RUNNER_TEMP", &runner_temp)
+        .env("GITHUB_ENV", &env_file)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(
+        fs::read_to_string(env_file).unwrap(),
+        format!(
+            "GEM_HOME={0}/fixture-gems\nGEM_PATH={0}/fixture-gems\n",
+            runner_temp.display()
+        )
+    );
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[cfg(unix)]
