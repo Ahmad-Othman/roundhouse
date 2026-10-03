@@ -44,6 +44,7 @@ class RhVerifyTest < Minitest::Test
       end
       File.open(ENV.fetch('VERIFY_LOG'), 'a') do |f|
         f.puts JSON.generate(args: ARGV, cwd: Dir.pwd, jobs: ENV['CARGO_BUILD_JOBS'], debug: ENV['CARGO_PROFILE_TEST_DEBUG'],
+          dev_debug: ENV['CARGO_PROFILE_DEV_DEBUG'],
           dev_strip: ENV['CARGO_PROFILE_DEV_STRIP'], test_strip: ENV['CARGO_PROFILE_TEST_STRIP'],
           dev_opt: ENV['CARGO_PROFILE_DEV_OPT_LEVEL'], test_opt: ENV['CARGO_PROFILE_TEST_OPT_LEVEL'],
           git_dir: ENV['GIT_DIR'], git_work_tree: ENV['GIT_WORK_TREE'])
@@ -87,7 +88,7 @@ class RhVerifyTest < Minitest::Test
 
   def invoke(*args, env: {})
     Open3.capture3(GIT_LOCATION_ENV.merge('PATH' => "#{@root}/mocks:#{ENV.fetch('PATH')}", 'VERIFY_LOG' => @log,
-      'CARGO_BUILD_JOBS' => nil, 'CARGO_PROFILE_TEST_DEBUG' => nil,
+      'CARGO_BUILD_JOBS' => nil, 'CARGO_PROFILE_DEV_DEBUG' => nil, 'CARGO_PROFILE_TEST_DEBUG' => nil,
       'CARGO_PROFILE_DEV_STRIP' => nil, 'CARGO_PROFILE_TEST_STRIP' => nil,
       'CARGO_PROFILE_DEV_OPT_LEVEL' => nil, 'CARGO_PROFILE_TEST_OPT_LEVEL' => nil).merge(env),
       RbConfig.ruby, File.join(@root, 'bin/rh'), 'verify', *args, chdir: '/')
@@ -165,7 +166,7 @@ class RhVerifyTest < Minitest::Test
       %w[test --locked --test example -- --test-threads=1],
       %w[test --locked --test ruby_toolchain -- --ignored --test-threads=1]
     ], calls.map { |c| c['args'] }
-    assert calls.all? { |c| c['cwd'] == @root && c['jobs'] == '2' && c['debug'] == '0' }
+    assert calls.all? { |c| c['cwd'] == @root && c['jobs'] == '2' && c['debug'].nil? && c['dev_debug'].nil? }
     assert report['checks'].all? { |c| c['status'] == 'passed' && c['exit'] == 0 && c['seconds'] >= 0 }
     assert_includes err, 'child stdout'
     assert_includes report['scope'], 'not executed'
@@ -201,6 +202,7 @@ class RhVerifyTest < Minitest::Test
 
   def test_optional_profile_settings_are_reported_without_changing_defaults
     settings = {
+      'CARGO_PROFILE_DEV_DEBUG' => '2', 'CARGO_PROFILE_TEST_DEBUG' => 'line-tables-only',
       'CARGO_PROFILE_DEV_STRIP' => 'none', 'CARGO_PROFILE_TEST_STRIP' => 'symbols',
       'CARGO_PROFILE_DEV_OPT_LEVEL' => '2', 'CARGO_PROFILE_TEST_OPT_LEVEL' => '1'
     }
@@ -210,7 +212,8 @@ class RhVerifyTest < Minitest::Test
     out, err, status = invoke('--json', env: settings)
     assert status.success?, err
     settings.each { |key, value| assert_equal value, JSON.parse(out)['build_environment'][key] }
-    assert_equal ['none', 'symbols', '2', '1'], calls.first.values_at('dev_strip', 'test_strip', 'dev_opt', 'test_opt')
+    assert_equal ['2', 'line-tables-only', 'none', 'symbols', '2', '1'],
+      calls.first.values_at('dev_debug', 'debug', 'dev_strip', 'test_strip', 'dev_opt', 'test_opt')
   end
 
   def test_missing_fixtures_are_reported_without_blocking_unrelated_checks

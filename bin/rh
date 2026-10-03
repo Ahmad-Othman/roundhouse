@@ -354,13 +354,12 @@ def cmd_verify(argv)
   end
   build_env = {
     'CARGO_BUILD_JOBS' => jobs,
-    'CARGO_INCREMENTAL' => ENV.fetch('CARGO_INCREMENTAL', '0'),
-    'CARGO_PROFILE_DEV_DEBUG' => ENV.fetch('CARGO_PROFILE_DEV_DEBUG', '0'),
-    'CARGO_PROFILE_TEST_DEBUG' => ENV.fetch('CARGO_PROFILE_TEST_DEBUG', '0')
+    'CARGO_INCREMENTAL' => ENV.fetch('CARGO_INCREMENTAL', '0')
   }
   # Record caller-selected size/speed tradeoffs without inventing a profile
   # or overriding Cargo configuration when these settings are absent.
-  %w[CARGO_PROFILE_DEV_STRIP CARGO_PROFILE_TEST_STRIP CARGO_PROFILE_DEV_OPT_LEVEL CARGO_PROFILE_TEST_OPT_LEVEL].each do |key|
+  %w[CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG CARGO_PROFILE_DEV_STRIP CARGO_PROFILE_TEST_STRIP
+    CARGO_PROFILE_DEV_OPT_LEVEL CARGO_PROFILE_TEST_OPT_LEVEL].each do |key|
     build_env[key] = ENV[key] if ENV.key?(key)
   end
   missing = %w[real-blog store].reject { |name| File.directory?(File.join(ROUNDHOUSE_ROOT, 'fixtures', name)) }

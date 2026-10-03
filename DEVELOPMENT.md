@@ -127,9 +127,10 @@ subprocesses, so reports, locks and tests use this checkout rather than a
 repository selected by a calling Git hook. The caller's environment is untouched.
 
 Commands run sequentially with one Rust test thread. Cargo defaults to at
-most four workers, non-incremental builds and no dev/test debug symbols;
-explicit Cargo environment settings are preserved, and `--jobs N` overrides
-the worker count. No optimization or debug-assertion setting is changed.
+most four workers and non-incremental builds. Repository debug profiles are
+left intact, including the test profile's space-saving line tables for
+backtraces. Explicit Cargo environment settings are preserved, and `--jobs N`
+overrides the worker count. No optimization or debug-assertion setting is changed.
 Debug bench emissions and browser/DOM/corpus gates are not part of this loop.
 The tool performs no cleanup, autofixes, publishing or Git writes beyond its
 worktree-local verification lock. Do not run other builds/tests concurrently
@@ -163,9 +164,11 @@ CARGO_PROFILE_DEV_STRIP=symbols CARGO_PROFILE_TEST_STRIP=symbols \
 ```
 
 No separate `rh` option or stripping of existing executables is needed.
-Caller-supplied dev/test `STRIP` and `OPT_LEVEL` environment values are
+Caller-supplied dev/test `DEBUG`, `STRIP` and `OPT_LEVEL` environment values are
 included in `build_environment`; absent values leave Cargo configuration
 alone. That report is not a complete effective Cargo configuration.
+Checks that require symbolicated backtraces, including `ci_policy_workflow`,
+need debug information and symbols; do not disable them for those suites.
 Changing profile settings can create additional cached artifact variants;
 stripping does not shrink old binaries or dependency archives. Higher
 optimization can reduce artifact size but increase compile time: measure
