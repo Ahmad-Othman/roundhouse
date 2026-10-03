@@ -39,7 +39,19 @@ helper, without additional Python packages.
 | `wasm/` | WASM build and IDE/playground/studio browser verification |
 | Site/guide sources | Site/archive build and WASM verification, without publishing |
 | Shared compare, framework, archive, or E2E harness | The checks owned by that harness |
+| Proven body-only edits in `src/project.rs`'s interpreted Ruby/JRuby builders | Ruby/JRuby comparison and archive smokes, plus Writebook inventory |
+| Proven body-only edits in its shared Ruby/Spinel builders | Ruby/JRuby owners plus all native Spinel/Campfire consumers and Writebook inventory; no unrelated target or WASM fanout |
 | Cross-target packaging, CI policy/workflows/planner, Cargo/build/toolchain policy, unknown new target | Full validation |
+
+Project assembly is narrowed only when the base and event trees differ solely
+inside the bodies of `ruby_runtime_files`, `jruby_runtime_files`,
+`ruby_family_runtime_files`, `spinel_files` or `spin_shape`. Signatures and
+every byte outside those bodies must remain identical. Shared helpers,
+constants, dispatch, new/deleted functions, mode changes and unrecognized
+source shapes still select full validation. This deliberately conservative
+recognizer is not a Rust parser: raw strings within builder bodies and block
+comments retain full coverage. Other changed paths and `ci:full` can still
+expand the combined plan; no last-commit or PR-title inference is used.
 
 ### Requesting broader or fresh validation
 
