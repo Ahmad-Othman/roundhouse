@@ -361,9 +361,9 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
     assert_eq!(jobs["compare"]["steps"], jobs["compare-extra"]["steps"]);
     assert_eq!(
         jobs["compare-extra"]["strategy"]["max-parallel"].as_u64(),
-        Some(2)
+        Some(4)
     );
-    assert_eq!(jobs["smoke"]["strategy"]["max-parallel"].as_u64(), Some(2));
+    assert_eq!(jobs["smoke"]["strategy"]["max-parallel"].as_u64(), Some(6));
     let smoke_guard = jobs["smoke"]["if"].as_str().unwrap();
     for condition in [
         "!cancelled()",

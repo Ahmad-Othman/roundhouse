@@ -2107,7 +2107,7 @@ jobs:
       actions: read
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 4
       matrix:
         target: ${{ fromJSON(needs.plan.outputs.extra-compare) }}
     steps: *compare-steps
@@ -2305,7 +2305,7 @@ jobs:
       actions: read
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 6
       matrix:
         target: ${{ fromJSON(needs.plan.outputs.smoke) }}
     steps:
