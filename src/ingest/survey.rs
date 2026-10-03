@@ -82,6 +82,16 @@ pub fn record(err: &IngestError) {
     });
 }
 
+/// Errors recorded so far, without draining survey mode.
+pub fn recorded() -> Vec<String> {
+    SURVEY_STATE.with(|s| {
+        s.borrow()
+            .as_ref()
+            .map(|errors| errors.iter().map(|err| err.to_string()).collect())
+            .unwrap_or_default()
+    })
+}
+
 /// Drain the collector and deactivate survey mode. Returns every
 /// error captured during the active window in record order.
 pub fn drain() -> Vec<IngestError> {

@@ -2781,6 +2781,11 @@ fn report_unrecognized_controller_macros(app: &App) {
                 });
                 continue;
             }
+            if survey::recorded().iter().any(|gap| {
+                gap.contains("class configuration") && gap.contains(method.as_str())
+            }) {
+                continue;
+            }
             survey::record(&IngestError::Unsupported {
                 file,
                 message: format!(
@@ -2880,6 +2885,32 @@ fn expand_class_body_macros(app: &mut App) {
                 expanded.push(item);
                 continue;
             };
+            let slot = match &*macro_def.body.node {
+                crate::expr::ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, .. } => {
+                    Some(name.clone())
+                }
+                _ => None,
+            };
+            let paired_reader = slot.as_ref().is_some_and(|slot| {
+                app.library_classes.iter().any(|lc| {
+                    lc.name == module
+                        && lc.methods.iter().any(|method| {
+                            method.name != macro_def.name
+                                && format!("{:?}", method.body).contains(slot.as_str())
+                        })
+                })
+            });
+            if method_stores_keyword_rest(&macro_def) && !paired_reader {
+                if let Some(init) = stored_options_init(expr, &macro_def) {
+                    expanded.push(ControllerBodyItem::ClassIvarInit {
+                        expr: init,
+                        carrier: module,
+                        leading_comments: leading_comments.clone(),
+                        leading_blank_line: *leading_blank_line,
+                    });
+                    continue;
+                }
+            }
             let body = substitute_params(&macro_def, args);
             match filters_from_macro_body(&body, &module) {
                 Some(filters) => {
@@ -2934,6 +2965,59 @@ fn expand_class_body_macros(app: &mut App) {
 /// The empty Hash is what makes the bare call mean what Ruby means:
 /// `skip_before_action :require_authentication, **{}` is an UNSCOPED
 /// skip, so the filter comes off every action rather than none.
+fn stored_options_init(
+    expr: &crate::expr::Expr,
+    method: &crate::dialect::MethodDef,
+) -> Option<crate::expr::Expr> {
+    use crate::expr::{Expr, ExprNode, LValue, Literal};
+    let ExprNode::Assign { target: LValue::Ivar { name }, .. } = &*method.body.node else {
+        return None;
+    };
+    let ExprNode::Send { args, .. } = &*expr.node else { return None };
+    let value = match args.as_slice() {
+        [] => Expr::new(expr.span, ExprNode::Hash { entries: vec![], kwargs: false }),
+        [hash] => {
+            let readable = match &*hash.node {
+                ExprNode::Hash { entries, .. } => entries.iter().all(|(key, value)| {
+                    matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { .. } })
+                        && matches!(
+                            &*value.node,
+                            ExprNode::Lit { .. } | ExprNode::Lambda { .. } | ExprNode::Array { .. }
+                        )
+                }),
+                ExprNode::KeywordSplat { value } => matches!(&*value.node, ExprNode::Hash { .. }),
+                _ => false,
+            };
+            if !readable {
+                return None;
+            }
+            let mut value = hash.clone();
+            if let ExprNode::KeywordSplat { value: inner } = &*value.node {
+                value = inner.clone();
+            }
+            value
+        }
+        _ => return None,
+    };
+    Some(Expr::new(
+        expr.span,
+        ExprNode::Assign {
+            target: LValue::Ivar { name: name.clone() },
+            value,
+        },
+    ))
+}
+
+fn method_stores_keyword_rest(method: &crate::dialect::MethodDef) -> bool {
+    use crate::expr::{ExprNode, LValue};
+    let [param] = method.params.as_slice() else { return false };
+    if method.block_param.is_some() || method.has_anonymous_block {
+        return false;
+    }
+    matches!(&*method.body.node, ExprNode::Assign { target: LValue::Ivar { .. }, value }
+        if matches!(&*value.node, ExprNode::Var { name, .. } if name == &param.name))
+}
+
 fn substitute_params(
     macro_def: &crate::dialect::MethodDef,
     args: &[crate::expr::Expr],

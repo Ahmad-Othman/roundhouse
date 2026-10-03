@@ -520,6 +520,49 @@ fn configuration_refusals_preserve_the_survey_and_original_body() {
 }
 
 #[test]
+fn a_store_only_class_method_is_not_an_unrecognized_macro() {
+    use roundhouse::ingest::survey;
+    let concern = r#"
+module HasPeriodParams
+  extend ActiveSupport::Concern
+  class_methods do
+    def period_config(**opts)
+      @period_options = opts
+    end
+  end
+end
+"#;
+    let controller = r#"
+class ReportsController < ActionController::Base
+  include HasPeriodParams
+  period_config(default_mode: :month, default_date: ->(today) { today - 1 })
+  def show
+  end
+end
+"#;
+    let tree = [
+        ("app/controllers/concerns/has_period_params.rb", concern),
+        ("app/controllers/reports_controller.rb", controller),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+    .collect();
+    survey::activate();
+    let app = ingest_app_from_tree(tree).expect("store-only call continues");
+    let gaps = survey::drain();
+    assert!(
+        !gaps.iter().any(|gap| gap.to_string().contains("not recognized")),
+        "{gaps:?}"
+    );
+    assert!(
+        app.controllers.iter().any(|controller| controller.body.iter().any(|item| {
+            matches!(item, ControllerBodyItem::ClassIvarInit { .. })
+        })),
+        "the stored call must become class state"
+    );
+}
+
+#[test]
 fn readable_class_methods_store_keywords_blocks_and_filter_options() {
     let shapes = [
         ("configure_window mode: :month, days: 3", true),
