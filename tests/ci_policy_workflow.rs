@@ -442,7 +442,7 @@ fn generated_npm_projects_cache_downloads_without_skipping_preparation() {
         .iter()
         .filter(|(_, job)| {
             job["steps"].as_sequence().unwrap().iter().any(|step| {
-                step["uses"] == "actions/setup-node@v5" && step["with"]["cache"] == "npm"
+                step["uses"] == "actions/setup-node@v7" && step["with"]["cache"] == "npm"
             })
         })
         .map(|(name, _)| name.as_str().unwrap())
@@ -472,7 +472,7 @@ fn generated_npm_projects_cache_downloads_without_skipping_preparation() {
         let steps = workflow["jobs"][job]["steps"].as_sequence().unwrap();
         let setup = steps
             .iter()
-            .position(|step| step["uses"] == "actions/setup-node@v5")
+            .position(|step| step["uses"] == "actions/setup-node@v7")
             .unwrap();
         assert!(steps[setup].get("if").is_none());
         assert_eq!(steps[setup]["with"]["cache"], "npm");
@@ -492,6 +492,58 @@ fn generated_npm_projects_cache_downloads_without_skipping_preparation() {
             assert!(steps[prepare].get("continue-on-error").is_none());
         }
     }
+}
+
+/// Active Node work uses one current major. A leftover Node 20 pin
+/// recompiles `better-sqlite3` (no ABI 115 prebuild) and a mixed
+/// `setup-node` major splits the cache and install contract.
+#[test]
+fn active_node_jobs_pin_node_24_with_setup_node_v7() {
+    let source = fs::read_to_string(".github/workflows/ci.yml").unwrap();
+    assert_eq!(source.matches("actions/setup-node@v7").count(), 9);
+    assert_eq!(source.matches("node-version: '24'").count(), 9);
+    assert!(
+        !source.contains("actions/setup-node@v5") && !source.contains("node-version: '20'"),
+        "do not leave a Node 20 setup beside the Node 24 pin"
+    );
+    let workflow: serde_yaml_ng::Value = serde_yaml_ng::from_str(&source).unwrap();
+    let mut expanded = 0;
+    for (name, job) in workflow["jobs"].as_mapping().unwrap() {
+        for step in job["steps"].as_sequence().unwrap() {
+            let uses = step["uses"].as_str().unwrap_or("");
+            if !uses.starts_with("actions/setup-node@") {
+                continue;
+            }
+            expanded += 1;
+            assert_eq!(
+                uses, "actions/setup-node@v7",
+                "{name:?} must use the current setup-node major"
+            );
+            assert_eq!(
+                step["with"]["node-version"].as_str(),
+                Some("24"),
+                "{name:?} must install Node 24, not an older ABI"
+            );
+        }
+    }
+    assert!(
+        expanded >= 9,
+        "YAML anchors must not drop a setup-node step; expanded {expanded}"
+    );
+    let fixture = roundhouse::fixtures::real_blog();
+    let mut app = roundhouse::ingest::ingest_app(fixture).expect("ingest real-blog");
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    let files = roundhouse::emit::typescript::emit(&app);
+    let package = files
+        .iter()
+        .find(|file| file.path == std::path::Path::new("package.json"))
+        .expect("typescript emit writes package.json");
+    assert!(
+        package.content.contains("\"@types/node\": \"^24\""),
+        "emitted Node types must be the Node 24 range:\n{}",
+        package.content
+    );
+    assert!(!package.content.contains("\"@types/node\": \"^20\""));
 }
 
 #[cfg(unix)]

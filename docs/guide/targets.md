@@ -11,7 +11,7 @@ is tested — which is the honest measure of how much to trust it.
 |---|---|---|
 | `rust` | Cargo crate (axum, rusqlite) | Rust 1.85+, SQLite library |
 | `go` | Go module | Go 1.24+ |
-| `typescript` | Node package | Node.js 18+ |
+| `typescript` | Node package | Node.js 24+ |
 | `crystal` | shard | Crystal 1.10+, SQLite library |
 | `elixir` | Mix project | Elixir 1.15+ |
 | `kotlin` | Gradle build (JVM) | JDK 17+, Gradle 8+ |
@@ -24,7 +24,7 @@ All ten serve on `:3000`, speak Action Cable at `/cable`, use SQLite at
 `storage/development.sqlite3`, and are seeded by
 `sqlite3 storage/development.sqlite3 < db/seed.sql`. Each ships the
 app's model and controller tests and a Playwright `e2e/` suite; the
-`sqlite3` CLI and Node.js 18+ are needed for the latter.
+`sqlite3` CLI and Node.js 24+ are needed for the latter.
 
 ## The variations
 
@@ -32,7 +32,7 @@ app's model and controller tests and a Playwright `e2e/` suite; the
 |---|---|
 | `jruby` | The `ruby` emit with prebuilt assets and JRuby run/test commands. JRuby 10+ (JDK 21+). |
 | `spinel` | The `ruby` shape packaged as a `spin` project for ahead-of-time compilation to a native binary. Needs the Spinel compiler; [`spinel.md`](spinel.md). |
-| `typescript-worker` | The `typescript` emit bundled to run in a browser `SharedWorker`, with SQLite compiled to WebAssembly, for the in-browser demos. Node.js 18+ to bundle; no server. |
+| `typescript-worker` | The `typescript` emit bundled to run in a browser `SharedWorker`, with SQLite compiled to WebAssembly, for the in-browser demos. Node.js 24+ to bundle; no server. |
 
 ## How far each is tested
 

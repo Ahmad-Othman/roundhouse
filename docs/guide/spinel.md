@@ -47,7 +47,7 @@ calls it the Campfire tier for that reason.
   `brew install vips`) — only when the app declares image variants
   (`has_one_attached` with `variant`), in which case `spin.toml` lists
   `ruby-vips`.
-- **Node.js 18+** — for the browser end-to-end suite only.
+- **Node.js 24+** — for the browser end-to-end suite only.
 
 ## Build and run
 

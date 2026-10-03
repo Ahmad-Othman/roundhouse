@@ -63,7 +63,7 @@ jobs:
       spinel-revision: ${{ steps.plan.outputs.spinel-revision }}
       spinel-tests: ${{ steps.plan.outputs.spinel-tests }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 2
       - name: Select required coverage from the event's actual tree
@@ -84,7 +84,7 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - name: Fetch pinned Writebook source
@@ -162,7 +162,7 @@ jobs:
     env:
       BUNDLE_JOBS: '4'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Isolate fixture gems
         # Runner paths are available in steps, not in job-level env expressions.
         run: |
@@ -285,7 +285,7 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       # generate-fixture already builds the store and runs the guide's
@@ -350,7 +350,7 @@ jobs:
     env:
       WASI_SDK_VERSION: "33.0"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
         with:
           targets: wasm32-wasip1
@@ -362,7 +362,7 @@ jobs:
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libclang-dev
       - name: Cache WASI SDK
         id: wasi-sdk
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /opt/wasi-sdk
           key: wasi-sdk-${{ env.WASI_SDK_VERSION }}-x86_64-linux
@@ -424,7 +424,7 @@ jobs:
       SCCACHE_DIRECT: "false"
       SCCACHE_IDLE_TIMEOUT: "0"
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           repository: matz/spinel
           ref: ${{ needs.plan.outputs.spinel-revision }}
@@ -544,7 +544,7 @@ jobs:
       # Test-profile-only, Linux-job-only: dev, release and other hosts unchanged.
       CARGO_PROFILE_TEST_SPLIT_DEBUGINFO: unpacked
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
@@ -635,7 +635,7 @@ jobs:
     outputs:
       roundhouse-bin-artifact-id: ${{ steps.roundhouse-bin.outputs.artifact-id }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       # Keep the historical dev profile for Campfire, not a release substitute.
@@ -707,7 +707,7 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Use an explicit browser payload directory
         run: echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/ci-reuse-browsers" >> "$GITHUB_ENV"
       - uses: ./.github/actions/setup-rust
@@ -718,9 +718,9 @@ jobs:
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
       - name: Install Node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
           # Warm downloads for the generated app, not node_modules or dist.
           cache: npm
           cache-dependency-path: |
@@ -784,7 +784,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           name: roundhouse-wasm
@@ -795,12 +795,12 @@ jobs:
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
       - name: Install Node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
       - name: Cache Mastodon source bundle
         id: mastodon-src
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: wasm/ide/app-src.json
           key: mastodon-app-src-${{ env.MASTODON_SHA }}-v2
@@ -817,7 +817,7 @@ jobs:
       # switch (blog + lobsters + mastodon). Mirrors the build-site assembly.
       - name: Cache lobsters source bundle
         id: lobsters-src
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /tmp/app-lobsters.json
           key: lobsters-app-src-${{ env.RUBY_BENCH_SHA }}-v1
@@ -833,7 +833,7 @@ jobs:
             --open app/controllers/stories_controller.rb
       - name: Cache campfire source bundle
         id: campfire-src
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /tmp/app-campfire.json
           key: campfire-app-src-${{ env.CAMPFIRE_SHA }}-v1
@@ -938,7 +938,7 @@ jobs:
     timeout-minutes: 30
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
@@ -1021,7 +1021,7 @@ jobs:
       # so the prepared-tree cache carries the gems with it.
       BUNDLE_PATH: vendor/bundle
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # No setup-rust: emission uses the current-run debug binary.
       - uses: actions/download-artifact@v8
         with:
@@ -1058,7 +1058,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libvips42 sqlite3
       - name: Cache the prepared oracle
         id: oracle
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/campfire-oracle
           key: campfire-oracle-${{ env.CAMPFIRE_SHA }}-ruby34-v1
@@ -1121,7 +1121,7 @@ jobs:
       artifact-id: ${{ steps.binary.outputs.artifact-id }}
       execution: ${{ steps.result.outputs.status }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
@@ -1273,7 +1273,7 @@ jobs:
     env:
       BUNDLE_PATH: vendor/bundle
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
@@ -1307,7 +1307,7 @@ jobs:
           mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
       - name: Cache the prepared oracle
         id: oracle
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/campfire-oracle
           key: campfire-oracle-${{ env.CAMPFIRE_SHA }}-ruby34-v1
@@ -1343,7 +1343,7 @@ jobs:
     env:
       BUNDLE_PATH: vendor/bundle
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
@@ -1365,7 +1365,7 @@ jobs:
           mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
       - name: Cache the prepared oracle
         id: oracle
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/campfire-oracle
           key: campfire-oracle-${{ env.CAMPFIRE_SHA }}-ruby34-v1
@@ -1384,7 +1384,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # No setup-rust: strict-emit and campfire-suite use the shared debug binary.
       - uses: actions/download-artifact@v8
         with:
@@ -1787,7 +1787,7 @@ jobs:
       # failed.
       - name: Upload the tally
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: campfire-conformance-tally
           path: /tmp/campfire-tally.txt
@@ -1853,7 +1853,7 @@ jobs:
     timeout-minutes: 30
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
@@ -1964,7 +1964,7 @@ jobs:
       matrix:
         target: [rust, typescript]
     steps: &compare-steps
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
@@ -1982,13 +1982,13 @@ jobs:
           crystal: latest
       - name: Install JDK (Kotlin)
         if: matrix.target == 'kotlin'
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
       - name: Install Gradle (Kotlin)
         if: matrix.target == 'kotlin'
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: '9.5.1'
       - name: Install Swift
@@ -2002,17 +2002,17 @@ jobs:
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
       - name: Install .NET (C#)
         if: matrix.target == 'csharp'
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
       - name: Install Node (TypeScript)
         if: matrix.target == 'typescript'
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
       - name: Install Go
         if: matrix.target == 'go'
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: '1.24'
           cache: false
@@ -2024,7 +2024,7 @@ jobs:
           otp-version: '27'
       - name: Install Python
         if: matrix.target == 'python'
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.14'
       - name: Install uv (Python)
@@ -2124,7 +2124,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
@@ -2142,9 +2142,9 @@ jobs:
           ruby-version: '3.4'
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
       # Not a separate job: framework-tests-ruby needs this same MRI + scaffold bundle (#273).
       - name: cargo test --test framework_tests_ruby -- --ignored
         run: cargo test --test framework_tests_ruby -- --ignored --nocapture
@@ -2175,7 +2175,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
@@ -2185,7 +2185,7 @@ jobs:
         run: tar -xzf real-blog.tar.gz
       # JRuby 10 requires Java 21+ (it refuses to boot on older JDKs).
       # setup-ruby provisions JRuby but not the JDK, so pin Java first.
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
@@ -2222,7 +2222,7 @@ jobs:
     timeout-minutes: 30
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
@@ -2251,9 +2251,9 @@ jobs:
           ruby-version: '3.4'
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
       - name: scripts/compare spinel
         run: scripts/compare spinel
       - *advisory-result
@@ -2309,7 +2309,7 @@ jobs:
       matrix:
         target: ${{ fromJSON(needs.plan.outputs.smoke) }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Use an explicit browser payload directory
         run: echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/ci-reuse-browsers" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v8
@@ -2329,13 +2329,13 @@ jobs:
           crystal: latest
       - name: Install JDK (Kotlin, JRuby)
         if: matrix.target == 'kotlin' || matrix.target == 'jruby'
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
       - name: Install Gradle (Kotlin)
         if: matrix.target == 'kotlin'
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: '9.5.1'
       - name: Install Swift
@@ -2349,12 +2349,12 @@ jobs:
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
       - name: Install .NET (C#)
         if: matrix.target == 'csharp'
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
       - name: Install Go
         if: matrix.target == 'go'
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: '1.24'
           cache: false
@@ -2366,7 +2366,7 @@ jobs:
           otp-version: '27'
       - name: Install Python
         if: matrix.target == 'python'
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.14'
       - name: Install uv (Python)
@@ -2382,9 +2382,9 @@ jobs:
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: 'jruby-10.0'
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
       - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e
@@ -2459,7 +2459,7 @@ jobs:
     timeout-minutes: 20
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           name: browse-archives
@@ -2475,9 +2475,9 @@ jobs:
       - name: Install libsqlite3-dev + libjemalloc-dev
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev libjemalloc-dev
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
       - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e
@@ -2543,7 +2543,7 @@ jobs:
     # that times out four minutes short is a flake waiting to happen.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
@@ -2615,7 +2615,7 @@ jobs:
     timeout-minutes: 30
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           name: campfire-archive
@@ -2633,7 +2633,7 @@ jobs:
         id: docker-cache
         # Fail-open: a cache outage must not skip the README build.
         continue-on-error: true
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ${{ env.CAMPFIRE_DOCKER_CACHE }}
           key: campfire-docker-apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.apt-window.outputs.bucket }}-v1
@@ -2683,7 +2683,7 @@ jobs:
         # an exact hit already holds this window's layers. Fail-open.
         if: steps.smoke.outcome == 'success' && steps.docker-cache.outputs.cache-hit != 'true'
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: ${{ env.CAMPFIRE_DOCKER_CACHE }}
           key: campfire-docker-apt-${{ runner.os }}-${{ runner.arch }}-${{ steps.apt-window.outputs.bucket }}-v1
@@ -2726,7 +2726,7 @@ jobs:
     timeout-minutes: 30
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           name: campfire-archive
@@ -2744,9 +2744,9 @@ jobs:
         # declares image variants), and the package links -lvips.
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev libjemalloc-dev libvips-dev
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
       - name: Pre-warm Playwright (chromium + system deps)
         run: |
           cd e2e/campfire
@@ -2797,7 +2797,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/download-artifact@v8
@@ -2832,9 +2832,9 @@ jobs:
       # and preserves subdirs, so controllers/*.js land at
       # static/assets/controllers/*.js — matching the `controllers/*` pins.
       - name: Install Node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
           # Also warm the live demo's downloads; always build current output.
           cache: npm
           cache-dependency-path: |
@@ -2947,7 +2947,7 @@ jobs:
       - name: Cache Mastodon source bundle
         if: needs.plan.outputs.site == 'true'
         id: mastodon-src-site
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: wasm/ide/app-src.json
           key: mastodon-app-src-${{ env.MASTODON_SHA }}-v2
@@ -2979,7 +2979,7 @@ jobs:
       - name: Cache lobsters source bundle
         if: needs.plan.outputs.site == 'true'
         id: lobsters-src-site
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /tmp/app-lobsters.json
           key: lobsters-app-src-${{ env.RUBY_BENCH_SHA }}-v1
@@ -2996,7 +2996,7 @@ jobs:
       - name: Cache campfire source bundle
         if: needs.plan.outputs.site == 'true'
         id: campfire-src-site
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /tmp/app-campfire.json
           key: campfire-app-src-${{ env.CAMPFIRE_SHA }}-v1
@@ -3291,7 +3291,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Collect this run's archive evidence
         continue-on-error: true
         uses: actions/download-artifact@v8
@@ -3325,7 +3325,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
@@ -3419,7 +3419,7 @@ jobs:
     outputs:
       passed: ${{ steps.gate.outputs.passed }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Require every selected compact check to succeed
         id: gate
         env:
@@ -3439,7 +3439,7 @@ jobs:
     outputs:
       complete: ${{ steps.gate.outputs.complete }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Report missing, skipped or failed selected checks
         id: gate
         env:
