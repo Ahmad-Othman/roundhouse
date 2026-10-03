@@ -644,6 +644,11 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: '20'
+          # Warm downloads for the generated app, not node_modules or dist.
+          cache: npm
+          cache-dependency-path: |
+            tests/browser_smoke/package-lock.json
+            src/emit/typescript/package.rs
       - name: Install harness deps
         run: npm ci
         working-directory: tests/browser_smoke
@@ -2649,6 +2654,11 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: '20'
+          # Also warm the live demo's downloads; always build current output.
+          cache: npm
+          cache-dependency-path: |
+            e2e/package-lock.json
+            src/emit/typescript/package.rs
       - name: Install Ruby (for the turbo-rails / stimulus-rails JS bundles)
         uses: ruby/setup-ruby@v1
         with:

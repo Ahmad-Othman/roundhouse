@@ -280,3 +280,167 @@ fn shared_store_validation_is_frozen_and_preserves_both_failure_paths() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn fixture_gem_environment_is_exported_before_ruby_setup() {
+    use std::process::Command;
+
+    let job = fixture_job();
+    let steps = job["steps"].as_sequence().unwrap();
+    let setup = steps
+        .iter()
+        .position(|step| step["name"] == "Isolate fixture gems")
+        .unwrap();
+    let ruby = steps
+        .iter()
+        .position(|step| step["uses"] == "ruby/setup-ruby@v1")
+        .unwrap();
+    assert!(setup < ruby);
+    assert!(steps[setup].get("if").is_none());
+    assert!(steps[setup].get("continue-on-error").is_none());
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("fixture-env-{}-{unique}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let runner_temp = root.join("runner temp");
+    let env_file = root.join("env");
+    let result = Command::new("bash")
+        .args([
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            steps[setup]["run"].as_str().unwrap(),
+        ])
+        .env("RUNNER_TEMP", &runner_temp)
+        .env("GITHUB_ENV", &env_file)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(
+        fs::read_to_string(env_file).unwrap(),
+        format!(
+            "GEM_HOME={0}/fixture-gems\nGEM_PATH={0}/fixture-gems\n",
+            runner_temp.display()
+        )
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_archive_omits_scratch_but_keeps_source_and_seeded_blog_database() {
+    use std::process::Command;
+
+    let job = fixture_job();
+    let steps = job["steps"].as_sequence().unwrap();
+    let pack = steps
+        .iter()
+        .find(|step| step["name"] == "Pack fixtures")
+        .unwrap();
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("fixture-pack-{}-{unique}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let retained = [
+        "fixtures/real-blog/app/models/article.rb",
+        "fixtures/real-blog/storage/development.sqlite3",
+        "fixtures/store/app/models/product.rb",
+        "fixtures/store/db/schema.rb",
+        "fixtures/store/test/models/product_test.rb",
+        "fixtures/store/Gemfile.lock",
+    ];
+    let omitted = [
+        "fixtures/real-blog/tmp/cache/bootsnap/compiled",
+        "fixtures/real-blog/log/development.log",
+        "fixtures/store/tmp/cache/bootsnap/compiled",
+        "fixtures/store/log/test.log",
+        "fixtures/store/storage/development.sqlite3",
+    ];
+    for path in retained.iter().chain(&omitted) {
+        let file = root.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, path).unwrap();
+    }
+    let result = Command::new("bash")
+        .args(["-e", "-o", "pipefail", "-c", pack["run"].as_str().unwrap()])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    let unpacked = root.join("unpacked");
+    fs::create_dir(&unpacked).unwrap();
+    let result = Command::new("tar")
+        .args(["-xzf", "real-blog.tar.gz", "-C", "unpacked"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    for path in retained {
+        assert_eq!(fs::read_to_string(unpacked.join(path)).unwrap(), path);
+    }
+    for path in omitted {
+        assert!(
+            !unpacked.join(path).exists(),
+            "scratch was archived: {path}"
+        );
+    }
+    // Execute the workflow's actual hit/miss decision, not a reimplementation.
+    // A restored archive is input, not a successful generation/test receipt.
+    let select = steps.iter().find(|step| step["id"] == "fixture").unwrap();
+    for (name, restored, archive, success, output) in [
+        ("hit", "true", true, true, "generate=false\n"),
+        ("miss", "false", true, true, "generate=true\n"),
+        ("empty", "false", false, true, "generate=true\n"),
+        ("corrupt", "true", false, false, ""),
+    ] {
+        let workspace = root.join(name);
+        fs::create_dir(&workspace).unwrap();
+        if archive {
+            fs::copy(
+                root.join("real-blog.tar.gz"),
+                workspace.join("real-blog.tar.gz"),
+            )
+            .unwrap();
+        } else if restored == "true" {
+            fs::write(workspace.join("real-blog.tar.gz"), "invalid gzip").unwrap();
+        }
+        let outputs = workspace.join("outputs");
+        fs::write(&outputs, "").unwrap();
+        let result = Command::new("bash")
+            .args([
+                "-e",
+                "-o",
+                "pipefail",
+                "-c",
+                select["run"].as_str().unwrap(),
+            ])
+            .current_dir(&workspace)
+            .env("RESTORED", restored)
+            .env("GITHUB_OUTPUT", &outputs)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.success(), success, "{name}: {result:?}");
+        assert_eq!(fs::read_to_string(outputs).unwrap(), output, "{name}");
+        if name == "hit" {
+            for path in retained {
+                assert_eq!(fs::read_to_string(workspace.join(path)).unwrap(), path);
+            }
+            assert_eq!(
+                fs::read(workspace.join("real-blog.tar.gz")).unwrap(),
+                fs::read(root.join("real-blog.tar.gz")).unwrap()
+            );
+        } else {
+            assert!(
+                !workspace.join("fixtures").exists(),
+                "{name} extracted stale data"
+            );
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}

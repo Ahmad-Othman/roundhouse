@@ -73,174 +73,66 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
     assert!(ci["permissions"].get("id-token").is_none());
 }
 
-#[cfg(unix)]
 #[test]
-fn fixture_gem_environment_is_exported_before_ruby_setup() {
-    use std::process::Command;
-
-    let ci: serde_yaml_ng::Value =
+fn generated_npm_projects_cache_downloads_without_skipping_preparation() {
+    let workflow: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
-    let steps = ci["jobs"]["generate-fixture"]["steps"]
-        .as_sequence()
-        .unwrap();
-    let setup = steps
-        .iter()
-        .position(|step| step["name"] == "Isolate fixture gems")
-        .unwrap();
-    let ruby = steps
-        .iter()
-        .position(|step| step["uses"] == "ruby/setup-ruby@v1")
-        .unwrap();
-    assert!(setup < ruby);
-    assert!(steps[setup].get("if").is_none());
-    assert!(steps[setup].get("continue-on-error").is_none());
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let cached_jobs: std::collections::BTreeSet<_> = workflow["jobs"]
+        .as_mapping()
         .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("fixture-env-{}-{unique}", std::process::id()));
-    fs::create_dir(&root).unwrap();
-    let runner_temp = root.join("runner temp");
-    let env_file = root.join("env");
-    let result = Command::new("bash")
-        .args([
-            "-e",
-            "-o",
-            "pipefail",
-            "-c",
-            steps[setup]["run"].as_str().unwrap(),
-        ])
-        .env("RUNNER_TEMP", &runner_temp)
-        .env("GITHUB_ENV", &env_file)
-        .output()
-        .unwrap();
-    assert!(result.status.success(), "{result:?}");
+        .iter()
+        .filter(|(_, job)| {
+            job["steps"].as_sequence().unwrap().iter().any(|step| {
+                step["uses"] == "actions/setup-node@v5" && step["with"]["cache"] == "npm"
+            })
+        })
+        .map(|(name, _)| name.as_str().unwrap())
+        .collect();
     assert_eq!(
-        fs::read_to_string(env_file).unwrap(),
-        format!(
-            "GEM_HOME={0}/fixture-gems\nGEM_PATH={0}/fixture-gems\n",
-            runner_temp.display()
-        )
+        cached_jobs,
+        std::collections::BTreeSet::from(["browser-smoke-typescript", "build-site"])
     );
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[cfg(unix)]
-#[test]
-fn fixture_archive_omits_scratch_but_keeps_source_and_seeded_blog_database() {
-    use std::process::Command;
-
-    let ci: serde_yaml_ng::Value =
-        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
-    let steps = ci["jobs"]["generate-fixture"]["steps"]
-        .as_sequence()
-        .unwrap();
-    let pack = steps
-        .iter()
-        .find(|step| step["name"] == "Pack fixtures")
-        .unwrap();
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("fixture-pack-{}-{unique}", std::process::id()));
-    fs::create_dir(&root).unwrap();
-    let retained = [
-        "fixtures/real-blog/app/models/article.rb",
-        "fixtures/real-blog/storage/development.sqlite3",
-        "fixtures/store/app/models/product.rb",
-        "fixtures/store/db/schema.rb",
-        "fixtures/store/test/models/product_test.rb",
-        "fixtures/store/Gemfile.lock",
-    ];
-    let omitted = [
-        "fixtures/real-blog/tmp/cache/bootsnap/compiled",
-        "fixtures/real-blog/log/development.log",
-        "fixtures/store/tmp/cache/bootsnap/compiled",
-        "fixtures/store/log/test.log",
-        "fixtures/store/storage/development.sqlite3",
-    ];
-    for path in retained.iter().chain(&omitted) {
-        let file = root.join(path);
-        fs::create_dir_all(file.parent().unwrap()).unwrap();
-        fs::write(file, path).unwrap();
-    }
-    let result = Command::new("bash")
-        .args(["-e", "-o", "pipefail", "-c", pack["run"].as_str().unwrap()])
-        .current_dir(&root)
-        .output()
-        .unwrap();
-    assert!(result.status.success(), "{result:?}");
-    let unpacked = root.join("unpacked");
-    fs::create_dir(&unpacked).unwrap();
-    let result = Command::new("tar")
-        .args(["-xzf", "real-blog.tar.gz", "-C", "unpacked"])
-        .current_dir(&root)
-        .output()
-        .unwrap();
-    assert!(result.status.success(), "{result:?}");
-    for path in retained {
-        assert_eq!(fs::read_to_string(unpacked.join(path)).unwrap(), path);
-    }
-    for path in omitted {
-        assert!(
-            !unpacked.join(path).exists(),
-            "scratch was archived: {path}"
-        );
-    }
-    // Execute the workflow's actual hit/miss decision, not a reimplementation.
-    // A restored archive is input, not a successful generation/test receipt.
-    let select = steps.iter().find(|step| step["id"] == "fixture").unwrap();
-    for (name, restored, archive, success, output) in [
-        ("hit", "true", true, true, "generate=false\n"),
-        ("miss", "false", true, true, "generate=true\n"),
-        ("empty", "false", false, true, "generate=true\n"),
-        ("corrupt", "true", false, false, ""),
+    for (job, lockfile, preparations) in [
+        (
+            "browser-smoke-typescript",
+            "tests/browser_smoke/package-lock.json",
+            [
+                "Install harness deps",
+                "Emit and build current SharedWorker project",
+            ],
+        ),
+        (
+            "build-site",
+            "e2e/package-lock.json",
+            [
+                "Build static asset graph for archives",
+                "Build selected archives or the complete site",
+            ],
+        ),
     ] {
-        let workspace = root.join(name);
-        fs::create_dir(&workspace).unwrap();
-        if archive {
-            fs::copy(
-                root.join("real-blog.tar.gz"),
-                workspace.join("real-blog.tar.gz"),
-            )
+        let steps = workflow["jobs"][job]["steps"].as_sequence().unwrap();
+        let setup = steps
+            .iter()
+            .position(|step| step["uses"] == "actions/setup-node@v5")
             .unwrap();
-        } else if restored == "true" {
-            fs::write(workspace.join("real-blog.tar.gz"), "invalid gzip").unwrap();
-        }
-        let outputs = workspace.join("outputs");
-        fs::write(&outputs, "").unwrap();
-        let result = Command::new("bash")
-            .args([
-                "-e",
-                "-o",
-                "pipefail",
-                "-c",
-                select["run"].as_str().unwrap(),
-            ])
-            .current_dir(&workspace)
-            .env("RESTORED", restored)
-            .env("GITHUB_OUTPUT", &outputs)
-            .output()
-            .unwrap();
-        assert_eq!(result.status.success(), success, "{name}: {result:?}");
-        assert_eq!(fs::read_to_string(outputs).unwrap(), output, "{name}");
-        if name == "hit" {
-            for path in retained {
-                assert_eq!(fs::read_to_string(workspace.join(path)).unwrap(), path);
-            }
-            assert_eq!(
-                fs::read(workspace.join("real-blog.tar.gz")).unwrap(),
-                fs::read(root.join("real-blog.tar.gz")).unwrap()
-            );
-        } else {
-            assert!(
-                !workspace.join("fixtures").exists(),
-                "{name} extracted stale data"
-            );
+        assert!(steps[setup].get("if").is_none());
+        assert_eq!(steps[setup]["with"]["cache"], "npm");
+        let inputs: Vec<_> = steps[setup]["with"]["cache-dependency-path"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .collect();
+        assert_eq!(inputs, [lockfile, "src/emit/typescript/package.rs"]);
+        assert!(inputs
+            .iter()
+            .all(|input| std::path::Path::new(input).is_file()));
+        for name in preparations {
+            let prepare = steps.iter().position(|step| step["name"] == name).unwrap();
+            assert!(setup < prepare);
+            assert!(steps[prepare].get("if").is_none());
+            assert!(steps[prepare].get("continue-on-error").is_none());
         }
     }
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[cfg(unix)]
@@ -352,13 +244,11 @@ fn spinel_jobs_are_selected_explicitly_and_archive_evidence_reaches_pages() {
         "smoke-campfire",
         "smoke-campfire-docker",
     ] {
-        assert!(
-            report["needs"]
-                .as_sequence()
-                .unwrap()
-                .iter()
-                .any(|need| need.as_str() == Some(dependency))
-        );
+        assert!(report["needs"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .any(|need| need.as_str() == Some(dependency)));
     }
     let report_steps = report["steps"].as_sequence().unwrap();
     assert_eq!(
@@ -379,13 +269,11 @@ fn spinel_jobs_are_selected_explicitly_and_archive_evidence_reaches_pages() {
     );
 
     let assemble = &jobs["assemble-site"];
-    assert!(
-        assemble["needs"]
-            .as_sequence()
-            .unwrap()
-            .iter()
-            .any(|need| need.as_str() == Some("archive-results"))
-    );
+    assert!(assemble["needs"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .any(|need| need.as_str() == Some("archive-results")));
     let steps = assemble["steps"].as_sequence().unwrap();
     let verify = steps.iter().position(|step| step["run"].as_str() == Some("python3 scripts/ci-archive-evidence.py verify --root _site --report _site/ci/archive-results.json")).expect("archive verification step");
     let pages = steps
@@ -397,13 +285,11 @@ fn spinel_jobs_are_selected_explicitly_and_archive_evidence_reaches_pages() {
         })
         .unwrap();
     assert!(verify < pages);
-    assert!(
-        jobs["ci-summary"]["needs"]
-            .as_sequence()
-            .unwrap()
-            .iter()
-            .any(|need| need.as_str() == Some("archive-results"))
-    );
+    assert!(jobs["ci-summary"]["needs"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .any(|need| need.as_str() == Some("archive-results")));
 }
 
 #[test]
@@ -464,12 +350,10 @@ fn full_scheduler_runs_every_preflight_success_fresh_and_never_grants_pr_deploy_
     );
     assert!(deploy.get("continue-on-error").is_none());
     assert_eq!(deploy["permissions"]["pages"].as_str(), Some("write"));
-    assert!(
-        deploy["steps"][0]["run"]
-            .as_str()
-            .unwrap()
-            .contains("$VALIDATED_SHA")
-    );
+    assert!(deploy["steps"][0]["run"]
+        .as_str()
+        .unwrap()
+        .contains("$VALIDATED_SHA"));
 }
 
 #[cfg(unix)]

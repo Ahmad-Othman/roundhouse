@@ -147,6 +147,15 @@ Unit tests, emitted-artifact producers, DOM comparisons, other selected
 toolchain lanes and all selected main-branch checks execute freshly.
 Routing changes the required coverage, not the execution-receipt trust rules.
 
+The SharedWorker browser and site jobs cache npm's download store through
+`setup-node`, keyed by their checked-in harness/asset lockfile and the
+TypeScript package-manifest recipe (`src/emit/typescript/package.rs`). This
+warms downloads for freshly emitted apps, not `node_modules`, browser binaries,
+builds or test results. Installation and builds still run, without offline
+resolution or a cache-hit skip; floating dependencies still resolve normally.
+Missing caches only cost downloads. Downstream receipts continue to fingerprint
+the actual installed modules and built output, not the npm cache key.
+
 Fixture input is a separate, bounded exception: first-attempt PR runs may
 restore the packed blog/store source under an exact recipe/environment/UTC-day
 key, without fallback keys. This intentionally holds floating gem resolution
