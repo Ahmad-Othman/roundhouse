@@ -503,17 +503,17 @@ jobs:
       # the unit job ran it as a no-op. The first refuses to skip.
       - name: Install the gem the emitted Ruby tree runs on
         run: gem install sqlite3 --no-document
-      # Keep compilation separate from execution: hundreds of independently
-      # linked integration binaries make both significant costs. The second
-      # command reuses these binaries; no test result is cached or skipped.
-      - name: Build all test targets
-        run: |
-          python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-resources/build" -- \
-            cargo test --locked --all-targets --no-run --timings
-      - name: Run all test targets
+      # Bounded build → run → free waves: every --all-targets identity still
+      # goes through Cargo (lib, bins, each integration target). Finished
+      # integration executables and their own split-DWARF sidecars are freed
+      # after a successful batch so peak disk stays near one wave instead of
+      # all hundreds at once. Shared libraries, package binaries (including
+      # CARGO_BIN_EXE helpers), and fingerprints stay for later batches and
+      # the independent debug bench gate. No test result is cached or skipped.
+      - name: Build and run all test targets in batches
         run: |
           python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-resources/tests" -- \
-            cargo test --locked --all-targets
+            python3 scripts/ci-unit-tests.py
       - name: Upload test build timings
         if: always()
         uses: actions/upload-artifact@v7
