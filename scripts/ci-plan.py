@@ -54,6 +54,13 @@ SPINEL11 = [
 ]
 ADVISORY = set(SPINEL11) - {"build-campfire-archive"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
+PROJECT_BUILDERS = {
+    "ruby_runtime_files": "interpreted",
+    "jruby_runtime_files": "interpreted",
+    "ruby_family_runtime_files": "interpreted",
+    "spinel_files": "ruby-family",
+    "spin_shape": "ruby-family",
+}
 
 
 def native_coverage(path):
@@ -175,7 +182,7 @@ def select(paths, *, draft=False, full=False, publish=False, project_scope=None)
     wasm = site = spinel = writebook = False
     reasons = []
     for path in paths:
-        if path == "src/project.rs" and project_scope in {"interpreted", "ruby-family"}:
+        if path == "src/project.rs" and project_scope in PROJECT_BUILDERS.values():
             targets.update(("ruby", "jruby"))
             smoke.update(("ruby", "jruby"))
             writebook = True
@@ -374,15 +381,9 @@ def project_change_scope(before, after):
     This is not a Rust parser. Only indented bodies without raw strings or
     block comments qualify; unknown shapes/signatures/items retain full CI.
     """
-    interpreted = {
-        "ruby_runtime_files",
-        "jruby_runtime_files",
-        "ruby_family_runtime_files",
-    }
-    family = {"spinel_files", "spin_shape"}
     pattern = re.compile(
         r"(?P<header>^fn (?P<name>"
-        + "|".join(sorted(interpreted | family))
+        + "|".join(sorted(PROJECT_BUILDERS))
         + r")\([^{};]*\{\n)(?P<body>(?:[ \t]+[^\n]*\n|\n)*)^}\n",
         re.MULTILINE,
     )
@@ -416,7 +417,7 @@ def project_change_scope(before, after):
             code = "\n".join(
                 line for line in body.splitlines() if not line.lstrip().startswith("//")
             )
-            if name in found or re.search(r'(?<!\w)r#*"|/\*', code):
+            if name in found or re.search(r'(?<!\w)[bc]?r#*"|/\*', code):
                 raise ValueError("ambiguous project assembly body")
             found[name] = body
             return match["header"] + "}\n"
@@ -430,7 +431,8 @@ def project_change_scope(before, after):
         return None
     changed = {name for name in bodies[0] if bodies[0][name] != bodies[1][name]}
     if changed:
-        return "ruby-family" if changed & family else "interpreted"
+        scopes = {PROJECT_BUILDERS[name] for name in changed}
+        return "ruby-family" if "ruby-family" in scopes else "interpreted"
     return None
 
 

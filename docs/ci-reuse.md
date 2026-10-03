@@ -49,9 +49,10 @@ inside the bodies of `ruby_runtime_files`, `jruby_runtime_files`,
 every byte outside those bodies must remain identical. Shared helpers,
 constants, dispatch, new/deleted functions, mode changes and unrecognized
 source shapes still select full validation. This deliberately conservative
-recognizer is not a Rust parser: raw strings within builder bodies and block
-comments retain full coverage. Other changed paths and `ci:full` can still
-expand the combined plan; no last-commit or PR-title inference is used.
+recognizer is not a Rust parser: raw strings (`r`, `br`, `cr`) within builder
+bodies and block comments retain full coverage. Other changed paths and
+`ci:full` can still expand the combined plan; no last-commit or PR-title inference
+is used.
 
 ### Requesting broader or fresh validation
 
