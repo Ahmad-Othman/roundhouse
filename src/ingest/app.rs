@@ -2980,7 +2980,11 @@ fn stored_options_init(
     method: &crate::dialect::MethodDef,
 ) -> Option<crate::expr::Expr> {
     use crate::expr::{Expr, ExprNode, LValue, Literal};
-    let ExprNode::Assign { target: LValue::Ivar { name }, .. } = &*method.body.node else {
+    let body = match &*method.body.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => &*exprs[0].node,
+        other => other,
+    };
+    let ExprNode::Assign { target: LValue::Ivar { name }, .. } = body else {
         return None;
     };
     let ExprNode::Send { args, .. } = &*expr.node else { return None };

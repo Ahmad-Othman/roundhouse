@@ -531,6 +531,64 @@ fn configuration_refusals_preserve_the_survey_and_original_body() {
 }
 
 #[test]
+fn store_writer_spellings_are_consumed_or_named() {
+    use roundhouse::ingest::survey;
+    let shapes = [
+        ("bare keywords", "period_config default_mode: :month, valid_granularities: %w[daily], default_granularity: \"daily\", max_future_days: 0, clamp_range_to_first_date: true"),
+        ("parentheses", "period_config(default_mode: :month, valid_granularities: %w[daily])"),
+        ("lambda arg", "period_config default_date: ->(today) { today - 1 }, default_mode: :date"),
+        ("percent i", "period_config valid_granularities: %i[daily hourly]"),
+        ("string array", "period_config valid_granularities: [\"daily\", \"hourly\"]"),
+        ("symbol array", "period_config only: [:show], except: [:index]"),
+        ("true false nil", "period_config clamp_range_to_first_date: true, max_future_days: 0, empty: nil"),
+        ("multiline", "period_config default_mode: :month,\n    valid_granularities: %w[daily]"),
+        ("included block", "included do\n  helper :period\nend\n  period_config default_mode: :month"),
+        ("block stays", "period_config(default_mode: :month) { :ready }"),
+    ];
+    for (label, call) in shapes {
+        let concern = r#"
+module HasPeriodParams
+  extend ActiveSupport::Concern
+  class_methods do
+    def period_config(**opts)
+      @period_options = opts
+    end
+    def period_options
+      @period_options || {}
+    end
+  end
+  def period
+    @period
+  end
+  helper :period
+end
+"#;
+        let controller = format!(
+            "class DashboardsController < InertiaController\n  include HasPeriodParams\n  {call}\nend\n"
+        );
+        let tree = [
+            ("app/controllers/concerns/has_period_params.rb", concern),
+            ("app/controllers/inertia_controller.rb", "class InertiaController < ActionController::Base\nend\n"),
+            ("app/controllers/dashboards_controller.rb", controller.as_str()),
+        ]
+        .into_iter()
+        .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+        .collect();
+        survey::activate();
+        let app = ingest_app_from_tree(tree).unwrap_or_else(|err| panic!("{label}: {err}"));
+        let gaps = survey::drain();
+        let stored = app.controllers.iter().any(|controller| {
+            controller.body.iter().any(|item| matches!(item, ControllerBodyItem::ClassIvarInit { .. }))
+        });
+        let unrecognized = gaps.iter().any(|gap| gap.to_string().contains("not recognized"));
+        assert!(
+            stored || !unrecognized,
+            "{label} stayed unrecognized; gaps={gaps:?}"
+        );
+    }
+}
+
+#[test]
 fn a_concern_with_an_instance_method_still_stores_its_writer() {
     use roundhouse::ingest::survey;
     let concern = r#"
