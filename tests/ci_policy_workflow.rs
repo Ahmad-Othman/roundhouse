@@ -540,6 +540,7 @@ fn active_node_jobs_pin_node_24_with_setup_node_v7() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn archive_smoke_reuses_setup_ruby_cache_without_skipping_readme_execution() {
     let workflow: serde_yaml_ng::Value =
@@ -559,10 +560,40 @@ fn archive_smoke_reuses_setup_ruby_cache_without_skipping_readme_execution() {
     let guard = "matrix.target == 'ruby' || matrix.target == 'jruby'";
     assert_eq!(steps[prepare]["if"].as_str(), Some(guard));
     assert_eq!(steps[export]["if"].as_str(), Some(guard));
+    // JRuby ships a Gemfile but intentionally omits the MRI lock. Exercise
+    // actual preparation/export commands so an accidental lock requirement fails.
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("archive-bundle-{}-{unique}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let output = std::process::Command::new("bash")
+        .args([
+            "-euo",
+            "pipefail",
+            "-c",
+            &format!(
+                "mkdir browse jruby; touch jruby/Gemfile; tar -czf browse/jruby.tgz jruby;\n{}\n{}",
+                steps[prepare]["run"].as_str().unwrap(),
+                steps[export]["run"].as_str().unwrap()
+            ),
+        ])
+        .current_dir(&root)
+        .env("TARGET", "jruby")
+        .env("RUNNER_TEMP", &root)
+        .env("GITHUB_ENV", root.join("env"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
     assert_eq!(
-        steps[export]["run"].as_str(),
-        Some("echo \"BUNDLE_PATH=$RUNNER_TEMP/smoke-bundle-source/$TARGET/vendor/bundle\" >> \"$GITHUB_ENV\"")
+        fs::read_to_string(root.join("env")).unwrap(),
+        format!(
+            "BUNDLE_PATH={}/smoke-bundle-source/jruby/vendor/bundle\n",
+            root.display()
+        )
     );
+    fs::remove_dir_all(&root).unwrap();
     for (name, target, version) in [
         ("Install Ruby (MRI 3.4)", "ruby", "3.4"),
         ("Install JRuby 10", "jruby", "jruby-10.0"),
