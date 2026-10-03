@@ -580,9 +580,12 @@ echo fake-ok
     // Direct helper: ROUNDHOUSE_BIN is consumed; cargo is not.
     // Drive via a small script file (no bash -c interpolation).
     let probe = root.join("probe-helper.sh");
+    let probe_app = root.join("probe-app");
+    let probe_out = root.join("probe-out");
+    fs::create_dir_all(&probe_app).unwrap();
     fs::write(
         &probe,
-        "#!/bin/bash\nset -euo pipefail\n. \"$HELPER\"\nroundhouse_run --target ruby /tmp/app -o /tmp/out\n",
+        "#!/bin/bash\nset -euo pipefail\n. \"$HELPER\"\nroundhouse_run --target ruby \"$PROBE_APP\" -o \"$PROBE_OUT\"\n",
     )
     .unwrap();
     let mut perms = fs::metadata(&probe).unwrap().permissions();
@@ -594,6 +597,8 @@ echo fake-ok
         .env("REPO_ROOT", &repo)
         .env("ROUNDHOUSE_BIN", &fake)
         .env("ROUNDHOUSE_BIN_TRACE", "1")
+        .env("PROBE_APP", &probe_app)
+        .env("PROBE_OUT", &probe_out)
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);

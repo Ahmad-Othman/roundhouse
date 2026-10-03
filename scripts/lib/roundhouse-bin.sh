@@ -10,7 +10,9 @@
 #
 # Both branches run with cwd = REPO_ROOT when REPO_ROOT is set, so relative
 # input/output paths mean the same thing whether CI supplied a binary or the
-# local path rebuilds through cargo.
+# local path rebuilds through cargo. A relative ROUNDHOUSE_BIN is resolved
+# against the caller's cwd *before* that chdir, so the checked path is the
+# one that runs.
 #
 # Usage (after REPO_ROOT is set):
 #
@@ -23,13 +25,20 @@
 
 roundhouse_run() {
     local -a cmd
+    local bin
     if [[ -n "${ROUNDHOUSE_BIN:-}" ]]; then
-        if [[ ! -f "$ROUNDHOUSE_BIN" || ! -x "$ROUNDHOUSE_BIN" ]]; then
+        bin="$ROUNDHOUSE_BIN"
+        # Resolve relative paths against the caller's cwd before chdir to
+        # REPO_ROOT; otherwise ./fake can pass the check and miss at exec.
+        if [[ "$bin" != /* ]]; then
+            bin="$(pwd)/$bin"
+        fi
+        if [[ ! -f "$bin" || ! -x "$bin" ]]; then
             printf 'roundhouse-bin: ROUNDHOUSE_BIN is not an executable file: %s\n' \
-                "$ROUNDHOUSE_BIN" >&2
+                "$bin" >&2
             return 127
         fi
-        cmd=("$ROUNDHOUSE_BIN")
+        cmd=("$bin")
     else
         if [[ -z "${REPO_ROOT:-}" ]]; then
             printf 'roundhouse-bin: REPO_ROOT is unset and ROUNDHOUSE_BIN is empty\n' >&2

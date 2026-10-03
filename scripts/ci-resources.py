@@ -52,10 +52,38 @@ def sample(start, previous_cpu):
     }, current_cpu
 
 
+DEPS_SAMPLE_INTERVAL_S = 60
+
+
+def cargo_debug_root():
+    # Match the unit job's default layout. Custom CARGO_TARGET_DIR is rare in CI.
+    root = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+    return root / "debug"
+
+
+def cargo_dir_bytes(name):
+    path = cargo_debug_root() / name
+    if not path.is_dir():
+        return None
+    try:
+        size = subprocess.check_output(["du", "-s", "-B1", str(path)], text=True)
+    except (OSError, subprocess.CalledProcessError):
+        # Reclaim can unlink entries while du walks; skip this sample.
+        return None
+    return int(size.split()[0])
+
+
 def collect(child, out, start):
     out.parent.mkdir(parents=True, exist_ok=True)
     row, previous_cpu = sample(start, cpu_times())
     rows = [row]
+    # Peak deps during the phase: batch reclaim makes end size unrepresentative.
+    # Full `du` on multi-GiB deps is expensive — sample about once a minute.
+    deps_samples = []
+    next_deps_sample = 0.0
+    if (size := cargo_dir_bytes("deps")) is not None:
+        deps_samples.append(size)
+        next_deps_sample = DEPS_SAMPLE_INTERVAL_S
     with out.with_suffix(".csv").open("w") as output:
         writer = csv.DictWriter(output, fieldnames=row.keys())
         writer.writeheader()
@@ -70,6 +98,10 @@ def collect(child, out, start):
             rows.append(row)
             writer.writerow(row)
             output.flush()
+            if status is not None or row["elapsed_s"] >= next_deps_sample:
+                if (size := cargo_dir_bytes("deps")) is not None:
+                    deps_samples.append(size)
+                next_deps_sample = row["elapsed_s"] + DEPS_SAMPLE_INTERVAL_S
             if status is not None:
                 break
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -86,14 +118,16 @@ def collect(child, out, start):
         "disk_min_available_bytes": min(r["disk_available_bytes"] for r in rows),
         "disk_used_start_bytes": rows[0]["disk_used_bytes"],
         "disk_used_end_bytes": row["disk_used_bytes"],
+        "disk_used_peak_bytes": max(r["disk_used_bytes"] for r in rows),
         "cargo_artifacts_bytes": {},
     }
-    # One directory walk per phase, not every sample. Never delete live builds.
+    # Final allocated sizes, plus deps peak across samples. Never delete builds.
     for name in ["deps", "incremental", "build"]:
-        path = Path("target/debug") / name
-        if path.is_dir():
-            size = subprocess.check_output(["du", "-s", "-B1", str(path)], text=True)
-            report["cargo_artifacts_bytes"][name] = int(size.split()[0])
+        size = cargo_dir_bytes(name)
+        if size is not None:
+            report["cargo_artifacts_bytes"][name] = size
+    if deps_samples:
+        report["cargo_artifacts_bytes"]["deps_peak"] = max(deps_samples)
     out.with_suffix(".json").write_text(json.dumps(report, indent=2) + "\n")
     print(f"Resources ({out.name}): {json.dumps(report)}", flush=True)
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
