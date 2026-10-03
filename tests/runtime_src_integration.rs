@@ -1532,7 +1532,14 @@ fn every_runtime_method_body_concretely_typed() {
     // `to_s`. The readers (`current_page`, `total_pages`, …) add none.
     // What it buys: Kaminari chains, which the catalog already typed
     // as builders, run instead of raising NoMethodError.
-    const CEILING: usize = 520;
+    //
+    // 520 -> 521: `ActiveRecord::TokenFor.generate`'s `Time.now +
+    // expires_in` (active_record/token_for.rb, ONE site, MEASURED) —
+    // the `Time#+` that `signed_id.rb`'s entry explains, absorbed by
+    // `iso8601_ms`'s `::Time` parameter. What it bought:
+    // `has_secure_password`'s password-reset token, which the Rails 8
+    // authentication generator's PasswordsController and mailer use.
+    const CEILING: usize = 521;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

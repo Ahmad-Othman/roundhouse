@@ -5621,6 +5621,20 @@ fn ingest_test_helper_modules<V: Vfs + ?Sized>(
             }
         }
     }
+    // The Rails 8 authentication generator's spelling: the helper file
+    // includes ITSELF, at its foot —
+    //   ActiveSupport.on_load(:action_dispatch_integration_test) do
+    //     include SessionTestHelper
+    //   end
+    // — and `test/test_helper.rb` only `require_relative`s it.
+    for entry in read_rb_files(vfs, &helpers_dir)? {
+        let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
+        for name in on_load_test_includes(&source, &entry.display().to_string()) {
+            if !wanted.contains(&name) {
+                wanted.push(name);
+            }
+        }
+    }
     if wanted.is_empty() {
         return Ok(Vec::new());
     }
@@ -5648,6 +5662,52 @@ fn ingest_test_helper_modules<V: Vfs + ?Sized>(
             .unwrap_or(usize::MAX)
     });
     Ok(out)
+}
+
+/// Modules a file mixes into the test cases through a top-level
+/// `ActiveSupport.on_load(:action_dispatch_integration_test |
+/// :active_support_test_case) do include M end`. Every test module is a
+/// spliced test case here, so both hooks reach the same place.
+fn on_load_test_includes(source: &[u8], file: &str) -> Vec<Symbol> {
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let stmts = root
+        .as_program_node()
+        .map(|p| p.statements().body().iter().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let src = String::from_utf8_lossy(source).into_owned();
+    let text = |loc: ruby_prism::Location<'_>| src[loc.start_offset()..loc.end_offset()].to_string();
+    let mut out = Vec::new();
+    for stmt in stmts {
+        let Some(call) = stmt.as_call_node() else { continue };
+        if super::util::constant_id_str(&call.name()) != "on_load" {
+            continue;
+        }
+        if call.receiver().map(|r| text(r.location())).as_deref() != Some("ActiveSupport") {
+            continue;
+        }
+        let hook = call
+            .arguments()
+            .and_then(|a| a.arguments().iter().next())
+            .and_then(|a| a.as_symbol_node().map(|s| String::from_utf8_lossy(s.unescaped()).into_owned()));
+        if !matches!(hook.as_deref(), Some("action_dispatch_integration_test" | "active_support_test_case")) {
+            continue;
+        }
+        let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
+        let Some(body) = block.body().and_then(|b| b.as_statements_node()) else { continue };
+        for inner in body.body().iter() {
+            let Some(inc) = inner.as_call_node() else { continue };
+            if inc.receiver().is_some() || super::util::constant_id_str(&inc.name()) != "include" {
+                continue;
+            }
+            for arg in inc.arguments().into_iter().flat_map(|a| a.arguments().iter()) {
+                if arg.as_constant_read_node().is_some() || arg.as_constant_path_node().is_some() {
+                    out.push(Symbol::from(text(arg.location()).trim_start_matches("::")));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Run the app-wide `ActiveSupport::TestCase` setup ahead of a test
