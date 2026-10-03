@@ -7,6 +7,8 @@ require 'rbconfig'
 
 class RhVerifyTest < Minitest::Test
   SOURCE = File.expand_path('..', __dir__)
+  GIT_LOCATION_ENV = %w[GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE
+    GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX].to_h { |key| [key, nil] }.freeze
 
   def setup
     @root = Dir.mktmpdir('rh-verify-')
@@ -43,7 +45,8 @@ class RhVerifyTest < Minitest::Test
       File.open(ENV.fetch('VERIFY_LOG'), 'a') do |f|
         f.puts JSON.generate(args: ARGV, cwd: Dir.pwd, jobs: ENV['CARGO_BUILD_JOBS'], debug: ENV['CARGO_PROFILE_TEST_DEBUG'],
           dev_strip: ENV['CARGO_PROFILE_DEV_STRIP'], test_strip: ENV['CARGO_PROFILE_TEST_STRIP'],
-          dev_opt: ENV['CARGO_PROFILE_DEV_OPT_LEVEL'], test_opt: ENV['CARGO_PROFILE_TEST_OPT_LEVEL'])
+          dev_opt: ENV['CARGO_PROFILE_DEV_OPT_LEVEL'], test_opt: ENV['CARGO_PROFILE_TEST_OPT_LEVEL'],
+          git_dir: ENV['GIT_DIR'], git_work_tree: ENV['GIT_WORK_TREE'])
       end
       puts 'child stdout'
       warn 'child stderr'
@@ -77,16 +80,16 @@ class RhVerifyTest < Minitest::Test
   end
 
   def git(*args)
-    out, err, status = Open3.capture3('git', *args, chdir: @root)
+    out, err, status = Open3.capture3(GIT_LOCATION_ENV, 'git', *args, chdir: @root)
     assert status.success?, err
     out
   end
 
   def invoke(*args, env: {})
-    Open3.capture3({ 'PATH' => "#{@root}/mocks:#{ENV.fetch('PATH')}", 'VERIFY_LOG' => @log,
+    Open3.capture3(GIT_LOCATION_ENV.merge('PATH' => "#{@root}/mocks:#{ENV.fetch('PATH')}", 'VERIFY_LOG' => @log,
       'CARGO_BUILD_JOBS' => nil, 'CARGO_PROFILE_TEST_DEBUG' => nil,
       'CARGO_PROFILE_DEV_STRIP' => nil, 'CARGO_PROFILE_TEST_STRIP' => nil,
-      'CARGO_PROFILE_DEV_OPT_LEVEL' => nil, 'CARGO_PROFILE_TEST_OPT_LEVEL' => nil }.merge(env),
+      'CARGO_PROFILE_DEV_OPT_LEVEL' => nil, 'CARGO_PROFILE_TEST_OPT_LEVEL' => nil).merge(env),
       RbConfig.ruby, File.join(@root, 'bin/rh'), 'verify', *args, chdir: '/')
   end
 
@@ -127,6 +130,31 @@ class RhVerifyTest < Minitest::Test
     refute File.exist?(File.join(@root, 'scripts/__pycache__'))
   end
 
+  def test_inherited_git_locations_cannot_redirect_reports_locks_or_checks
+    Dir.mktmpdir('rh-foreign-') do |foreign|
+      git('-C', foreign, 'init', '-q')
+      File.write(File.join(foreign, 'foreign.txt'), 'foreign')
+      git('-C', foreign, 'add', '.')
+      git('-C', foreign, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'foreign')
+      File.write(File.join(@root, 'src/emit/go.rs'), 'dirty local source')
+      foreign_git = File.join(foreign, '.git')
+      env = { 'GIT_DIR' => foreign_git, 'GIT_COMMON_DIR' => foreign_git, 'GIT_WORK_TREE' => foreign,
+        'GIT_INDEX_FILE' => File.join(foreign_git, 'index'), 'GIT_OBJECT_DIRECTORY' => File.join(foreign_git, 'objects'),
+        'GIT_ALTERNATE_OBJECT_DIRECTORIES' => File.join(foreign_git, 'objects'), 'GIT_PREFIX' => 'foreign/' }
+      out, err, status = invoke('--json', env: env)
+      assert status.success?, err
+      report = JSON.parse(out)
+      assert_equal @base, report['head']
+      assert_equal ['src/emit/go.rs'], report['changes']
+      assert_equal 'passed', report['status']
+      assert File.exist?(File.join(@root, '.git/rh-verify.lock'))
+      refute File.exist?(File.join(foreign_git, 'rh-verify.lock'))
+      assert_equal 1, calls.length
+      assert_nil calls.first['git_dir']
+      assert_nil calls.first['git_work_tree']
+    end
+  end
+
   def test_success_executes_exact_commands_in_order_and_keeps_json_clean
     out, err, status = invoke('--json', '--jobs', '2', '--test', 'example', '--test', 'example', '--toolchain', 'ruby')
     assert status.success?, err
@@ -141,6 +169,17 @@ class RhVerifyTest < Minitest::Test
     assert report['checks'].all? { |c| c['status'] == 'passed' && c['exit'] == 0 && c['seconds'] >= 0 }
     assert_includes err, 'child stdout'
     assert_includes report['scope'], 'not executed'
+  end
+
+  def test_ignored_integration_selection_does_not_expand_library_or_native_scope
+    out, err, status = invoke('--json', '--ignored', '--test', 'example', '--toolchain', 'ruby')
+    assert status.success?, err
+    assert_equal [
+      %w[test --locked --lib -- --test-threads=1],
+      %w[test --locked --test example -- --ignored --test-threads=1],
+      %w[test --locked --test ruby_toolchain -- --ignored --test-threads=1]
+    ], calls.map { |c| c['args'] }
+    assert_equal 'passed', JSON.parse(out)['status']
   end
 
   def test_failure_stops_execution_preserves_exit_and_leaves_remaining_check_unrun
@@ -273,6 +312,13 @@ class RhVerifyTest < Minitest::Test
     assert_includes report['disk_space']['before']['workspace']['error'], 'df'
     assert_nil report['hosted_coverage']
     assert_includes report['hosted_coverage_error'], 'python3'
+    out, err, status = Open3.capture3(GIT_LOCATION_ENV.merge('PATH' => File.join(@root, 'mocks')),
+      RbConfig.ruby, File.join(@root, 'bin/rh'), 'doctor')
+    assert status.success?, err
+    assert_match(/^  bin\/rh verify$/, out)
+    assert_includes out, 'optional verify hosted-coverage preview'
+    assert_includes out, 'Install to unlock more:'
+    refute_includes out.split('Install to unlock more:').last, 'Python'
     File.delete(File.join(@root, 'mocks/cargo'))
     out, _err, status = invoke('--json', env: { 'PATH' => File.join(@root, 'mocks') })
     assert_equal 127, status.exitstatus
@@ -306,7 +352,7 @@ class RhVerifyTest < Minitest::Test
 
   def test_invalid_inputs_never_start_cargo
     [%w[--test ../example], %w[--toolchain unknown], %w[--jobs 0],
-     %w[--base nonexistent], %w[--base --help], %w[extra]].each do |args|
+     %w[--base nonexistent], %w[--base --help], %w[--ignored], %w[extra]].each do |args|
       _out, err, status = invoke(*args)
       assert_equal 2, status.exitstatus, args.inspect
       assert_includes err, 'rh verify:'

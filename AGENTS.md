@@ -118,8 +118,9 @@ defect even if the build is green.
 - **Focused local loop:** `bin/rh verify --plan --test <suite>` previews;
   `bin/rh verify --test <suite>` builds and runs only library tests and the
   selected suites sequentially, not all test programs. Repeat `--test`; opt
-  into native checks with `--toolchain <target>`. Prepare both fixtures and
-  dependencies first.
+  into native checks with `--toolchain <target>`. Default `--test` skips
+  ignored tests; use `--test <suite> --ignored` for ignored integration checks.
+  Prepare both fixtures and dependencies first.
   The JSON report (`--json`) separates executed local checks from unexecuted
   hosted coverage; neither a preview nor a passing subset proves full CI.
   Before/after filesystem-space snapshots and low-space warnings are advisory;

@@ -84,7 +84,15 @@ at milestones.
 bin/rh verify --plan --base main --test ingest
 bin/rh verify --test ingest --test real_blog
 bin/rh verify --toolchain ruby --json > verification.json
+bin/rh verify --test framework_tests_ruby --ignored
 ```
+
+Like Cargo, default library/`--test` checks exclude `#[ignore]` tests.
+An ignored-only suite therefore executes no tests by default. Use `--ignored`
+with `--test` to run only its ignored tests instead; library tests remain
+unchanged. `--toolchain TARGET` already selects ignored tests in
+`TARGET_toolchain`. Ignored tests are never enabled implicitly: mixed suites
+can contain checks requiring additional SDKs or deliberately unsupported work.
 
 It needs Git, repository-pinned Rust, Ruby/test gems and any selected target
 toolchain. Python 3 (stdlib only) is optional for the hosted-coverage preview;
@@ -101,6 +109,9 @@ files. It does not fetch, find a merge base, or simulate GitHub's PR merge
 tree. The hosted coverage selection is informational: those jobs are not
 executed locally, and the planner cannot infer draft/label/full-call context.
 Choose integration tests from the behavior you changed, not just file names.
+Inherited Git repository-location variables are cleared for verification
+subprocesses, so reports, locks and tests use this checkout rather than a
+repository selected by a calling Git hook. The caller's environment is untouched.
 
 Commands run sequentially with one Rust test thread. Cargo defaults to at
 most four workers, non-incremental builds and no dev/test debug symbols;

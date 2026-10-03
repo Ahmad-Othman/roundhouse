@@ -217,7 +217,7 @@ def cmd_doctor(argv)
   puts 'Available now:'
   available.each { |s| puts "  bin/rh #{s}" }
 
-  missing = DOCTOR_CHECKS.reject { |c| c[:key] == :ruby || versions[c[:key]] }
+  missing = DOCTOR_CHECKS.reject { |c| [:ruby, :python].include?(c[:key]) || versions[c[:key]] }
   unless missing.empty?
     puts ''
     puts 'Install to unlock more:'
@@ -245,8 +245,13 @@ end
 # ---------------------------------------------------------------------
 # Subcommand: verify — a foreground local check, not an Actions emulator.
 
+# Git hooks can export locations for another repository. Every verification
+# subprocess belongs to this checkout, without changing the caller's env.
+VERIFY_GIT_ENV = %w[GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE
+  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX].to_h { |key| [key, nil] }.freeze
+
 def verify_capture(*command, input: '')
-  out, err, status = Open3.capture3(*command, stdin_data: input, chdir: ROUNDHOUSE_ROOT)
+  out, err, status = Open3.capture3(VERIFY_GIT_ENV, *command, stdin_data: input, chdir: ROUNDHOUSE_ROOT)
   raise ArgumentError, "#{command.first}: #{err.strip}" unless status.success?
   out
 end
@@ -291,23 +296,25 @@ end
 def cmd_verify(argv)
   tests = []
   toolchains = []
-  plan_only = json = false
+  plan_only = json = ignored_tests = false
   base = 'HEAD'
   jobs = ENV.fetch('CARGO_BUILD_JOBS', [Etc.nprocessors, 4].min.to_s)
   OptionParser.new do |o|
-    o.banner = 'Usage: bin/rh verify [--plan] [--base REF] [--test NAME] [--toolchain TARGET] [--json]'
+    o.banner = 'Usage: bin/rh verify [--plan] [--base REF] [--test NAME] [--ignored] [--toolchain TARGET] [--json]'
     o.separator 'Build and run library tests, then only explicit integration/toolchain suites.'
     o.separator 'This is partial local verification, not the hosted CI floor or merge approval.'
     o.on('--plan', 'Read-only preview; no Cargo, installs, or test execution') { plan_only = true }
     o.on('--base REF', 'Compare the working tree with REF (default: HEAD)') { |v| base = v }
-    o.on('--test NAME', 'Integration test stem; repeatable') { |v| tests << v }
+    o.on('--test NAME', 'Integration test stem; repeatable; skips ignored tests by default') { |v| tests << v }
+    o.on('--ignored', 'Run only ignored tests in selected --test suites (not library tests)') { ignored_tests = true }
     o.on('--toolchain TARGET', 'Run TARGET_toolchain with --ignored; repeatable') { |v| toolchains << v }
     o.on('--jobs N', 'Cargo workers (default: CARGO_BUILD_JOBS or min(CPUs, 4))') { |v| jobs = v }
     o.on('--json', 'JSON report on stdout; child output on stderr') { json = true }
   end.parse!(argv)
   raise ArgumentError, "unexpected arguments: #{argv.join(' ')}" unless argv.empty?
   raise ArgumentError, 'jobs must be a positive integer' unless jobs.match?(/\A[1-9]\d*\z/)
-  suites = tests.map { |name| [name, false] } + toolchains.map { |name| ["#{name}_toolchain", true] }
+  raise ArgumentError, '--ignored requires at least one --test suite' if ignored_tests && tests.empty?
+  suites = tests.map { |name| [name, ignored_tests] } + toolchains.map { |name| ["#{name}_toolchain", true] }
   suites.uniq.each do |name, _ignored|
     unless name.match?(/\A[A-Za-z0-9_-]+\z/) && File.file?(File.join(ROUNDHOUSE_ROOT, 'tests', "#{name}.rs"))
       raise ArgumentError, "unknown test suite: #{name.inspect}"
@@ -396,7 +403,7 @@ def cmd_verify(argv)
       report[:checks].each do |check|
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         begin
-          system(build_env, *check[:command], chdir: ROUNDHOUSE_ROOT, out: $stderr, err: $stderr)
+          system(VERIFY_GIT_ENV.merge(build_env), *check[:command], chdir: ROUNDHOUSE_ROOT, out: $stderr, err: $stderr)
           status = $?
           rc = status.exitstatus || 128 + status.termsig
         rescue Errno::ENOENT => e
