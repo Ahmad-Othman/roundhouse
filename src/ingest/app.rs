@@ -3012,7 +3012,11 @@ fn method_stores_keyword_rest(method: &crate::dialect::MethodDef) -> bool {
     if method.block_param.is_some() || method.has_anonymous_block {
         return false;
     }
-    matches!(&*method.body.node, ExprNode::Assign { target: LValue::Ivar { .. }, value }
+    let body = match &*method.body.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => &*exprs[0].node,
+        other => other,
+    };
+    matches!(body, ExprNode::Assign { target: LValue::Ivar { .. }, value }
         if matches!(&*value.node, ExprNode::Var { name, .. } if name == &param.name))
 }
 

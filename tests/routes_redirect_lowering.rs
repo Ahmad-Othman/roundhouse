@@ -113,6 +113,17 @@ fn a_redirect_inside_a_namespace_keeps_the_one_controller() {
 }
 
 #[test]
+fn a_multiline_status_redirect_is_served() {
+    let app = app_with(
+        "  get \"/reports\", to: \"reports#index\"\n  get \"grid_operator_claims\", to: redirect(status: 301) { |_, request|\n    qs = request.query_string\n    qs.present? ? \"/claim_analysis?#{qs}\" : \"/claim_analysis\"\n  }\n",
+    );
+    let emitted = redirect_controller(&app);
+    assert!(emitted.contains("def grid_operator_claims"), "multiline redirect; got:\n{emitted}");
+    assert!(emitted.contains("claim_analysis"), "present? path; got:\n{emitted}");
+    assert!(emitted.contains("status: :moved_permanently"), "status 301; got:\n{emitted}");
+}
+
+#[test]
 fn a_block_that_builds_a_string_is_served() {
     let app = app_with(
         "  get \"/reports\", to: \"reports#index\"\n  get \"/old\", to: redirect(status: 301) { |params, request| request.query_string.empty? ? \"/reports\" : \"/reports?#{request.query_string}\" }\n  get \"/older\", to: redirect { |_| \"/reports\" }\n  get \"/one\", to: redirect { |params| \"/reports/#{params[:id]}\" }\n  get \"/claim\", to: redirect(status: 301) { |_, request| qs = request.query_string; qs.present? ? \"/claim_analysis?#{qs}\" : \"/claim_analysis\" }\n  get \"/parks\", to: redirect { |params, req| query = req.query_string.empty? ? \"\" : \"?#{req.query_string}\"; \"/solar_parks/#{params[:solar_park_slug]}#{query}\" }\n  get \"/not_a_string\", to: redirect(status: 301) { |_, request| request.user }\n",

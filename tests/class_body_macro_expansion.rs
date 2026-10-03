@@ -611,6 +611,36 @@ end
         })),
         "a writer with a reader still stores the call"
     );
+    let inherited = r#"
+class DashboardsController < InertiaController
+  include HasPeriodParams
+  period_config default_mode: :month, valid_granularities: %w[daily], default_granularity: "daily", max_future_days: 0, clamp_range_to_first_date: true
+  def show
+  end
+end
+"#;
+    let inherited_tree = [
+        ("app/controllers/concerns/has_period_params.rb", paired),
+        ("app/controllers/inertia_controller.rb", "class InertiaController < ActionController::Base\nend\n"),
+        ("app/controllers/dashboards_controller.rb", inherited),
+    ]
+    .into_iter()
+    .map(|(path, source)| (path.into(), source.as_bytes().to_vec()))
+    .collect();
+    survey::activate();
+    let inherited_app = ingest_app_from_tree(inherited_tree).expect("unparenthesized inherited call");
+    let inherited_gaps = survey::drain();
+    assert!(
+        !inherited_gaps.iter().any(|gap| gap.to_string().contains("not recognized") && gap.to_string().contains("period_config")),
+        "{inherited_gaps:?}"
+    );
+    assert!(
+        inherited_app.controllers.iter().any(|controller| controller.name.0.as_str() == "DashboardsController" && controller.body.iter().any(|item| {
+            matches!(item, ControllerBodyItem::ClassIvarInit { .. })
+        })),
+        "unparenthesized call on a subclass must store: {:?}",
+        inherited_app.controllers.iter().find(|c| c.name.0.as_str() == "DashboardsController").map(|c| c.body.iter().map(|item| format!("{item:?}")).collect::<Vec<_>>())
+    );
 }
 
 #[test]
