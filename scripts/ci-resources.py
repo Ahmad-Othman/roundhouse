@@ -52,11 +52,24 @@ def sample(start, previous_cpu):
     }, current_cpu
 
 
+DEPS_SAMPLE_INTERVAL_S = 60
+
+
+def cargo_debug_root():
+    # Match the unit job's default layout. Custom CARGO_TARGET_DIR is rare in CI.
+    root = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+    return root / "debug"
+
+
 def cargo_dir_bytes(name):
-    path = Path("target/debug") / name
+    path = cargo_debug_root() / name
     if not path.is_dir():
         return None
-    size = subprocess.check_output(["du", "-s", "-B1", str(path)], text=True)
+    try:
+        size = subprocess.check_output(["du", "-s", "-B1", str(path)], text=True)
+    except (OSError, subprocess.CalledProcessError):
+        # Reclaim can unlink entries while du walks; skip this sample.
+        return None
     return int(size.split()[0])
 
 
@@ -67,9 +80,10 @@ def collect(child, out, start):
     # Peak deps during the phase: batch reclaim makes end size unrepresentative.
     # Full `du` on multi-GiB deps is expensive — sample about once a minute.
     deps_samples = []
-    deps_tick = 0
+    next_deps_sample = 0.0
     if (size := cargo_dir_bytes("deps")) is not None:
         deps_samples.append(size)
+        next_deps_sample = DEPS_SAMPLE_INTERVAL_S
     with out.with_suffix(".csv").open("w") as output:
         writer = csv.DictWriter(output, fieldnames=row.keys())
         writer.writeheader()
@@ -84,10 +98,10 @@ def collect(child, out, start):
             rows.append(row)
             writer.writerow(row)
             output.flush()
-            deps_tick += 1
-            if status is not None or deps_tick % 12 == 0:
+            if status is not None or row["elapsed_s"] >= next_deps_sample:
                 if (size := cargo_dir_bytes("deps")) is not None:
                     deps_samples.append(size)
+                next_deps_sample = row["elapsed_s"] + DEPS_SAMPLE_INTERVAL_S
             if status is not None:
                 break
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)

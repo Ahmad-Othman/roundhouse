@@ -460,7 +460,8 @@ jobs:
     timeout-minutes: 30
     env:
       # Share first-party split DWARF instead of copying it into every test
-      # executable. Keep sidecars until all tests finish; code stays unoptimized.
+      # executable. Integration sidecars are freed with their finished batch;
+      # shared library/bin sidecars stay. Code stays unoptimized.
       # Test-profile-only, Linux-job-only: dev, release and other hosts unchanged.
       CARGO_PROFILE_TEST_SPLIT_DEBUGINFO: unpacked
     steps:

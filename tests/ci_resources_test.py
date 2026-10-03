@@ -64,6 +64,8 @@ class ResourcesTests(unittest.TestCase):
             self.assertEqual(report["disk_used_end_bytes"], 60)
             self.assertEqual(report["disk_used_peak_bytes"], 90)
             self.assertEqual(report["wall_s"], 6)
+            self.assertEqual(report["cargo_artifacts_bytes"]["deps"], 4096)
+            self.assertEqual(report["cargo_artifacts_bytes"]["deps_peak"], 4096)
             with out.with_suffix(".csv").open() as stream:
                 self.assertEqual(len(list(csv.DictReader(stream))), 3)
 
@@ -119,7 +121,13 @@ class ResourcesTests(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, expected, result.stderr)
                     self.assertIn("child-completed", result.stdout)
-                    self.assertIn("Resource measurement unavailable", result.stderr)
+                    if failure == "du":
+                        # Transient du failures skip a sample; the report still lands.
+                        report = json.loads(out.with_suffix(".json").read_text())
+                        self.assertEqual(report["exit_code"], expected)
+                        self.assertEqual(report["cargo_artifacts_bytes"], {})
+                    else:
+                        self.assertIn("Resource measurement unavailable", result.stderr)
 
 
 if __name__ == "__main__":

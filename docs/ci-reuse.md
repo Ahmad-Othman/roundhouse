@@ -12,9 +12,10 @@
   comparison including its model/database differential.
 
 The unit job runs `scripts/ci-unit-tests.py`: library and package binaries first,
-then integration targets in bounded Cargo batches (default 20). Each batch is
-still `cargo test --locked --test …` for build and execution — identities,
-failure propagation, and local `cargo test --test NAME` selection stay intact.
+then integration targets in bounded Cargo batches (default 20; override with
+`--batch-size` or `ROUNDHOUSE_UNIT_BATCH_SIZE`). Each batch is still
+`cargo test --locked --test …` for build and execution — identities, failure
+propagation, and local `cargo test --test NAME` selection stay intact.
 After a successful integration batch, only that batch's integration executables
 and their own unpacked split-DWARF sidecars are deleted. Shared libraries,
 package binaries (including `CARGO_BIN_EXE` helpers), fingerprints, and
