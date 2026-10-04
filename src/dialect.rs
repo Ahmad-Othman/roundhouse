@@ -339,6 +339,10 @@ pub enum Association {
         name: Symbol,
         target: ClassId,
         foreign_key: Symbol,
+        /// Written as `foreign_key:` rather than defaulted from the
+        /// owner. A Concern splice rehomes only a defaulted key.
+        #[serde(default, skip_serializing_if = "is_false")]
+        foreign_key_explicit: bool,
         through: Option<Symbol>,
         dependent: Dependent,
         /// `has_many :notifications, as: :notifiable` — this side is
@@ -370,6 +374,9 @@ pub enum Association {
         name: Symbol,
         target: ClassId,
         foreign_key: Symbol,
+        /// See `HasMany::foreign_key_explicit`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        foreign_key_explicit: bool,
         dependent: Dependent,
         /// See `HasMany::as_interface`.
         #[serde(default, skip_serializing_if = "Option::is_none")]

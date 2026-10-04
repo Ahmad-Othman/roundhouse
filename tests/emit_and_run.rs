@@ -4227,3 +4227,36 @@ raise "explicit singular inverse read" unless article.last_notification.owner_ti
         )
         .assert_passes();
 }
+
+/// An explicit `foreign_key:` is the key, even when its name matches
+/// the Concern-derived default. Only a defaulted key is rehomed.
+#[test]
+fn an_explicit_key_named_like_its_concern_is_kept() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "  create_table \"comments\", force: :cascade do |t|",
+            "  create_table \"remarks\", force: :cascade do |t|\n    t.integer \"remarkable_id\"\n    t.string \"body\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|",
+        )
+        .write(
+            "app/models/remark.rb",
+            "class Remark < ApplicationRecord\n  belongs_to :article, foreign_key: :remarkable_id\nend\n",
+        )
+        .write(
+            "app/models/concerns/remarkable.rb",
+            "module Remarkable\n  extend ActiveSupport::Concern\n  included do\n    has_many :remarks, foreign_key: :remarkable_id\n    has_one :first_remark, class_name: \"Remark\", foreign_key: :remarkable_id\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Remarkable\n",
+        )
+        .run_ruby(
+            r#"article = Article.create!(title: "Owner", body: "Body text here")
+Remark.create!(remarkable_id: article.id, body: "hi")
+raise "inverse read" unless article.remarks.count == 1
+raise "singular inverse read" unless article.first_remark.body == "hi"
+"#,
+        )
+        .assert_passes();
+}
