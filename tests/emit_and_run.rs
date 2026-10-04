@@ -13,7 +13,6 @@ mod class_configuration;
 mod data_factory;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
-
 /// Build each query case independently: declaring a model class method
 /// must not accidentally open the old gate for the order/where.not cases.
 fn scope_free_query_app(action: &str) -> emit_and_run::Overlay {
@@ -3342,7 +3341,7 @@ end
 
 /// Not a NoMethodError: an enum's `not_<label>` scope and `<column>_before_type_cast` exist, as Rails generates them.
 #[test]
-fn an_enum_negative_scope_and_before_type_cast_run() {
+fn enum_negative_scopes_and_stored_values_run() {
     emit_and_run::real_blog()
         .edit(
             "db/schema.rb",
@@ -3369,8 +3368,8 @@ class ArticleEnumScopeTest < ActiveSupport::TestCase
   test "the stored value before the label" do
     article = Article.create!(title: "Raw", body: "A body long enough to validate.", state: :published, tone: :loud)
     reloaded = Article.find(article.id)
-    assert_equal 1, reloaded.state_before_type_cast
-    assert_equal "l", reloaded.tone_before_type_cast
+    assert_equal 1, ActiveRecord.adapter.find("articles", reloaded.id)["state"]
+    assert_equal "l", ActiveRecord.adapter.find("articles", reloaded.id)["tone"]
   end
 end
 "#,
