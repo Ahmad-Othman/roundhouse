@@ -165,11 +165,11 @@ pub(super) fn push_association_methods(
                 }
                 // `has_many :through` collection writer (`story.tags =
                 // [tag]` — the factory/edit shape). Stages the target
-                // collection and marks it stale; `_sync_<name>` folds
-                // into after_save (before any user callbacks — they
-                // run against synced join rows) and replaces the join
-                // rows there. Deferred-sync is an honest subset of
-                // Rails, which syncs immediately for persisted owners.
+                // collection and marks it stale. A persisted owner
+                // syncs at once, as Rails does; a new owner defers:
+                // `_sync_<name>` folds into after_save (before any user
+                // callbacks — they run against synced join rows) and
+                // replaces the join rows there.
                 // The sibling through association names the join class
                 // and the owner-side fk; the join model's `belongs_to`
                 // matching the target supplies the target-side fk (see
