@@ -3868,6 +3868,69 @@ puts "ok"
         .assert_passes();
 }
 
+/// A Stimulus `data:` hash has `controller:` and `action:` keys, as
+/// `url_for` options do. Before, the lowerer read it as `url_for`
+/// options and wrote a route helper named after its keys. A dashed key
+/// made that name a syntax error, and the app did not load.
+#[test]
+fn a_stimulus_data_hash_on_link_to_renders_its_data_attributes() {
+    a_stimulus_data_hash_renders(
+        r#"<%= link_to "Open", articles_path, data: { controller: "menu", action: "menu#open", "menu-id-value": 1 } %>"#,
+        &[r#"href="/articles""#, ">Open</a>"],
+    );
+}
+
+/// `form_with` takes the `data:` hash for its `<form>` in `html:`, one
+/// level deeper.
+#[test]
+fn a_stimulus_data_hash_in_form_with_html_options_renders_its_data_attributes() {
+    a_stimulus_data_hash_renders(
+        r#"<%= form_with url: articles_path, html: { data: { controller: "menu", action: "menu#open", "menu-id-value": 1 } } do |f| %><%= f.submit "Go" %><% end %>"#,
+        &[r#"action="/articles""#, r#"value="Go""#],
+    );
+}
+
+/// A `data:` hash that a local holds is not a literal at the call.
+#[test]
+fn a_stimulus_data_hash_in_a_local_renders_its_data_attributes() {
+    a_stimulus_data_hash_renders(
+        r#"<% d = { controller: "menu", action: "menu#open", "menu-id-value": 1 } %><%= link_to "Open", articles_path, data: d %>"#,
+        &[r#"href="/articles""#, ">Open</a>"],
+    );
+}
+
+/// A `data:` hash with a `.merge` on it is a call, not a Hash literal.
+#[test]
+fn a_merged_stimulus_data_hash_renders_its_data_attributes() {
+    a_stimulus_data_hash_renders(
+        r#"<%= link_to "Open", articles_path, data: { controller: "menu", action: "menu#open", "menu-id-value": 1 }.merge(turbo: false) %>"#,
+        &[r#"href="/articles""#, r#"data-turbo="false""#, ">Open</a>"],
+    );
+}
+
+/// Renders `erb` as a partial, and expects the Stimulus attributes and
+/// each of `parts` in the HTML.
+fn a_stimulus_data_hash_renders(erb: &str, parts: &[&str]) {
+    let stimulus = [r#"data-controller="menu""#, r#"data-action="menu#open""#, r#"data-menu-id-value="1""#];
+    let expected: Vec<String> = stimulus
+        .iter()
+        .chain(parts)
+        .map(|p| format!("{p:?}"))
+        .collect();
+    emit_and_run::real_blog()
+        .write("app/views/articles/_menu.html.erb", erb)
+        .run_ruby(&format!(
+            r#"html = Views::Articles.menu(nil)
+[{}].each do |part|
+  raise "missing #{{part}}: #{{html}}" unless html.include?(part)
+end
+puts "ok"
+"#,
+            expected.join(", ")
+        ))
+        .assert_passes();
+}
+
 /// `t.integer …, limit: 8` is a `bigint` now (the width Rails creates),
 /// where it was an `integer`. On SQLite both are INTEGER and both type
 /// as `Integer`, so the emitted program must keep a value past 32 bits
