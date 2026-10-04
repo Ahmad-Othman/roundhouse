@@ -334,13 +334,16 @@ module Tep
           fs = Sock.sphttp_filesize(res.file_path)
           head << "Content-Length: " + fs.to_s + "\r\n\r\n"
           Sock.sphttp_write_str(client, head)
-          Sock.sphttp_sendfile(client, res.file_path)
+          Sock.sphttp_sendfile(client, res.file_path) unless req.verb == "HEAD"
         else
           # BYTES, both times: `length` counts characters, and
           # `write_str` crosses the FFI as a NUL-terminated C string.
           head << "Content-Length: " + res.body.bytesize.to_s + "\r\n\r\n"
           Sock.sphttp_write_str(client, head)
-          if res.body.bytesize > 0
+          # HEAD: the headers GET would send, Content-Length included, and
+          # no body (RFC 9110 9.3.2). A body here would be read by the
+          # client as the start of the NEXT response on a keep-alive socket.
+          if res.body.bytesize > 0 && req.verb != "HEAD"
             Sock.sphttp_write_bytes(client, res.body, res.body.bytesize)
           end
         end
