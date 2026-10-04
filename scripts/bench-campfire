@@ -10,7 +10,8 @@
 #
 # Usage:  scripts/bench-campfire [options] [LANE ...]
 #
-#   LANE ∈ { rails | ruby | spinel | rails-1p | ruby-1p | spinel-1p |
+#   LANE ∈ { rails | ruby | spinel | rust | go | elixir |
+#            rails-1p | ruby-1p | spinel-1p |
 #            jruby | truffleruby | rails-truffleruby |
 #            rails-nocache | rails-nocache-1p }
 #          (default: rails ruby spinel rails-1p ruby-1p spinel-1p
@@ -153,6 +154,21 @@
 #   --runs N          repeated runs per cell (default 3)
 #   --endpoint PATH   URL to bench, repeatable. Default: /rooms/1 and
 #                     /rooms/1/messages, the two pages the app exists for.
+#                     Prefix POST: for a write (see --dhh-http).
+#   --gzip            send Accept-Encoding: gzip, matching DHH's public-
+#                     server comparison (once-campfire-rust bench/loadgen
+#                     default). Off by default: wrk historically sent no
+#                     encoding header, and the emit does not gzip yet
+#                     (docs/pipeline/runtime.md — campfire's config.ru
+#                     Rack::Deflater is not applied). A gzip run against
+#                     the emit is still a valid comparison: it measures
+#                     what the lane actually serves.
+#   --dhh-http        time DHH's five HTTP workloads (tweet table, 2026-10-04):
+#                     room page, messages?before=, sidebar, searches?q=coffee,
+#                     POST a message into a second room so the measured
+#                     room stays put. Replaces the default two GETs unless
+#                     --endpoint was also given. Resolved against the
+#                     seeded sqlite after prepare.
 #   --port N          base port (default 4300; lanes get N, N+1, …)
 #   --out DIR         results dir (default bench/results/campfire-<stamp>)
 #   --users N / --rooms N / --messages N   seed size, passed to
@@ -174,6 +190,12 @@
 #   --skip-prepare    reuse the oracle tree, emit and spinel binary
 #                     already on disk
 #   --keep            leave servers running on exit
+#
+# DHH HTTP (once-campfire-elixir bench/results/ruby-elixir-go-rust-20261004):
+# production public server, gzip, 16 concurrent clients, signed in, the
+# five routes above. This harness is the native (non-Docker) cousin of
+# that suite for the Roundhouse ruby and spinel lanes. It does not pin
+# four cores or run the Elixir/Go/Rust images.
 #
 # WHY 16 CONNECTIONS AND NOT 64. A campfire room page is ~400 KB and
 # takes single-digit milliseconds to build; at 64 connections against one
@@ -214,6 +236,26 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO_ROOT/scripts/lib/spinel-link-path.sh"   # spinel_link_path: jemalloc's -L on a mac
+# A local spinel checkout (AGENTS.md: ~/git/spinel) is enough; CI puts
+# the same binaries on PATH. Prepend so `command -v spin` / `spinel` work
+# without a profile.
+if [[ -x "$HOME/git/spinel/bin/spinel" ]]; then
+    PATH="$HOME/git/spinel/bin:$PATH"
+fi
+# Campfire's Gemfile tracks a current 3.4; prefer the CI MRI if present.
+if [[ -x "$HOME/.local/share/mise/installs/ruby/3.4.11/bin/ruby" ]]; then
+    PATH="$HOME/.local/share/mise/installs/ruby/3.4.11/bin:$PATH"
+fi
+if [[ -x "$HOME/.local/share/mise/installs/go/1.27.1/bin/go" ]]; then
+    PATH="$HOME/.local/share/mise/installs/go/1.27.1/bin:$PATH"
+fi
+if [[ -x "$HOME/.local/share/mise/installs/erlang/28.3/bin/erl" ]]; then
+    PATH="$HOME/.local/share/mise/installs/erlang/28.3/bin:$PATH"
+fi
+if [[ -x "$HOME/.local/share/mise/installs/elixir/1.19.5-otp-28/bin/elixir" ]]; then
+    PATH="$HOME/.local/share/mise/installs/elixir/1.19.5-otp-28/bin:$PATH"
+fi
+export PATH
 cd "$REPO_ROOT"
 
 ORIG_ARGS=("$@")
@@ -235,12 +277,16 @@ MESSAGES=100
 SKIP_PREPARE=0
 KEEP=0
 SOCKETS=1
+SOCKETS_SET=0
 SOCKET_SIZES="1000"
 SOCKET_CPUS="0-3"
 SOCKET_DB=""
 SOCKET_COOKIES=""
 SOCKET_PER_ROOM=50
 APP="$HOME/git/once-campfire"
+GZIP=0
+DHH_HTTP=0
+USER_ENDPOINTS=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -251,15 +297,17 @@ while [[ $# -gt 0 ]]; do
         --connections) CONNECTIONS="$2"; shift 2 ;;
         --wrk-threads) WRK_THREADS="$2"; shift 2 ;;
         --runs)        RUNS="$2"; shift 2 ;;
-        --endpoint)    ENDPOINTS+=("$2"); shift 2 ;;
+        --endpoint)    ENDPOINTS+=("$2"); USER_ENDPOINTS=1; shift 2 ;;
+        --gzip)        GZIP=1; shift ;;
+        --dhh-http)    DHH_HTTP=1; shift ;;
         --port)        BASE_PORT="$2"; shift 2 ;;
         --out)         OUT_DIR="$2"; shift 2 ;;
         --users)       USERS="$2"; shift 2 ;;
         --rooms)       ROOMS="$2"; shift 2 ;;
         --messages)    MESSAGES="$2"; shift 2 ;;
         --app)         APP="$2"; shift 2 ;;
-        --sockets)     SOCKETS=1; shift ;;
-        --no-sockets)  SOCKETS=0; shift ;;
+        --sockets)     SOCKETS=1; SOCKETS_SET=1; shift ;;
+        --no-sockets)  SOCKETS=0; SOCKETS_SET=1; shift ;;
         --socket-sizes) SOCKET_SIZES="$2"; shift 2 ;;
         --socket-cpus)  SOCKET_CPUS="$2"; shift 2 ;;
         --socket-db)    SOCKET_DB="$2"; shift 2 ;;
@@ -267,14 +315,16 @@ while [[ $# -gt 0 ]]; do
         --socket-per-room) SOCKET_PER_ROOM="$2"; shift 2 ;;
         --skip-prepare) SKIP_PREPARE=1; shift ;;
         --keep)        KEEP=1; shift ;;
-        -h|--help)     sed -n '2,107p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        rails|rails-nocache|ruby|spinel|rails-1p|rails-nocache-1p|ruby-1p|spinel-1p|jruby|truffleruby|rails-truffleruby) LANES+=("$1"); shift ;;
+        -h|--help)     sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d;s/^# \{0,1\}//'; exit 0 ;;
+        rails|rails-nocache|ruby|spinel|rust|go|elixir|rails-1p|rails-nocache-1p|ruby-1p|spinel-1p|jruby|truffleruby|rails-truffleruby) LANES+=("$1"); shift ;;
         *) echo "bench-campfire: unknown argument $1" >&2; exit 2 ;;
     esac
 done
 
 (( ${#LANES[@]} )) || LANES=(rails ruby spinel rails-1p ruby-1p spinel-1p jruby truffleruby rails-truffleruby)
 (( ${#ENDPOINTS[@]} )) || ENDPOINTS=(/rooms/1 /rooms/1/messages)
+GET_LUA="$REPO_ROOT/scripts/bench-campfire-wrk-get.lua"
+POST_LUA="$REPO_ROOT/scripts/bench-campfire-wrk-post.lua"
 [[ -n "$OUT_DIR" ]] || OUT_DIR="$REPO_ROOT/bench/results/campfire-$(date +%Y%m%d-%H%M%S)"
 
 ORACLE="$REPO_ROOT/build/campfire-oracle"
@@ -293,6 +343,14 @@ RAILS_TR_HEAP="2g"
 # value works — but it has to be the SAME one the cable sweep uses, or a
 # pre-minted cookie file cannot be shared between the two harnesses.
 SPINEL_SECRET="${SECRET_KEY_BASE:-campfire-oracle-benchmark-secret-not-a-deployment}"
+# The three Basecamp ports, built natively on this box. Override the
+# roots if the checkouts live somewhere else; missing binaries drop the
+# lane rather than aborting the run.
+RUST_ROOT="${RUST_ROOT:-$HOME/git/once-campfire-rust}"
+GO_ROOT="${GO_ROOT:-$HOME/git/once-campfire-go}"
+ELIXIR_ROOT="${ELIXIR_ROOT:-$HOME/git/once-campfire-elixir}"
+RUST_BIN="${RUST_BIN:-$RUST_ROOT/target/release/campfire}"
+GO_BIN="${GO_BIN:-$GO_ROOT/campfire}"
 # ABSOLUTE, IMMEDIATELY. Every path derived from here is handed to a
 # script that `cd`s — the oracle into its own tree, the cable sweep into
 # the server's — and a relative one then resolves against THAT directory.
@@ -362,6 +420,7 @@ step() { printf '\033[36m→\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
 fail() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
 die()  { fail "$*"; exit 1; }
+[[ -f "$GET_LUA" && -f "$POST_LUA" ]] || die "missing wrk lua scripts next to bench-campfire"
 
 command -v wrk >/dev/null || die "wrk not on PATH"
 
@@ -645,6 +704,21 @@ if wants_lane truffleruby; then
     fi
 fi
 
+if wants_lane rust && [[ ! -x "$RUST_BIN" ]]; then
+    fail "no rust campfire binary at $RUST_BIN — dropping the rust lane"
+    drop_lane rust build "once-campfire-rust binary not built (cargo build --release -p campfire)"
+fi
+if wants_lane go && [[ ! -x "$GO_BIN" ]]; then
+    fail "no go campfire binary at $GO_BIN — dropping the go lane"
+    drop_lane go build "once-campfire-go binary not built (bin/build)"
+fi
+if wants_lane elixir; then
+    if ! command -v mix >/dev/null 2>&1 || [[ ! -d "$ELIXIR_ROOT" ]]; then
+        fail "mix or $ELIXIR_ROOT missing — dropping the elixir lane"
+        drop_lane elixir build "once-campfire-elixir is not ready (mix + checkout)"
+    fi
+fi
+
 if wants_lane rails-truffleruby; then
     if ! command -v truffleruby >/dev/null 2>&1; then
         fail "truffleruby not on PATH — dropping the rails-truffleruby lane"
@@ -681,6 +755,120 @@ if [[ -d "$JRUBY_EMIT" ]]; then
     cp "$ORACLE/storage/db/production.sqlite3" "$JRUBY_EMIT/storage/development.sqlite3"
     rm -f "$JRUBY_EMIT/storage/development.sqlite3-wal" "$JRUBY_EMIT/storage/development.sqlite3-shm"
 fi
+
+# DHH's five HTTP workloads, resolved against THIS seed. Writes go to a
+# second room so the measured room page stays the same size across POST
+# cells, matching once-campfire-rust/bench/run (watercooler vs hq).
+SEED_DB="$ORACLE/storage/db/production.sqlite3"
+resolve_dhh_http() {
+    local db="$1"
+    [[ -f "$db" ]] || die "no seed database at $db"
+    python3 - "$db" <<'PY'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+rooms = [r[0] for r in db.execute("select id from rooms order by id")]
+if not rooms:
+    sys.exit("no rooms in seed")
+room = rooms[0]
+write_room = rooms[1] if len(rooms) > 1 else rooms[0]
+n = db.execute("select count(*) from messages where room_id=?", (room,)).fetchone()[0]
+# Mid-history page, same idea as loadgen's messages.busy_060.
+off = max(n // 2, 1)
+row = db.execute(
+    "select id from messages where room_id=? order by created_at, id limit 1 offset ?",
+    (room, off - 1),
+).fetchone()
+if not row:
+    row = db.execute(
+        "select id from messages where room_id=? order by id", (room,)
+    ).fetchone()
+before_id = row[0] if row else 1
+print(f"/rooms/{room}")
+print(f"/rooms/{room}/messages?before={before_id}")
+print("/users/me/sidebar")
+print("/searches?q=coffee")
+print(f"POST:/rooms/{write_room}/messages")
+PY
+}
+
+if (( DHH_HTTP )); then
+    if (( USER_ENDPOINTS == 0 )); then
+        local_routes="$(resolve_dhh_http "$SEED_DB")" || die "could not resolve DHH HTTP routes from $SEED_DB"
+        mapfile -t ENDPOINTS <<< "$local_routes"
+        (( ${#ENDPOINTS[@]} >= 5 )) || die "DHH HTTP resolution returned ${#ENDPOINTS[@]} routes: ${ENDPOINTS[*]}"
+    fi
+    # The tweet table is HTTP only. Cable stays behind --sockets.
+    if (( SOCKETS_SET == 0 )); then
+        SOCKETS=0
+    fi
+    step "DHH HTTP routes: ${ENDPOINTS[*]}"
+fi
+
+ep_is_post() { [[ "$1" == POST:* ]]; }
+ep_path() {
+    local ep="$1"
+    if ep_is_post "$ep"; then echo "${ep#POST:}"; else echo "$ep"; fi
+}
+ep_parity_name() { echo "$1" | tr '/:?=&' '______'; }
+
+# Copy the oracle seed into every emit tree. POST cells write; without a
+# restage the next lane would time a different database.
+stage_seeded_db() {
+    [[ -f "$SEED_DB" ]] || die "no seeded production DB at $ORACLE"
+    mkdir -p "$EMIT/storage"
+    cp "$SEED_DB" "$EMIT/storage/development.sqlite3"
+    rm -f "$EMIT/storage/development.sqlite3-wal" "$EMIT/storage/development.sqlite3-shm"
+    if [[ -d "$SP_EMIT" ]]; then
+        mkdir -p "$SP_EMIT/storage"
+        cp "$SEED_DB" "$SP_EMIT/storage/development.sqlite3"
+        rm -f "$SP_EMIT/storage/development.sqlite3-wal" "$SP_EMIT/storage/development.sqlite3-shm"
+    fi
+    if [[ -d "$JRUBY_EMIT" ]]; then
+        mkdir -p "$JRUBY_EMIT/storage"
+        cp "$SEED_DB" "$JRUBY_EMIT/storage/development.sqlite3"
+        rm -f "$JRUBY_EMIT/storage/development.sqlite3-wal" "$JRUBY_EMIT/storage/development.sqlite3-shm"
+    fi
+    if [[ -d "$RUST_ROOT" ]]; then
+        mkdir -p "$RUST_ROOT/storage/db"
+        cp "$SEED_DB" "$RUST_ROOT/storage/db/production.sqlite3"
+        rm -f "$RUST_ROOT/storage/db/production.sqlite3-wal" "$RUST_ROOT/storage/db/production.sqlite3-shm"
+    fi
+    if [[ -d "$GO_ROOT" ]]; then
+        mkdir -p "$GO_ROOT/storage/db"
+        cp "$SEED_DB" "$GO_ROOT/storage/db/production.sqlite3"
+        rm -f "$GO_ROOT/storage/db/production.sqlite3-wal" "$GO_ROOT/storage/db/production.sqlite3-shm"
+    fi
+    if [[ -d "$ELIXIR_ROOT" ]]; then
+        mkdir -p "$ELIXIR_ROOT/var"
+        cp "$SEED_DB" "$ELIXIR_ROOT/var/production.sqlite3"
+        rm -f "$ELIXIR_ROOT/var/production.sqlite3-wal" "$ELIXIR_ROOT/var/production.sqlite3-shm"
+    fi
+    # Rails oracle serves production.sqlite3 in place. Snapshot it so a
+    # POST lane can be rolled back before the next one boots.
+    cp "$SEED_DB" "$ORACLE/storage/db/production.sqlite3.clean"
+    rm -f "$ORACLE/storage/db/production.sqlite3-wal" "$ORACLE/storage/db/production.sqlite3-shm"
+}
+
+restore_seeded_db() {
+    local clean="$ORACLE/storage/db/production.sqlite3.clean"
+    [[ -f "$clean" ]] || return 0
+    cp "$clean" "$SEED_DB"
+    rm -f "$ORACLE/storage/db/production.sqlite3-wal" "$ORACLE/storage/db/production.sqlite3-shm"
+    stage_seeded_db
+}
+
+csrf_token_from() {
+    local html="$1"
+    python3 - "$html" <<'PY'
+import re, sys
+html = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+m = re.search(r'name="csrf-token" content="([^"]*)"', html) \
+    or re.search(r'name="authenticity_token" value="([^"]*)"', html)
+print(m.group(1) if m else "")
+PY
+}
+
+stage_seeded_db
 
 # ── per-lane lifecycle ───────────────────────────────────────────────
 
@@ -845,6 +1033,49 @@ start_lane() {
                 ./build/bin/blog ) > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
+        rust)
+            # Basecamp's once-campfire-rust: one process, own front server
+            # (gzip, HTTP/1) on HTTP_PORT. DISABLE_SSL so we talk plain
+            # HTTP; TARGET_PORT is the loopback app listener and must not
+            # collide with HTTP_PORT.
+            echo "bin=$RUST_BIN" > "$shape"
+            echo "workers=1 (one process)" >> "$shape"
+            mkdir -p "$RUST_ROOT/storage/db" "$RUST_ROOT/storage/files"
+            cp "$SEED_DB" "$RUST_ROOT/storage/db/production.sqlite3"
+            rm -f "$RUST_ROOT/storage/db/production.sqlite3-wal" "$RUST_ROOT/storage/db/production.sqlite3-shm"
+            ( cd "$RUST_ROOT" && exec env \
+                SECRET_KEY_BASE="$SPINEL_SECRET" SECRET_KEY_BASE_DUMMY=1 \
+                DISABLE_SSL=1 HTTP_PORT="$port" TARGET_PORT="$((port + 2000))" \
+                CAMPFIRE_STORAGE_PATH="$RUST_ROOT/storage" \
+                "$RUST_BIN" server ) > "$log" 2>&1 &
+            SERVER_PID=$!
+            ;;
+        go)
+            echo "bin=$GO_BIN" > "$shape"
+            echo "workers=1 (one process)" >> "$shape"
+            mkdir -p "$GO_ROOT/storage/db" "$GO_ROOT/storage/files"
+            cp "$SEED_DB" "$GO_ROOT/storage/db/production.sqlite3"
+            rm -f "$GO_ROOT/storage/db/production.sqlite3-wal" "$GO_ROOT/storage/db/production.sqlite3-shm"
+            ( cd "$GO_ROOT" && exec env \
+                SECRET_KEY_BASE="$SPINEL_SECRET" \
+                DISABLE_SSL=1 HTTP_PORT="$port" TARGET_PORT="$((port + 2000))" \
+                CAMPFIRE_STORAGE_PATH="$GO_ROOT/storage" \
+                "$GO_BIN" server ) > "$log" 2>&1 &
+            SERVER_PID=$!
+            ;;
+        elixir)
+            echo "root=$ELIXIR_ROOT" > "$shape"
+            echo "workers=BEAM" >> "$shape"
+            mkdir -p "$ELIXIR_ROOT/var"
+            cp "$SEED_DB" "$ELIXIR_ROOT/var/production.sqlite3"
+            rm -f "$ELIXIR_ROOT/var/production.sqlite3-wal" "$ELIXIR_ROOT/var/production.sqlite3-shm"
+            ( cd "$ELIXIR_ROOT" && exec env \
+                SECRET_KEY_BASE="$SPINEL_SECRET" \
+                DATABASE_PATH="$ELIXIR_ROOT/var/production.sqlite3" \
+                PORT="$port" MIX_ENV=prod REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}" \
+                mix run --no-halt ) > "$log" 2>&1 &
+            SERVER_PID=$!
+            ;;
     esac
     LANE_JOBS_PID="$(sed -n 's/^resque-pool=pid //p' "$shape" 2>/dev/null | head -1)"
     # The managed runtimes boot in seconds here too (measured 4-5 s on
@@ -874,10 +1105,11 @@ login_cookie() {
             scripts/campfire-oracle login --out "$ORACLE" --port "$port" --jar "$jar" >/dev/null \
                 || { fail "$lane sign-in failed"; return 1; }
             ;;
-        ruby|ruby-1p|spinel|spinel-1p|jruby|truffleruby)
+        ruby|ruby-1p|spinel|spinel-1p|jruby|truffleruby|elixir)
             # The emitted tree verifies campfire's `protect_from_forgery
             # with: :exception` (09567dd7), so the token comes from the
             # lane's own form, under the session cookie that holds it.
+            # Elixir still renders the meta tag; rust/go do not.
             local token code
             token="$(curl -sS -c "$jar" "http://127.0.0.1:$port/session/new" \
                      | grep -o 'name="authenticity_token" value="[^"]*"' | head -1 \
@@ -890,15 +1122,36 @@ login_cookie() {
                     --data-urlencode "authenticity_token=$token")"
             [[ "$code" == "302" ]] || { fail "$lane sign-in returned $code"; return 1; }
             ;;
+        rust|go)
+            # Header-only forgery protection: no authenticity_token on
+            # the page. Sec-Fetch-Site + Origin (with port) is enough on
+            # plain HTTP; the session cookie still has to be minted by
+            # posting the real form.
+            local code
+            curl -sS -c "$jar" -o /dev/null "http://127.0.0.1:$port/session/new"
+            code="$(curl -sS -b "$jar" -c "$jar" -o /dev/null -w '%{http_code}' \
+                    -X POST "http://127.0.0.1:$port/session" \
+                    -H "Sec-Fetch-Site: same-origin" \
+                    -H "Origin: http://127.0.0.1:$port" \
+                    --data-urlencode "email_address=user1@example.com" \
+                    --data-urlencode "password=secret123456")"
+            [[ "$code" == "302" ]] || { fail "$lane sign-in returned $code"; return 1; }
+            ;;
     esac
     awk '/session_token|_campfire_session/ {printf "%s=%s; ", $6, $7}' "$jar"
 }
 
 parse_wrk() {
-    local out="$1" req_sec p50 p99
+    local out="$1" req_sec p50 p99 non2xx
     req_sec="$(grep -E '^Requests/sec:' "$out" | awk '{print $2}')"
     p50="$(awk '/Latency Distribution/{f=1;next} f && /^[[:space:]]*50%/{print $2; exit}' "$out")"
     p99="$(awk '/Latency Distribution/{f=1;next} f && /^[[:space:]]*99%/{print $2; exit}' "$out")"
+    # A 422 error page is cheap to serve. Counting it as throughput is
+    # how the first DHH POST cells reported ~9k req/s of rejected writes.
+    non2xx="$(grep -E 'Non-2xx or 3xx responses:' "$out" | awk '{print $NF}')"
+    if [[ -n "$non2xx" && "$non2xx" != "0" ]]; then
+        req_sec=null
+    fi
     norm() {
         [[ -z "$1" ]] && { echo null; return; }
         awk -v v="$1" 'BEGIN {
@@ -1028,6 +1281,9 @@ for lane in "${LANES[@]}"; do
         ruby)                shape_note="$(deployed_worker_count) worker(s) x $THREADS threads, jemalloc" ;;
         spinel)              shape_note="one process, workers autodetected" ;;
         spinel-1p)           shape_note="one process, SPINEL_WORKERS=1" ;;
+        rust)                shape_note="once-campfire-rust, one process, own front server" ;;
+        go)                  shape_note="once-campfire-go, one process, own front server" ;;
+        elixir)              shape_note="once-campfire-elixir, Bandit, MIX_ENV=prod" ;;
         jruby)               shape_note="one process x $(jvm_threads) threads (one per hardware thread), heap $JVM_HEAP" ;;
         truffleruby)         shape_note="one process x $THREADS threads (the ruby-1p shape), heap $JVM_HEAP" ;;
         rails-truffleruby)   shape_note="one process x $THREADS threads (the rails-1p shape), heap $RAILS_TR_HEAP, no thruster, no resque-pool" ;;
@@ -1048,6 +1304,18 @@ for lane in "${LANES[@]}"; do
     }
     ok "$lane up and signed in"
 
+    # CSRF for POST cells: DHH's loadgen scrapes the meta tag. Empty is
+    # fine for a GET-only run; a POST cell without a token is a 422 and
+    # is not a measurement of the write path.
+    csrf_html="$LOG_DIR/csrf-$lane.html"
+    curl -s -b "$LOG_DIR/jar-$lane.txt" -o "$csrf_html" "http://127.0.0.1:$port$(ep_path "${ENDPOINTS[0]}")"
+    csrf="$(csrf_token_from "$csrf_html")"
+    csrf_enc="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$csrf")"
+    export BENCH_COOKIE="$cookie"
+    export BENCH_CSRF="$csrf"
+    export BENCH_CSRF_ENC="$csrf_enc"
+    export BENCH_GZIP="$GZIP"
+
     # WARM THE FRAGMENT CACHE for the lanes that have one, deliberately
     # and on the record. The first request to a cached page is 100x the
     # rest (503 ms against 5 ms), and wrk's own warmup would absorb it
@@ -1057,7 +1325,8 @@ for lane in "${LANES[@]}"; do
     case "$lane" in
         rails|rails-1p|rails-truffleruby)
             for ep in "${ENDPOINTS[@]}"; do
-                curl -s -b "$LOG_DIR/jar-$lane.txt" -o /dev/null "http://127.0.0.1:$port$ep"
+                ep_is_post "$ep" && continue
+                curl -s -b "$LOG_DIR/jar-$lane.txt" -o /dev/null "http://127.0.0.1:$port$(ep_path "$ep")"
             done
             ;;
     esac
@@ -1066,10 +1335,12 @@ for lane in "${LANES[@]}"; do
     # saved so `parity.txt` can say what each lane actually rendered. A
     # throughput number for a page that is not the same page is not a
     # comparison, and this is the cheapest possible record of that.
+    # POST cells have no body to tally — they mutate the seed.
     for ep in "${ENDPOINTS[@]}"; do
-        body="$LOG_DIR/body-$lane-$(echo "$ep" | tr '/' '_').html"
+        ep_is_post "$ep" && continue
+        body="$LOG_DIR/body-$lane-$(ep_parity_name "$ep").html"
         code="$(curl -s -b "$LOG_DIR/jar-$lane.txt" -o "$body" -w '%{http_code}' \
-                "http://127.0.0.1:$port$ep")"
+                "http://127.0.0.1:$port$(ep_path "$ep")")"
         tags="$(ruby -e 'print File.read(ARGV[0]).scan(/<([a-zA-Z][-a-zA-Z0-9]*)/).size' "$body")"
         printf '%s\t%s\tstatus=%s\ttags=%s\tbytes=%s\n' \
             "$lane" "$ep" "$code" "$tags" "$(wc -c < "$body" | tr -d ' ')" \
@@ -1088,14 +1359,24 @@ for lane in "${LANES[@]}"; do
         truffleruby)       (( warm < 120 )) && warm=120 ;;
         rails-truffleruby) (( warm < 240 )) && warm=240 ;;
     esac
+    wrote=0
+    gzip_note=""
+    (( GZIP )) && gzip_note=", gzip"
     for ep in "${ENDPOINTS[@]}"; do
-        url="http://127.0.0.1:$port$ep"
+        path="$(ep_path "$ep")"
+        url="http://127.0.0.1:$port$path"
+        if ep_is_post "$ep"; then
+            wrk_script=("$POST_LUA")
+            wrote=1
+        else
+            wrk_script=("$GET_LUA")
+        fi
         for run in $(seq 1 "$RUNS"); do
-            step "measure $lane $ep run=$run/$RUNS (warmup ${warm}s)"
+            step "measure $lane $ep run=$run/$RUNS (warmup ${warm}s${gzip_note})"
             wrk -t"$WRK_THREADS" -c"$CONNECTIONS" -d"${warm}s" \
-                -H "Cookie: $cookie" "$url" >/dev/null 2>&1 || true
-            wrk_out="$LOG_DIR/wrk-$lane-$(echo "$ep" | tr '/' '_')-$run.txt"
-            rss_out="$LOG_DIR/rss-$lane-$(echo "$ep" | tr '/' '_')-$run.txt"
+                -s "${wrk_script[0]}" "$url" >/dev/null 2>&1 || true
+            wrk_out="$LOG_DIR/wrk-$lane-$(ep_parity_name "$ep")-$run.txt"
+            rss_out="$LOG_DIR/rss-$lane-$(ep_parity_name "$ep")-$run.txt"
             : > "$rss_out"
             # Two columns per sample: RSS sum, then PSS sum (empty
             # where the kernel has no smaps_rollup).
@@ -1105,7 +1386,7 @@ for lane in "${LANES[@]}"; do
               done ) &
             rss_pid=$!
             wrk -t"$WRK_THREADS" -c"$CONNECTIONS" -d"${DURATION}s" --latency \
-                -H "Cookie: $cookie" "$url" > "$wrk_out" 2>&1 || true
+                -s "${wrk_script[0]}" "$url" > "$wrk_out" 2>&1 || true
             kill "$rss_pid" 2>/dev/null || true
             wait "$rss_pid" 2>/dev/null || true
             rss="$(awk '{print $1}' "$rss_out" | sort -n | awk '{a[NR]=$1} END {print NR ? a[int((NR+1)/2)] : 0}')"
@@ -1126,15 +1407,22 @@ for lane in "${LANES[@]}"; do
     done
 
     stop_lane "$port"
+    if (( wrote )); then
+        step "restaging the seed after $lane writes"
+        restore_seeded_db
+    fi
 
     # Cold start, after the load and with this lane's jar in hand. Redis
     # is NOT flushed between reps, deliberately: restarting a campfire
     # container does not empty the cache its own Procfile keeps in a
     # separate process, so a warm Redis is what their restart actually
     # sees. Rep 1 still pays a cold render for anything the load did not
-    # touch.
-    step "cold start $lane (3 boots)"
-    cold_start "$lane" "$port" "$LOG_DIR/jar-$lane.txt" 3
+    # touch. Skipped on --dhh-http: that flag is the tweet's HTTP table,
+    # not a second copy of the cold-start section.
+    if (( DHH_HTTP == 0 )); then
+        step "cold start $lane (3 boots)"
+        cold_start "$lane" "$port" "$LOG_DIR/jar-$lane.txt" 3
+    fi
 
     port=$(( port + 1 ))
 done
