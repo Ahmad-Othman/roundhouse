@@ -704,6 +704,13 @@ pub fn apply_post_analyze_lowerings(
     // leave here: the type checker and the IDE have seen them; no
     // lowering or emitter should.
     app.views.retain(|v| !v.analysis_only);
+    // Likewise the methods `ingest::graphql_ruby` gave graphql-ruby
+    // classes so inference could type their fields.
+    for gql in &app.graphql_types {
+        if let Some(class) = app.library_classes.iter_mut().find(|c| c.name == gql.class) {
+            class.methods.retain(|m| !gql.synthesized.contains(&m.name));
+        }
+    }
     debug_assert!(
         post_analyze_pass_order_is_sound(),
         "POST_ANALYZE_PASS_ORDER violates a declared runs_after constraint",

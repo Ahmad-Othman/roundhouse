@@ -231,10 +231,11 @@ the second is a bug report roundhouse wants.
 `gradual_untyped` and `unresolved_type` are the coverage ledger: a call
 resolved to an RBS `untyped` (the gradual escape hatch) or to nothing
 at all. There are hundreds on any real app; they are neither errors in
-your code nor, individually, interesting. `missing_preload` is the one
+your code nor, individually, interesting. `missing_preload` is a
 warning that *is* a finding about your app: a static N+1, naming the
 association read inside the loop, the query that built the relation,
-and the `.includes` that fixes it.
+and the `.includes` that fixes it. `graphql_nullable_field` is the
+other (see [graphql-ruby types](#graphql-ruby-types)).
 
 **`note[…] — likely roundhouse coverage, not an app error`** — a
 diagnostic that would have been an error, downgraded because roundhouse
@@ -260,6 +261,36 @@ and those failures are labelled as notes rather than counted as
 errors — so on an app with a long unknown list, the census is the
 first thing to read: it says how much of the error count is even
 reachable today.
+
+## graphql-ruby types
+
+A class descending from `GraphQL::Schema::Object` is read for its
+`field` declarations. Each field gets the value graphql-ruby would
+resolve: the type's own method of that name if it defines one,
+otherwise `object.<name>` (or `object.<method:>`). The class a type's
+`object` holds is inferred from the schema's `query`/`mutation` roots
+down, with nothing written down: a `field :posted_by, UserType,
+method: :user` on a type whose object is a `Link` makes `UserType`'s
+object a `User`. Then `check` reports inside those classes as it
+does inside controllers:
+
+- a field neither the type nor its object can answer is
+  `send_dispatch_failed` at the `field` line (graphql-ruby's "Failed
+  to implement" at request time);
+- a field declared `null: false` whose value can be nil is
+  `warning[graphql_nullable_field]`. A required `belongs_to` counts as
+  non-nil only when its column is NOT NULL *and* a foreign key
+  constrains it: then a stored row's association always loads;
+- a type method's body is checked like an action's.
+
+What is not modeled is skipped, not guessed, and reports nothing:
+field arguments (a field resolving through a method that takes
+parameters, or a resolver/mutation `resolve` that does), connections,
+`hash_key:`/`dig:`, interfaces and unions, and a type nothing reachable
+from a root constructs. A `resolver:`/`mutation:` class is followed
+when its `resolve` takes no arguments, or, for search_object, through
+its `scope { … }` block. The methods this adds are for the analyzer
+only; the transpiled output never contains them.
 
 ## Exit status
 

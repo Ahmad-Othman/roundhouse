@@ -1669,6 +1669,9 @@ end
     if let Err(err) = super::alba::lower_alba_resources(&mut app, &sources) {
         survey::continue_or_fail(err)?;
     }
+    // graphql-ruby object types: analyzer-only field methods, so
+    // inference carries each type's record class down the schema.
+    super::graphql_ruby::lower_graphql_types(&mut app);
     // After it, not before: `Current`'s own `delegate` reads an
     // ATTRIBUTE's ivar, which that pass has the declarations for. What
     // reaches here is the general shape, whose target is a method.
