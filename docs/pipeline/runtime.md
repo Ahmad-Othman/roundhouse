@@ -741,11 +741,28 @@ an already-encoded body, `render plain: v.as_json_str, content_type:
 target; `JsonBuilder` is shared runtime, so the ruby lane runs the very
 writer the compiled lane does. Demand-gated and type-gated: only a class
 the analyzer typed at a `render json:` site is given the pair. A value
-with no writer — a Hash literal, a Relation, a class with its own
+with no writer — a collection containing objects or temporal values, a Relation, a class with its own
 `as_json` (whose pairs `as_json_shape` recognizes but whose computed
 values are not yet typed, see that module) — keeps the runtime
 encoder, CRuby-only and loud elsewhere; the suite ledger's
 `render-json-encoder` rule is the tripwire for it.
+
+Inline Hash/Array payloads whose inferred contents are JSON primitives use
+the target's existing `JSON.generate` encoder, including nested primitive
+collections. The shared `JsonBuilder.escape_html_entities` helper then
+escapes `<`, `>` and `&` to their JSON Unicode forms, matching Rails' default
+HTML-entity escaping without re-escaping the encoded document. Unknown values
+and values requiring Rails `as_json` hooks do not take this path. The generic
+`render_json_primitives` regression runs on CRuby and compiled Spinel, checks
+the exact bytes for `<b>&</b>`, and retains a CRuby nested-Time serialization
+control.
+
+Remaining divergences: non-finite Float values (NaN and positive/negative
+Infinity) still raise `JSON::GeneratorError` instead of Rails' `null` because
+this path delegates primitive encoding to `JSON.generate`. The helper applies
+the Rails 8.1+ defaults: HTML-entity escaping enabled, U+2028/U+2029 escaping
+disabled. Per-application changes to those Rails encoder settings are not
+reflected here.
 
 ### Active Storage: rows and bytes are modeled, variants are a seam
 
