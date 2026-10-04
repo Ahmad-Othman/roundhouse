@@ -221,6 +221,7 @@ class NarrowTest < Minitest::Test
     raise "joined" if m.nil? || m.action != :show
     m = ActionDispatch::Router.match(m.action == :show ? "GET" : "POST", "/lookup/12", TABLE)
     raise "second" if m.nil?
+    raise "ivar" unless @m.nil?
     m ||= ActionDispatch::Router.match("GET", "/lookup/9", TABLE)
   end
 end
@@ -244,6 +245,9 @@ end
     assert!(body.contains("Router.match((m!.action"), "{body}");
     // A compound write ends the narrowing: its operand is the optional, not `m!`.
     assert!(body.contains("m = m ?? "), "{body}");
+    // Narrowing the local `m` proves nothing about `@m`.
+    let ivar_guard = body.lines().take_while(|l| !l.contains("\"ivar\"")).last().unwrap();
+    assert!(!ivar_guard.contains("m!"), "{body}");
 }
 
 // errors + ac_base were the last deferred pair; both are green now and CI

@@ -106,6 +106,9 @@ thread_local! {
     /// nil-guard — reads force-unwrap (Kotlin's `!!` smart-cast
     /// cluster, Swift's `!`).
     static NONNULL_PROPS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// Reassigned locals a terminal nil-guard proved non-nil (`emit_stmts`).
+    /// Not in `NONNULL_PROPS`: an ivar of the same camelCased name was not proven.
+    static NARROWED_LOCALS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     /// Closure-nesting depth — `next` is a closure `return` inside an
     /// iterator block, `continue` in a loop.
     static IN_LAMBDA: RefCell<usize> = const { RefCell::new(0) };
@@ -1257,7 +1260,9 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         ExprNode::Lit { value } => emit_literal(value),
         ExprNode::Var { name, .. } => {
             let n = camel(name.as_str());
-            if NONNULL_PROPS.with(|s| s.borrow().contains(&n)) {
+            if NONNULL_PROPS.with(|s| s.borrow().contains(&n))
+                || NARROWED_LOCALS.with(|s| s.borrow().contains(&n))
+            {
                 format!("{n}!")
             } else {
                 n
@@ -1860,7 +1865,7 @@ pub(super) fn emit_stmts(exprs: &[Expr], returning: bool) -> String {
             if own_write.as_deref() == Some(n.as_str()) {
                 ending.push(n.clone());
             } else {
-                NONNULL_PROPS.with(|s| s.borrow_mut().remove(n));
+                NARROWED_LOCALS.with(|s| s.borrow_mut().remove(n));
             }
             false
         });
@@ -1891,7 +1896,7 @@ pub(super) fn emit_stmts(exprs: &[Expr], returning: bool) -> String {
             }
             if let Some((n, line)) = reassigned_nil_guard(&exprs[i]) {
                 lines.push(line);
-                if NONNULL_PROPS.with(|s| s.borrow_mut().insert(n.clone())) {
+                if NARROWED_LOCALS.with(|s| s.borrow_mut().insert(n.clone())) {
                     narrowed.push(n);
                 }
                 i += 1;
@@ -1903,7 +1908,7 @@ pub(super) fn emit_stmts(exprs: &[Expr], returning: bool) -> String {
         } else {
             lines.push(emit_expr(&exprs[i]));
         }
-        NONNULL_PROPS.with(|s| {
+        NARROWED_LOCALS.with(|s| {
             let mut set = s.borrow_mut();
             for n in &ending {
                 set.remove(n);
@@ -1911,7 +1916,7 @@ pub(super) fn emit_stmts(exprs: &[Expr], returning: bool) -> String {
         });
         i += 1;
     }
-    NONNULL_PROPS.with(|s| {
+    NARROWED_LOCALS.with(|s| {
         let mut set = s.borrow_mut();
         for n in &narrowed {
             set.remove(n);
@@ -1954,11 +1959,21 @@ fn reassigned_nil_guard(stmt: &Expr) -> Option<(String, String)> {
         return None;
     }
     let more = match rest {
-        Some(rhs) => format!(" || ({})", with_nonnull(&[n.clone()], rhs)),
+        Some(rhs) => format!(" || ({})", with_narrowed_local(&n, rhs)),
         None => String::new(),
     };
     let line = format!("if {n} == nil{more} {{\n{}\n}}", indent(&emit_expr(then_branch)));
     Some((n, line))
+}
+
+/// Emit `e` with the local `name` read force-unwrapped.
+fn with_narrowed_local(name: &str, e: &Expr) -> String {
+    let added = NARROWED_LOCALS.with(|s| s.borrow_mut().insert(name.to_string()));
+    let out = emit_expr(e);
+    if added {
+        NARROWED_LOCALS.with(|s| s.borrow_mut().remove(name));
+    }
+    out
 }
 
 /// Does `e` assign the local `name` anywhere (`=` or a compound `op=`)?
