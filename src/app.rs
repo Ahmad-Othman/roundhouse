@@ -290,6 +290,11 @@ pub struct App {
     /// analyzer only; their synthesized methods leave at lowering.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub graphql_types: Vec<crate::dialect::GraphqlObjectType>,
+    /// Signatures `ingest::graphql_ruby` declared in `rbs_signatures`
+    /// (field arguments, input object readers), removed with the
+    /// synthesized methods at lowering.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub graphql_signatures: Vec<(ClassId, Symbol)>,
     /// Provenance for concern METHODS spliced into a controller:
     /// controller → (method name → the module it was cut from).
     /// `splice_concerns_into_controllers` copies a concern's methods
@@ -685,6 +690,7 @@ impl App {
             rails_application: None,
             concern_filters: HashMap::new(),
             graphql_types: Vec::new(),
+            graphql_signatures: Vec::new(),
             concern_spliced_actions: HashMap::new(),
             concern_spliced_class_methods: HashMap::new(),
             concern_model_items: HashMap::new(),

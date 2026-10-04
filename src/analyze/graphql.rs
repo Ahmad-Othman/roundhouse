@@ -46,7 +46,17 @@ pub(super) fn diagnose(app: &App, walk: fn(&Expr, &mut Vec<Diagnostic>)) -> Vec<
             .collect();
         for method in &class.methods {
             let synthesized = gql.synthesized.contains(&method.name);
-            if (gql.resolver && !synthesized) || takes_arguments.contains(&&method.name) {
+            // A modeled resolver's `resolve` is called with its typed
+            // arguments; the rest of its methods (search_object's
+            // `apply_*`) are called by code out of sight.
+            let resolve = gql.resolver
+                && method.name.as_str() == "resolve"
+                && gql
+                    .synthesized
+                    .iter()
+                    .any(|m| m.as_str() == "__gql_resolve");
+            if (gql.resolver && !synthesized && !resolve) || takes_arguments.contains(&&method.name)
+            {
                 continue;
             }
             let mut found = Vec::new();
@@ -166,8 +176,12 @@ fn tail_of(expr: &Expr) -> &Expr {
     }
 }
 
-/// The class variants of `ty`, or empty if any non-nil variant is not
-/// a plain class (an unresolved variable, a union with a scalar).
+/// The class variants of `ty`, or empty if a non-nil variant is a
+/// known non-class (a scalar). An unresolved variant makes no claim
+/// either way and is passed over: a mutation's `resolve` that returns
+/// the record or a `GraphQL::ExecutionError` (a gem class the analyzer
+/// does not type) still wraps only the record, since graphql-ruby
+/// turns the error into an error, not an object.
 fn non_nil_classes(ty: &Ty) -> Vec<&crate::ident::ClassId> {
     let variants: Vec<&Ty> = match ty {
         Ty::Union { variants } => variants.iter().collect(),
@@ -176,7 +190,7 @@ fn non_nil_classes(ty: &Ty) -> Vec<&crate::ident::ClassId> {
     let mut out = Vec::new();
     for v in variants {
         match v {
-            Ty::Nil => {}
+            Ty::Nil | Ty::Var { .. } | Ty::Untyped | Ty::Bottom => {}
             Ty::Class { id, .. } => out.push(id),
             _ => return Vec::new(),
         }
@@ -253,7 +267,10 @@ impl GraphqlCoverage {
                 .collect();
             line.push_str(&format!(", {skipped} skipped ({}", shown.join(", ")));
             if self.skipped.len() > MAX_SHOWN {
-                line.push_str(&format!(", … {} more reasons", self.skipped.len() - MAX_SHOWN));
+                line.push_str(&format!(
+                    ", … {} more reasons",
+                    self.skipped.len() - MAX_SHOWN
+                ));
             }
             line.push(')');
         }
@@ -268,7 +285,10 @@ pub fn coverage(app: &App) -> Option<GraphqlCoverage> {
         return None;
     }
     let classes = class_index(app);
-    let mut out = GraphqlCoverage { types: types.len(), ..Default::default() };
+    let mut out = GraphqlCoverage {
+        types: types.len(),
+        ..Default::default()
+    };
     let mut skipped: BTreeMap<String, usize> = BTreeMap::new();
     for gql in types {
         let reached = classes.get(&gql.class).is_some_and(|c| reached(gql, c));
@@ -278,12 +298,15 @@ pub fn coverage(app: &App) -> Option<GraphqlCoverage> {
                 GraphqlResolution::Value { .. } if reached => out.checked += 1,
                 GraphqlResolution::Value { .. } => out.unreached += 1,
                 GraphqlResolution::Arguments { .. } => out.arguments += 1,
-                GraphqlResolution::Skipped { reason } => *skipped.entry(reason.clone()).or_default() += 1,
+                GraphqlResolution::Skipped { reason } => {
+                    *skipped.entry(reason.clone()).or_default() += 1
+                }
             }
         }
     }
     out.skipped = skipped.into_iter().collect();
-    out.skipped.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out.skipped
+        .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     Some(out)
 }
 
@@ -293,7 +316,8 @@ fn reached(gql: &crate::dialect::GraphqlObjectType, class: &LibraryClass) -> boo
     if gql.synthesized.iter().any(|m| m.as_str() == "__gql_root") {
         return true;
     }
-    let Some(Ty::Fn { ret, .. }) = instance_method(class, &Symbol::from("object")).and_then(|m| m.signature.as_ref())
+    let Some(Ty::Fn { ret, .. }) =
+        instance_method(class, &Symbol::from("object")).and_then(|m| m.signature.as_ref())
     else {
         return false;
     };
@@ -301,5 +325,7 @@ fn reached(gql: &crate::dialect::GraphqlObjectType, class: &LibraryClass) -> boo
         Ty::Union { variants } => variants.iter().collect(),
         other => vec![other],
     };
-    variants.iter().any(|v| !matches!(v, Ty::Nil | Ty::Var { .. } | Ty::Untyped | Ty::Bottom))
+    variants
+        .iter()
+        .any(|v| !matches!(v, Ty::Nil | Ty::Var { .. } | Ty::Untyped | Ty::Bottom))
 }

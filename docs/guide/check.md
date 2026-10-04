@@ -289,14 +289,23 @@ at load time (`include Resolvers.for(:product)`), may have methods out
 of sight, so a field with none visible is skipped rather than read off
 `object`.
 
+A field's `argument`s reach its method as graphql-ruby passes them,
+as keywords typed from the declaration: `String` and `ID` a String,
+`Int` an Integer, `Float`, `Boolean`, the ISO8601 date types, a list,
+an enum as its value's name, an input object as its class (read by
+method or by key), nilable unless `required: true`. So a parameter is
+typed as the request delivers it, not as its default. A method whose
+parameters do not match its arguments (one no argument fills, an
+argument with no parameter) is counted under *take arguments* and not
+checked. A `resolver:`/`mutation:` class is followed through its
+`resolve` with its class-body arguments, or, for search_object,
+through its `scope { … }` block.
+
 What is not modeled is skipped, not guessed, and reports nothing:
-field arguments (a field resolving through a method that takes
-parameters, or a resolver/mutation `resolve` that does), connections,
-`hash_key:`/`dig:`, interfaces and unions, and a type nothing reachable
-from a root constructs. A `resolver:`/`mutation:` class is followed
-when its `resolve` takes no arguments, or, for search_object, through
-its `scope { … }` block. The methods this adds are for the analyzer
-only; the transpiled output never contains them.
+connections, `hash_key:`/`dig:`, a field block holding more than
+`argument`s, interfaces and unions, and a type nothing reachable from a
+root constructs. The methods and signatures this adds are for the
+analyzer only; the transpiled output never contains them.
 
 Because a skipped field reports nothing, a quiet run proves only what
 was followed. `check` prints the denominator beside the gem census:
@@ -308,7 +317,8 @@ roundhouse-check: graphql: 10 object type(s), 38 field(s): 1 checked, 9 on types
 *Checked* fields had their value typed on a type the roots reach. *On
 types nothing reaches* had a value, but no followed field constructs
 their type, often because the field that would is skipped. *Take
-arguments* resolve through a method with parameters. *Skipped* lists
+arguments* resolve through a method whose parameters do not match
+the declared arguments. *Skipped* lists
 the rest by reason, most frequent first; on a large schema it is the
 list of what to model next.
 

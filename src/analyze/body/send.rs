@@ -38,15 +38,19 @@ impl<'a> BodyTyper<'a> {
             _ => return None,
         };
         let methods = &self.classes().get(model)?.instance_methods;
-        match &*key_arg.node {
-            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => {
-                methods.get(value).cloned()
-            }
+        let entry = match &*key_arg.node {
+            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => methods.get(value),
             ExprNode::Lit { value: crate::expr::Literal::Str { value } } => {
-                methods.get(&Symbol::from(value.as_str())).cloned()
+                methods.get(&Symbol::from(value.as_str()))
             }
             _ => None,
-        }
+        }?;
+        // A reader declared as a method (an RBS or Sorbet signature, an
+        // input object's argument) is its return type, not the method.
+        Some(match entry {
+            Ty::Fn { ret, .. } => (**ret).clone(),
+            other => other.clone(),
+        })
     }
 
     /// `pluck(:col)` / `pick(:col)` on a relation over a known model.

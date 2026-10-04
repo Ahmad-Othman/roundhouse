@@ -938,10 +938,10 @@ pub struct GraphqlField {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GraphqlResolution {
     Value { method: Symbol },
-    /// Resolves through the type's own `method`, which takes the
-    /// field's arguments. Arguments are not modeled yet, so the method
-    /// is neither called nor checked: its parameters would type as
-    /// their defaults alone.
+    /// Resolves through the type's own `method`, whose parameters do
+    /// not take the declared arguments (one no argument fills, or an
+    /// argument with no parameter). graphql-ruby's call would fail;
+    /// the method is neither called nor checked.
     Arguments { method: Symbol },
     Skipped { reason: String },
 }

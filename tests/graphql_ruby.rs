@@ -233,36 +233,19 @@ fn a_search_object_resolver_carries_its_scope() {
     assert!(found[0].1.contains("`headline` on Post"), "{found:?}");
 }
 
-/// Field arguments are not modeled yet: the method is not called, nor
-/// checked (its `length` would type as `nil` alone), and the field
-/// records why.
+/// No `argument` declared: graphql-ruby calls the method with no
+/// keywords, so an optional one takes its default. `length` is nil
+/// here, and `length[:x]` raises on every request for the field.
 #[test]
-fn a_field_with_arguments_is_skipped_not_guessed() {
+fn an_undeclared_optional_parameter_takes_its_default() {
     let post = post_type(
         "    field :excerpt, String, null: false\n\n    \
          def excerpt(length: nil)\n      length[:x]\n    end\n",
     );
     let app = analyzed(&[("app/graphql/types/post_type.rb", &post)]);
-    assert!(
-        graphql_diagnostics(&app).is_empty(),
-        "{:?}",
-        graphql_diagnostics(&app)
-    );
-    let post_type = app
-        .graphql_types
-        .iter()
-        .find(|t| t.class.0.as_str() == "Types::PostType");
-    let field = post_type
-        .unwrap()
-        .fields
-        .iter()
-        .find(|f| f.name.as_str() == "excerpt")
-        .unwrap();
-    assert!(
-        matches!(&field.resolution, GraphqlResolution::Arguments { method } if method.as_str() == "excerpt"),
-        "{:?}",
-        field.resolution
-    );
+    let found = graphql_diagnostics(&app);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].1.contains("`[]` on nil"), "{found:?}");
 }
 
 /// A type nothing constructs has no known object, so nothing is claimed.
@@ -309,7 +292,11 @@ fn a_method_from_an_included_app_module_resolves_the_field() {
         ("app/graphql/post_fields.rb", concern),
         ("app/graphql/types/post_type.rb", post),
     ]);
-    assert!(graphql_diagnostics(&app).is_empty(), "{:?}", graphql_diagnostics(&app));
+    assert!(
+        graphql_diagnostics(&app).is_empty(),
+        "{:?}",
+        graphql_diagnostics(&app)
+    );
 }
 
 /// A module computed at load time (`include Resolvers.for(:post)`), or
@@ -317,19 +304,42 @@ fn a_method_from_an_included_app_module_resolves_the_field() {
 /// in sight is skipped, not reported as missing on the record.
 #[test]
 fn an_include_out_of_sight_makes_unanswered_fields_skipped() {
-    for include in ["include Resolvers.for(:post)", "include SomeGem::PostFields"] {
+    for include in [
+        "include Resolvers.for(:post)",
+        "include SomeGem::PostFields",
+    ] {
         let post = format!(
             "module Types\n  class PostType < BaseObject\n    {include}\n\n    \
              field :headline, String, null: false\n    field :title, String, null: false\n  end\nend\n"
         );
         let app = analyzed(&[("app/graphql/types/post_type.rb", &post)]);
-        assert!(graphql_diagnostics(&app).is_empty(), "{include}: {:?}", graphql_diagnostics(&app));
-        let post_type = app.graphql_types.iter().find(|t| t.class.0.as_str() == "Types::PostType");
+        assert!(
+            graphql_diagnostics(&app).is_empty(),
+            "{include}: {:?}",
+            graphql_diagnostics(&app)
+        );
+        let post_type = app
+            .graphql_types
+            .iter()
+            .find(|t| t.class.0.as_str() == "Types::PostType");
         let resolution = |name: &str| {
-            post_type.unwrap().fields.iter().find(|f| f.name.as_str() == name).unwrap().resolution.clone()
+            post_type
+                .unwrap()
+                .fields
+                .iter()
+                .find(|f| f.name.as_str() == name)
+                .unwrap()
+                .resolution
+                .clone()
         };
-        assert!(matches!(resolution("headline"), GraphqlResolution::Skipped { .. }), "{include}");
-        assert!(matches!(resolution("title"), GraphqlResolution::Skipped { .. }), "{include}");
+        assert!(
+            matches!(resolution("headline"), GraphqlResolution::Skipped { .. }),
+            "{include}"
+        );
+        assert!(
+            matches!(resolution("title"), GraphqlResolution::Skipped { .. }),
+            "{include}"
+        );
     }
 }
 
@@ -349,11 +359,160 @@ fn coverage_counts_checked_unreached_arguments_and_skipped() {
         ("app/graphql/types/orphan_type.rb", orphan),
     ]);
     let coverage = roundhouse::analyze::graphql::coverage(&app).expect("graphql coverage");
-    // Checked: QueryType.posts, PostType.title. Nothing here leads to
+    // Checked: QueryType.posts, PostType.title and .excerpt (called as
+    // graphql-ruby would, with no keywords). Nothing here leads to
     // UserType (no author field) or OrphanType: their 3 are unreached.
     assert_eq!(
         coverage.summary(),
-        "graphql: 4 object type(s), 7 field(s): 2 checked, 3 on types nothing reaches, \
-         1 take arguments, 1 skipped (hash lookup 1)"
+        "graphql: 4 object type(s), 7 field(s): 3 checked, 3 on types nothing reaches, \
+         0 take arguments, 1 skipped (hash lookup 1)"
     );
+}
+
+fn codes(app: &App) -> Vec<String> {
+    graphql_diagnostics(app)
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect()
+}
+
+/// graphql-ruby passes a field's `argument`s as keywords: the method
+/// is called with them, typed as declared, and its body is checked.
+#[test]
+fn field_arguments_type_the_method_parameters() {
+    let post = post_type(
+        "    field :excerpt, String, null: false do\n      argument :length, Integer\n    end\n\n    \
+         def excerpt(length:)\n      object.title[0, length] + length\n    end\n",
+    );
+    let app = analyzed(&[("app/graphql/types/post_type.rb", &post)]);
+    assert_eq!(
+        codes(&app),
+        ["incompatible_binop"],
+        "{:?}",
+        graphql_diagnostics(&app)
+    );
+    let coverage = roundhouse::analyze::graphql::coverage(&app).unwrap();
+    assert_eq!(coverage.arguments, 0, "{}", coverage.summary());
+}
+
+/// An optional keyword (`length: nil`) is flattened at ingest; its slot
+/// is filled in order with the declared argument.
+#[test]
+fn an_optional_argument_fills_a_flattened_keyword() {
+    let post = post_type(
+        "    field :excerpt, String, null: false do\n      argument :length, Integer, required: false\n      \
+         argument :suffix, String, required: true\n    end\n\n    \
+         def excerpt(length: nil, suffix: \"...\")\n      suffix + 1\n    end\n",
+    );
+    let app = analyzed(&[("app/graphql/types/post_type.rb", &post)]);
+    assert_eq!(
+        codes(&app),
+        ["incompatible_binop"],
+        "{:?}",
+        graphql_diagnostics(&app)
+    );
+    assert!(
+        graphql_diagnostics(&app)[0].1.contains("String + Integer"),
+        "{:?}",
+        graphql_diagnostics(&app)
+    );
+}
+
+/// A parameter no argument fills (graphql-ruby would raise) is not
+/// modeled: recorded, not called, not checked.
+#[test]
+fn a_parameter_no_argument_fills_is_recorded_not_guessed() {
+    let post = post_type(
+        "    field :excerpt, String, null: false\n\n    def excerpt(length:)\n      length[:x]\n    end\n",
+    );
+    let app = analyzed(&[("app/graphql/types/post_type.rb", &post)]);
+    assert!(
+        graphql_diagnostics(&app).is_empty(),
+        "{:?}",
+        graphql_diagnostics(&app)
+    );
+    let coverage = roundhouse::analyze::graphql::coverage(&app).unwrap();
+    assert_eq!(coverage.arguments, 1, "{}", coverage.summary());
+}
+
+/// An input object argument is an instance of its class, read by
+/// method or by key; an enum argument is its value's name, a String.
+#[test]
+fn input_object_and_enum_arguments() {
+    let input = "module Types\n  class PostFilter < GraphQL::Schema::InputObject\n    \
+        argument :query, String\n  end\nend\n";
+    let order = "module Types\n  class PostOrder < GraphQL::Schema::Enum\n    \
+        value \"NEWEST\"\n    value \"OLDEST\"\n  end\nend\n";
+    let query = "module Types\n  class QueryType < BaseObject\n    \
+        field :posts, [PostType], null: false do\n      argument :filter, PostFilter\n      \
+        argument :order, PostOrder\n    end\n\n    \
+        def posts(filter:, order:)\n      filter[:query] + 1\n      filter.query + 2\n      order + 3\n      Post.all\n    end\n  end\nend\n";
+    let post = post_type("    field :title, String, null: false\n");
+    let app = analyzed(&[
+        ("app/graphql/types/post_filter.rb", input),
+        ("app/graphql/types/post_order.rb", order),
+        ("app/graphql/types/query_type.rb", query),
+        ("app/graphql/types/post_type.rb", &post),
+    ]);
+    let found = graphql_diagnostics(&app);
+    assert_eq!(found.len(), 3, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .all(|(c, m)| c == "incompatible_binop" && m.contains("String + Integer")),
+        "{found:?}"
+    );
+}
+
+/// A mutation's class-body `argument`s are its `resolve` keywords; the
+/// record it returns types the payload type.
+#[test]
+fn a_mutation_resolves_with_its_arguments() {
+    let schema = "class AppSchema < GraphQL::Schema\n  query Types::QueryType\n  \
+        mutation Types::MutationType\nend\n";
+    let mutation_type = "module Types\n  class MutationType < BaseObject\n    \
+        field :create_post, mutation: Mutations::CreatePost\n  end\nend\n";
+    let create = "module Mutations\n  class CreatePost < GraphQL::Schema::Mutation\n    \
+        argument :title, String\n    type Types::PostType\n\n    \
+        def resolve(title:)\n      title + 1\n      Post.create!(title: title)\n    end\n  end\nend\n";
+    let post = post_type("    field :headline, String, null: false\n");
+    let app = analyzed(&[
+        ("app/graphql/app_schema.rb", schema),
+        ("app/graphql/types/mutation_type.rb", mutation_type),
+        ("app/graphql/mutations/create_post.rb", create),
+        ("app/graphql/types/post_type.rb", &post),
+    ]);
+    let found = graphql_diagnostics(&app);
+    // `title` arrives typed as declared, and the payload type is
+    // reached through the mutation's return.
+    assert!(
+        found
+            .iter()
+            .any(|(c, m)| c == "incompatible_binop" && m.contains("String + Integer")),
+        "{found:?}"
+    );
+    assert!(
+        found.iter().any(|(_, m)| m.contains("`headline` on Post")),
+        "{found:?}"
+    );
+}
+
+/// The argument and reader signatures are for the analyzer: lowering
+/// removes them with the synthesized methods.
+#[test]
+fn lowering_removes_the_argument_signatures() {
+    let post = post_type(
+        "    field :excerpt, String, null: false do\n      argument :length, Integer\n    end\n\n    \
+         def excerpt(length:)\n      object.title\n    end\n",
+    );
+    let mut app = analyzed(&[("app/graphql/types/post_type.rb", &post)]);
+    assert!(!app.graphql_signatures.is_empty());
+    roundhouse::session::analyze_and_lower(&mut app);
+    let leftover: Vec<_> = app
+        .rbs_signatures
+        .values()
+        .flat_map(|t| t.keys())
+        .filter(|k| k.as_str().starts_with("__gql_"))
+        .collect();
+    assert!(leftover.is_empty(), "{leftover:?}");
 }

@@ -17,25 +17,36 @@
 //! them, and lowering removes them, so no target emits them. The
 //! `field` calls themselves stay in `unknown_calls`, as before.
 //!
-//! A `resolver:`/`mutation:` class is followed when its `resolve`
-//! takes no arguments, or, for search_object, through its `scope { … }`
-//! block; its `type` declaration types the field.
+//! Arguments are passed the way graphql-ruby passes them, as keywords:
+//! each `argument` (in the field's block, or a resolver's class body)
+//! becomes a typed, body-less method in `rbs_signatures`
+//! (`__gql_arg_<field>_<name>`; `String`/`ID` a String, `Int` an
+//! Integer, an enum its value's name, an input object its class, with
+//! a reader per argument; nilable unless required; `loads:`/`prepare:`
+//! and unknown types `untyped`), and the call reads them. A parameter
+//! no argument fills, or an argument no parameter takes, is a call
+//! graphql-ruby would fail; it is recorded as
+//! `GraphqlResolution::Arguments` and not made.
 //!
-//! What is not modeled is recorded on the field, never guessed: field
-//! arguments (`GraphqlResolution::Arguments`: an `argument` block, or a
-//! resolving method with parameters, which graphql-ruby passes as
-//! keywords), and as `Skipped` a resolver that does not fit the above,
-//! `hash_key:`/`dig:`, connections and other options that move where
-//! the value comes from.
+//! A `resolver:`/`mutation:` class is followed through its `resolve`,
+//! or, for search_object, its `scope { … }` block; its `type`
+//! declaration types the field.
+//!
+//! What else is not modeled is recorded on the field as `Skipped`,
+//! never guessed: a type with an include out of sight, `hash_key:`/
+//! `dig:`, connections, a field block holding more than `argument`s,
+//! and other options that move where the value comes from.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::dialect::{
     GraphqlField, GraphqlObjectType, GraphqlResolution, LibraryClass, MethodDef, MethodReceiver,
 };
+use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
+use crate::ty::Ty;
 
 const OBJECT_BASE: &str = "GraphQL::Schema::Object";
 const SCHEMA_BASE: &str = "GraphQL::Schema";
@@ -44,6 +55,9 @@ const RESOLVER_BASES: &[&str] = &[
     "GraphQL::Schema::Mutation",
     "GraphQL::Schema::RelayClassicMutation",
 ];
+
+const ENUM_BASE: &str = "GraphQL::Schema::Enum";
+const INPUT_BASE: &str = "GraphQL::Schema::InputObject";
 
 /// Root operation types a schema names (`query Types::QueryType`).
 const ROOT_DECLARATIONS: &[&str] = &["query", "mutation", "subscription"];
@@ -64,6 +78,16 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
         .map(|(i, c)| (c.name.clone(), i))
         .collect();
     let names: HashSet<ClassId> = by_name.keys().cloned().collect();
+    let kinds = ArgKinds {
+        enums: plain_enums(
+            &app.library_classes,
+            &descendants_of(&app.library_classes, &parents, &[ENUM_BASE]),
+        ),
+        inputs: descendants_of(&app.library_classes, &parents, &[INPUT_BASE]),
+    };
+    // Typed, body-less methods the synthesized calls read their
+    // arguments from, declared the way a `sig/` sidecar would be.
+    let mut signatures: Vec<(ClassId, Symbol, Ty)> = Vec::new();
     let ctx = Ctx {
         classes: &app.library_classes,
         names: &names,
@@ -95,12 +119,27 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
             );
             continue;
         }
+        let arguments = class_arguments(&chain);
         let value = match ctx.defined(&chain, "resolve") {
-            Some(m) if takes_arguments(m) => {
-                unmodeled.insert(class_id.clone(), "resolver `resolve` takes arguments");
-                continue;
+            Some(m) => {
+                let Some(call) = keyword_call(m, &arguments, "resolve") else {
+                    unmodeled.insert(
+                        class_id.clone(),
+                        "resolver `resolve` parameters do not match its arguments",
+                    );
+                    continue;
+                };
+                for a in &arguments {
+                    signatures.push((
+                        class_id.clone(),
+                        arg_method("resolve", &a.keyword),
+                        arg_ty(a, class_id, &ctx, &kinds),
+                    ));
+                }
+                source.push_str(&format!(" def __gql_resolve\n  {call}\n end\n"));
+                synthesized.push(Symbol::from("__gql_resolve"));
+                "__gql_resolve".to_owned()
             }
-            Some(_) => "resolve".to_owned(),
             None => {
                 // search_object: the results are the `scope` block's
                 // relation, which every `option` narrows and returns.
@@ -195,17 +234,15 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
                         (skipped(reason), String::new())
                     } else {
                         match ctx.defined(&chain, decl.resolver_method.as_str()) {
-                            Some(m) if decl.block || takes_arguments(m) => (
-                                GraphqlResolution::Arguments {
-                                    method: m.name.clone(),
-                                },
-                                String::new(),
-                            ),
-                            Some(_) => (
-                                GraphqlResolution::Value { method: value },
-                                format!("self.{}", decl.resolver_method.as_str()),
-                            ),
-                            None if decl.block => (skipped("field arguments"), String::new()),
+                            Some(m) => match keyword_call(m, &decl.arguments, decl.name.as_str()) {
+                                Some(call) => (GraphqlResolution::Value { method: value }, call),
+                                None => (
+                                    GraphqlResolution::Arguments {
+                                        method: m.name.clone(),
+                                    },
+                                    String::new(),
+                                ),
+                            },
                             // The method may be in a module out of sight;
                             // `object.<name>` would be a guess.
                             None if opaque.is_some() => {
@@ -213,10 +250,25 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
                             }
                             None => (
                                 GraphqlResolution::Value { method: value },
-                                format!("object.{}", decl.method_sym.as_str()),
+                                format!(
+                                    "object.{}{}",
+                                    decl.method_sym.as_str(),
+                                    keywords(&decl.arguments, decl.name.as_str())
+                                ),
                             ),
                         }
                     };
+                if matches!(resolution, GraphqlResolution::Value { .. })
+                    && decl.resolver_class.is_none()
+                {
+                    for a in &decl.arguments {
+                        signatures.push((
+                            class_id.clone(),
+                            arg_method(decl.name.as_str(), &a.keyword),
+                            arg_ty(a, &class.name, &ctx, &kinds),
+                        ));
+                    }
+                }
                 let field = GraphqlField {
                     name: decl.name.clone(),
                     span: call.span,
@@ -274,6 +326,25 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
         synthesized_sources.push((class_id.clone(), source, spans, synthesized, Some(record)));
     }
 
+    // An input object reads its arguments as methods and by key.
+    let mut inputs: Vec<&ClassId> = kinds.inputs.iter().collect();
+    inputs.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+    for input in inputs {
+        let chain = ctx.chain(input);
+        for a in class_arguments(&chain) {
+            let ty = arg_ty(&a, input, &ctx, &kinds);
+            signatures.push((input.clone(), a.keyword.clone(), ty));
+        }
+        signatures.push((input.clone(), Symbol::from("[]"), Ty::Untyped));
+        signatures.push((
+            input.clone(),
+            Symbol::from("to_h"),
+            Ty::Hash {
+                key: Box::new(Ty::Sym),
+                value: Box::new(Ty::Untyped),
+            },
+        ));
+    }
     let mut types = Vec::new();
     let mut synthesized_elsewhere = Vec::new();
     for (class_id, source, spans, synthesized, record) in synthesized_sources {
@@ -296,7 +367,35 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
         }
     }
     types.extend(synthesized_elsewhere);
+    let mut declared = Vec::new();
+    for (class, name, ret) in signatures {
+        let params = if name.as_str() == "[]" {
+            vec![crate::ty::Param {
+                name: Symbol::from("key"),
+                ty: Ty::Untyped,
+                kind: crate::ty::ParamKind::Required,
+            }]
+        } else {
+            Vec::new()
+        };
+        let table = app.rbs_signatures.entry(class.clone()).or_default();
+        // A sidecar the app wrote wins.
+        if table.contains_key(&name) {
+            continue;
+        }
+        table.insert(
+            name.clone(),
+            Ty::Fn {
+                params,
+                block: None,
+                ret: Box::new(ret),
+                effects: EffectSet::pure(),
+            },
+        );
+        declared.push((class, name));
+    }
     app.graphql_types = types;
+    app.graphql_signatures = declared;
 }
 
 struct Ctx<'a> {
@@ -415,12 +514,300 @@ fn plumbing(
     Some(())
 }
 
-/// graphql-ruby passes a field's arguments as keywords. Calling such a
-/// method with none would type each parameter as its default alone
-/// (`credentials: nil`), so these are skipped until `argument`
-/// declarations type the parameters.
-fn takes_arguments(m: &MethodDef) -> bool {
-    !m.params.is_empty()
+/// An `argument :name, Type, required: …` declaration.
+#[derive(Clone)]
+struct ArgDecl {
+    /// The Ruby keyword graphql-ruby passes it as (`as:`, or the name
+    /// less `_id` for `loads:`).
+    keyword: Symbol,
+    type_path: Option<Vec<Symbol>>,
+    list: bool,
+    /// `required: false` or `:nullable`: the value can be nil.
+    nullable: bool,
+    /// `loads:` / `prepare:`: the method receives something other than
+    /// the declared type.
+    transformed: bool,
+}
+
+fn argument_declaration(call: &Expr) -> Option<ArgDecl> {
+    let ExprNode::Send {
+        recv: None,
+        method,
+        args,
+        ..
+    } = &*call.node
+    else {
+        return None;
+    };
+    if method.as_str() != "argument" {
+        return None;
+    }
+    let name = match args.first().map(|a| &*a.node) {
+        Some(ExprNode::Lit {
+            value: Literal::Sym { value },
+        }) => value.clone(),
+        Some(ExprNode::Lit {
+            value: Literal::Str { value },
+        }) => Symbol::from(value.as_str()),
+        _ => return None,
+    };
+    let mut decl = ArgDecl {
+        keyword: name.clone(),
+        type_path: None,
+        list: false,
+        nullable: false,
+        transformed: false,
+    };
+    let mut renamed = None;
+    for arg in &args[1..] {
+        match &*arg.node {
+            ExprNode::Const { path } => decl.type_path = Some(path.clone()),
+            ExprNode::Array { elements, .. } => {
+                decl.list = true;
+                if let Some(ExprNode::Const { path }) = elements.first().map(|e| &*e.node) {
+                    decl.type_path = Some(path.clone());
+                }
+            }
+            ExprNode::Hash { entries, .. } => {
+                for (key, value) in entries {
+                    let ExprNode::Lit {
+                        value: Literal::Sym { value: key },
+                    } = &*key.node
+                    else {
+                        return None;
+                    };
+                    match (key.as_str(), &*value.node) {
+                        (
+                            "required",
+                            ExprNode::Lit {
+                                value: Literal::Bool { value },
+                            },
+                        ) => decl.nullable = !value,
+                        (
+                            "required",
+                            ExprNode::Lit {
+                                value: Literal::Sym { value },
+                            },
+                        ) if value.as_str() == "nullable" => decl.nullable = true,
+                        (
+                            "as",
+                            ExprNode::Lit {
+                                value: Literal::Sym { value },
+                            },
+                        ) => renamed = Some(value.clone()),
+                        ("loads", _) => {
+                            decl.transformed = true;
+                            let n = name.as_str();
+                            decl.keyword =
+                                Symbol::from(if let Some(base) = n.strip_suffix("_ids") {
+                                    format!("{base}s")
+                                } else {
+                                    n.strip_suffix("_id").unwrap_or(n).to_owned()
+                                });
+                        }
+                        ("prepare", _) => decl.transformed = true,
+                        ("type", ExprNode::Const { path }) => decl.type_path = Some(path.clone()),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(as_name) = renamed {
+        decl.keyword = as_name;
+    }
+    Some(decl)
+}
+
+/// A resolver's or input object's class-body `argument`s, ancestors
+/// first.
+fn class_arguments(chain: &[&LibraryClass]) -> Vec<ArgDecl> {
+    let mut out: Vec<ArgDecl> = Vec::new();
+    for class in chain.iter().rev() {
+        for a in class.unknown_calls.iter().filter_map(argument_declaration) {
+            out.retain(|b| b.keyword != a.keyword);
+            out.push(a);
+        }
+    }
+    out
+}
+
+fn statements(body: &Expr) -> Vec<&Expr> {
+    match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().collect(),
+        _ => vec![body],
+    }
+}
+
+fn arg_method(owner: &str, keyword: &Symbol) -> Symbol {
+    Symbol::from(format!("__gql_arg_{owner}_{}", keyword.as_str()))
+}
+
+/// `(k: self.__gql_arg_<owner>_k, …)`, or nothing without arguments.
+fn keywords(arguments: &[ArgDecl], owner: &str) -> String {
+    if arguments.is_empty() {
+        return String::new();
+    }
+    let pairs: Vec<String> = arguments
+        .iter()
+        .map(|a| {
+            format!(
+                "{}: self.{}",
+                a.keyword.as_str(),
+                arg_method(owner, &a.keyword).as_str()
+            )
+        })
+        .collect();
+    format!("({})", pairs.join(", "))
+}
+
+/// `self.<m>(…)` passing the declared arguments the way graphql-ruby
+/// does, as keywords, when `m`'s parameters take exactly that call: no
+/// required positional, every required keyword declared, every argument
+/// one `m` names (or a `**rest`). `None` is a mismatch this pass does
+/// not model. Ingest flattens an optional keyword to a positional with
+/// a default (`Param::from_keyword`), so those slots are filled in
+/// order: the argument, or the default when it is not declared.
+fn keyword_call(m: &MethodDef, arguments: &[ArgDecl], owner: &str) -> Option<String> {
+    let value = |a: &ArgDecl| format!("self.{}", arg_method(owner, &a.keyword).as_str());
+    let named = |name: &Symbol| arguments.iter().find(|a| &a.keyword == name);
+    let mut positional = Vec::new();
+    let mut keywords = Vec::new();
+    let mut used: Vec<&Symbol> = Vec::new();
+    let mut bundle = None;
+    for p in &m.params {
+        if p.forwarding || (p.rest && !p.keyword) {
+            continue;
+        }
+        if p.keyword && p.rest {
+            bundle = Some(false);
+        } else if p.from_kwrest {
+            bundle = Some(true);
+        } else if p.keyword {
+            match named(&p.name) {
+                Some(a) => {
+                    keywords.push(format!("{}: {}", p.name.as_str(), value(a)));
+                    used.push(&a.keyword);
+                }
+                None if p.default.is_some() => {}
+                None => return None,
+            }
+        } else if p.from_keyword {
+            match named(&p.name) {
+                Some(a) => {
+                    positional.push(value(a));
+                    used.push(&a.keyword);
+                }
+                None => positional.push(crate::emit::ruby::emit_expr(p.default.as_ref()?)),
+            }
+        } else {
+            // A positional graphql-ruby never fills.
+            return None;
+        }
+    }
+    let extras: Vec<String> = arguments
+        .iter()
+        .filter(|a| !used.contains(&&a.keyword))
+        .map(|a| format!("{}: {}", a.keyword.as_str(), value(a)))
+        .collect();
+    match bundle {
+        _ if extras.is_empty() => {}
+        Some(false) => keywords.extend(extras),
+        Some(true) => positional.push(format!("{{{}}}", extras.join(", "))),
+        None => return None,
+    }
+    positional.extend(keywords);
+    let args = if positional.is_empty() {
+        String::new()
+    } else {
+        format!("({})", positional.join(", "))
+    };
+    Some(format!("self.{}{}", m.name.as_str(), args))
+}
+
+struct ArgKinds {
+    /// Enums whose values are their names (no `value:`): a String.
+    enums: HashSet<ClassId>,
+    inputs: HashSet<ClassId>,
+}
+
+/// The Ruby value graphql-ruby passes for an argument.
+fn arg_ty(a: &ArgDecl, scope: &ClassId, ctx: &Ctx<'_>, kinds: &ArgKinds) -> Ty {
+    if a.transformed {
+        return Ty::Untyped;
+    }
+    let Some(path) = &a.type_path else {
+        return Ty::Untyped;
+    };
+    let written = path
+        .iter()
+        .map(|p| p.as_str())
+        .collect::<Vec<_>>()
+        .join("::");
+    let base = match written.strip_prefix("GraphQL::Types::").unwrap_or(&written) {
+        "String" | "ID" => Ty::Str,
+        "Int" | "Integer" | "BigInt" => Ty::Int,
+        "Float" => Ty::Float,
+        "Boolean" => Ty::Bool,
+        "ISO8601DateTime" => Ty::Time,
+        "ISO8601Date" => Ty::Date,
+        _ => {
+            if let Some(id) = resolve_const(path, scope, ctx.names) {
+                if kinds.inputs.contains(&id) {
+                    Ty::Class {
+                        id,
+                        args: Vec::new(),
+                    }
+                } else if kinds.enums.contains(&id) {
+                    Ty::Str
+                } else {
+                    Ty::Untyped
+                }
+            } else {
+                Ty::Untyped
+            }
+        }
+    };
+    if matches!(base, Ty::Untyped) {
+        return base;
+    }
+    let base = if a.list {
+        Ty::Array {
+            elem: Box::new(base),
+        }
+    } else {
+        base
+    };
+    if a.nullable {
+        Ty::Union {
+            variants: vec![base, Ty::Nil],
+        }
+    } else {
+        base
+    }
+}
+
+/// Enums every `value` of which is its own name (no `value:` option).
+fn plain_enums(classes: &[LibraryClass], enums: &HashSet<ClassId>) -> HashSet<ClassId> {
+    classes
+        .iter()
+        .filter(|c| enums.contains(&c.name))
+        .filter(|c| {
+            c.unknown_calls.iter().all(|call| match &*call.node {
+                ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "value" => {
+                    !args.iter().any(|a| match &*a.node {
+                        ExprNode::Hash { entries, .. } => entries.iter().any(|(k, _)| {
+                            matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "value")
+                        }),
+                        _ => false,
+                    })
+                }
+                _ => true,
+            })
+        })
+        .map(|c| c.name.clone())
+        .collect()
 }
 
 fn skipped(reason: &str) -> GraphqlResolution {
@@ -552,7 +939,8 @@ struct FieldDecl {
     /// `resolver:` / `mutation:` class, as written.
     resolver_class: Option<Vec<Symbol>>,
     null_given: bool,
-    block: bool,
+    /// The `argument`s its block declares.
+    arguments: Vec<ArgDecl>,
     skip: Option<String>,
 }
 
@@ -591,7 +979,7 @@ fn field_declaration(call: &Expr) -> Option<FieldDecl> {
         resolver_method: name,
         resolver_class: None,
         null_given: false,
-        block: false,
+        arguments: Vec::new(),
         skip: None,
     };
     let mut skipped: Option<String> = None;
@@ -657,8 +1045,29 @@ fn field_declaration(call: &Expr) -> Option<FieldDecl> {
             _ => skip("computed field type"),
         }
     }
-    // A block declares the field's `argument`s (or its extensions).
-    decl.block = block.is_some();
+    // A block declares the field's `argument`s; anything else in it
+    // (an extension, a `|field|` form) is not read.
+    if let Some(block) = block {
+        match &*block.node {
+            ExprNode::Lambda { params, body, .. } if params.is_empty() => {
+                for stmt in statements(body) {
+                    match &*stmt.node {
+                        ExprNode::Send {
+                            recv: None, method, ..
+                        } if method.as_str() == "argument" => match argument_declaration(stmt) {
+                            Some(a) => decl.arguments.push(a),
+                            None => skip("argument form"),
+                        },
+                        ExprNode::Send {
+                            recv: None, method, ..
+                        } if matches!(method.as_str(), "description" | "deprecation_reason") => {}
+                        _ => skip("field block"),
+                    }
+                }
+            }
+            _ => skip("field block"),
+        }
+    }
     if decl
         .type_path
         .as_ref()

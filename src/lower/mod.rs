@@ -711,6 +711,11 @@ pub fn apply_post_analyze_lowerings(
             class.methods.retain(|m| !gql.synthesized.contains(&m.name));
         }
     }
+    for (class, name) in &app.graphql_signatures {
+        if let Some(table) = app.rbs_signatures.get_mut(class) {
+            table.remove(name);
+        }
+    }
     debug_assert!(
         post_analyze_pass_order_is_sound(),
         "POST_ANALYZE_PASS_ORDER violates a declared runs_after constraint",
