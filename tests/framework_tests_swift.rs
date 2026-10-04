@@ -210,6 +210,42 @@ fn a_reassigned_nil_checked_local_reads_unwrapped_not_shadowed() {
     assert!(body.contains("m!.action") && body.contains("m!.pathParams"), "{body}");
 }
 
+#[test]
+fn a_reassigned_nil_guard_narrows_until_the_next_write() {
+    let source = br#"
+class NarrowTest < Minitest::Test
+  TABLE = [ActionDispatch::Router::Route.new("ANY", "/lookup/:id", :widgets_controller, :show)]
+
+  def test_shapes
+    m = ActionDispatch::Router.match("GET", "/lookup/1", TABLE)
+    raise "joined" if m.nil? || m.action != :show
+    m = ActionDispatch::Router.match(m.action == :show ? "GET" : "POST", "/lookup/12", TABLE)
+    raise "second" if m.nil?
+    m ||= ActionDispatch::Router.match("GET", "/lookup/9", TABLE)
+  end
+end
+"#;
+    let mut app = App::new();
+    app.test_modules.push(
+        ingest_test_file(source, "test/narrow_test.rb")
+            .expect("ingest")
+            .expect("test class"),
+    );
+    load_framework_rbs(&mut app);
+    Analyzer::new(&app).analyze(&mut app);
+    let file = swift::emit(&app)
+        .into_iter()
+        .find(|f| f.path.ends_with("NarrowTest.swift"))
+        .expect("NarrowTest.swift");
+    let body = &file.content;
+    assert!(!body.contains("guard let m = m"), "{body}");
+    // The joined guard's right side, and a write's own right side, read the proven value.
+    assert!(body.contains("m == nil || (m!.action"), "{body}");
+    assert!(body.contains("Router.match((m!.action"), "{body}");
+    // A compound write ends the narrowing: its operand is the optional, not `m!`.
+    assert!(body.contains("m = m ?? "), "{body}");
+}
+
 // errors + ac_base were the last deferred pair; both are green now and CI
 // runs this file unfiltered. What it took, recorded because kotlin needed
 // the same four fixes and rust still does:

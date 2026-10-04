@@ -1849,17 +1849,21 @@ pub(super) fn emit_stmts(exprs: &[Expr], returning: bool) -> String {
     let mut narrowed: Vec<String> = Vec::new();
     let mut i = 0;
     while i < exprs.len() {
-        if !narrowed.is_empty() {
-            let mut counts = HashMap::new();
-            count_assigns(&exprs[i], &mut counts, &mut HashMap::new(), &mut HashSet::new());
-            narrowed.retain(|n| {
-                let keep = !counts.contains_key(n);
-                if !keep {
-                    NONNULL_PROPS.with(|s| s.borrow_mut().remove(n));
-                }
-                keep
-            });
-        }
+        // A write to a narrowed local ends its narrowing. Not before a statement that is itself
+        // that write: its right-hand side (`m = m.next`) still reads the proven value.
+        let own_write = statement_writes_local(&exprs[i]);
+        let mut ending: Vec<String> = Vec::new();
+        narrowed.retain(|n| {
+            if !writes_local(&exprs[i], n) {
+                return true;
+            }
+            if own_write.as_deref() == Some(n.as_str()) {
+                ending.push(n.clone());
+            } else {
+                NONNULL_PROPS.with(|s| s.borrow_mut().remove(n));
+            }
+            false
+        });
         let is_last = i == exprs.len() - 1;
         // A bare `nil` statement (a lowered no-op branch filler) has no
         // contextual type in Swift — drop it.
@@ -1885,8 +1889,8 @@ pub(super) fn emit_stmts(exprs: &[Expr], returning: bool) -> String {
                 i += 1;
                 continue;
             }
-            if let Some(n) = reassigned_nil_guard(&exprs[i]) {
-                lines.push(emit_expr(&exprs[i]));
+            if let Some((n, line)) = reassigned_nil_guard(&exprs[i]) {
+                lines.push(line);
                 if NONNULL_PROPS.with(|s| s.borrow_mut().insert(n.clone())) {
                     narrowed.push(n);
                 }
@@ -1899,6 +1903,12 @@ pub(super) fn emit_stmts(exprs: &[Expr], returning: bool) -> String {
         } else {
             lines.push(emit_expr(&exprs[i]));
         }
+        NONNULL_PROPS.with(|s| {
+            let mut set = s.borrow_mut();
+            for n in &ending {
+                set.remove(n);
+            }
+        });
         i += 1;
     }
     NONNULL_PROPS.with(|s| {
@@ -1910,17 +1920,22 @@ pub(super) fn emit_stmts(exprs: &[Expr], returning: bool) -> String {
     lines.join("\n")
 }
 
-/// `if x.nil? { <terminal> }` over an Optional local that is reassigned
-/// later, so `try_param_guard` declined to shadow it: the name to read
-/// force-unwrapped until its next assignment.
-fn reassigned_nil_guard(stmt: &Expr) -> Option<String> {
+/// `if x.nil? { <terminal> }` (or `x.nil? || <more>`) over an Optional
+/// local that is reassigned later, so `try_param_guard` declined to
+/// shadow it: the name to read force-unwrapped until its next
+/// assignment, and the `if` itself, whose `<more>` already reads it so.
+fn reassigned_nil_guard(stmt: &Expr) -> Option<(String, String)> {
     let ExprNode::If { cond, then_branch, else_branch } = &*stmt.node else {
         return None;
     };
     if !is_empty_branch(else_branch) || !branch_is_terminal(then_branch) {
         return None;
     }
-    let ExprNode::Send { recv: Some(r), method, args, .. } = &*cond.node else {
+    let (nil_check, rest) = match &*cond.node {
+        ExprNode::BoolOp { op: BoolOpKind::Or, left, right, .. } => (left, Some(right)),
+        _ => (cond, None),
+    };
+    let ExprNode::Send { recv: Some(r), method, args, .. } = &*nil_check.node else {
         return None;
     };
     if method.as_str() != "nil?" || !args.is_empty() {
@@ -1935,7 +1950,37 @@ fn reassigned_nil_guard(stmt: &Expr) -> Option<String> {
             if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
     );
     let n = camel(name.as_str());
-    (optionalish && REASSIGNED.with(|s| s.borrow().contains(&n))).then_some(n)
+    if !optionalish || !REASSIGNED.with(|s| s.borrow().contains(&n)) {
+        return None;
+    }
+    let more = match rest {
+        Some(rhs) => format!(" || ({})", with_nonnull(&[n.clone()], rhs)),
+        None => String::new(),
+    };
+    let line = format!("if {n} == nil{more} {{\n{}\n}}", indent(&emit_expr(then_branch)));
+    Some((n, line))
+}
+
+/// Does `e` assign the local `name` anywhere (`=` or a compound `op=`)?
+fn writes_local(e: &Expr, name: &str) -> bool {
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Var { name: n, .. }, .. }
+        | ExprNode::OpAssign { target: LValue::Var { name: n, .. }, .. }
+            if camel(n.as_str()) == name =>
+        {
+            true
+        }
+        _ => children(e).into_iter().any(|c| writes_local(c, name)),
+    }
+}
+
+/// The local a statement assigns at its top (`x = …`, `x op= …`).
+fn statement_writes_local(e: &Expr) -> Option<String> {
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+        | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } => Some(camel(name.as_str())),
+        _ => None,
+    }
 }
 
 fn try_guard_let(assign: &Expr, guard: &Expr) -> Option<String> {
