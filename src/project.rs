@@ -1016,6 +1016,17 @@ pub fn target_files(
             crate::emit::diagnostics::report_unsupported(method.name_span, target.as_str(), "parameter declaration", formal.description());
         }
         if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
+            let named_keyword_rest = method.params.iter().any(|p| {
+                p.keyword && p.rest && !p.name.as_str().is_empty() && !p.forwarding
+            });
+            let anonymous_or_full = method.params.iter().any(|p| {
+                p.forwarding || (p.keyword && p.rest && p.name.as_str().is_empty())
+            });
+            // Spinel carries keyword parameters. A named `**details` is
+            // that parameter. Nameless `**` and `...` stay refused.
+            if matches!(target, BuildTarget::Spinel) && named_keyword_rest && !anonymous_or_full {
+                continue;
+            }
             let construct = if method.params.iter().any(|p| p.forwarding) {
                 "full argument forwarding"
             } else if method.params.iter().any(|p| p.keyword && p.rest) {
