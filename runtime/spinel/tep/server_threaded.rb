@@ -204,6 +204,14 @@ module Tep
           return false
         end
 
+        # Before the drain, which is what held the bytes (Request#body_refusal).
+        refusal = req.body_refusal(Tep.max_body_bytes)
+        if refusal != 0
+          Tep::Server::Threaded.send_simple(client, refusal,
+            refusal == 413 ? "request body too large" : "bad request")
+          return false
+        end
+
         req.consume_body_via_io(io, client)
 
         res = Response.new

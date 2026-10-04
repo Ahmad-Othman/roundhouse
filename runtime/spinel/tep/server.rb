@@ -13,6 +13,7 @@ module Tep
     if status == 401; return "Unauthorized"; end
     if status == 403; return "Forbidden"; end
     if status == 404; return "Not Found"; end
+    if status == 413; return "Content Too Large"; end
     if status == 500; return "Internal Server Error"; end
     "OK"
   end
@@ -160,6 +161,12 @@ module Tep
       req = Parser.parse(blob)
       if req == nil
         send_simple(client, 400, "bad request")
+        return false
+      end
+      # Before the drain, which is what held the bytes (Request#body_refusal).
+      refusal = req.body_refusal(Tep.max_body_bytes)
+      if refusal != 0
+        send_simple(client, refusal, refusal == 413 ? "request body too large" : "bad request")
         return false
       end
       req.consume_body(client)

@@ -33,6 +33,70 @@ module Tep
     Hash.new("")
   end
 
+  # A byte count off the wire (Content-Length) as an Integer: -1 unless
+  # it is a plain run of ASCII digits, 0 for "". Digits only is Puma's
+  # rule — it rejects any Content-Length matching /[^\d]/ — so no sign,
+  # no junk after the number; `.to_i` let both through ("12abc" read as
+  # 12, "-1" as a length that drained nothing). "" is what an absent
+  # header reads as through str_hash, and Puma reads an empty value as
+  # zero too.
+  #
+  # A run longer than 18 digits SATURATES at BYTE_COUNT_CEILING instead
+  # of being converted: spinel's Integer is a fixed int64, so a 25-digit
+  # length cannot be converted at all, and it is too large whatever the
+  # cap is. The caller compares the result against the cap and answers
+  # 413. Every 18-digit value is below the ceiling, which is below 2^63.
+  BYTE_COUNT_CEILING = 1000000000000000000
+
+  def self.decimal_byte_count(s)
+    n = s.bytesize
+    i = 0
+    while i < n
+      b = s.getbyte(i)
+      if b < 48 || b > 57
+        return -1
+      end
+      i += 1
+    end
+    if n > 18
+      return BYTE_COUNT_CEILING
+    end
+    v = 0
+    i = 0
+    while i < n
+      v = v * 10 + (s.getbyte(i) - 48)
+      i += 1
+    end
+    v
+  end
+
+  # The largest request body the servers will read, in bytes. Headers
+  # were always capped (MAX_REQUEST_BYTES); the body was not, and every
+  # drain held the whole of it in one String before the app saw the
+  # request — so a `Content-Length: 10737418240` and a stream of bytes
+  # grew one worker until it died. A request declaring more than this is
+  # answered 413 from its headers, before any of the body is read.
+  #
+  # 100 MiB by default: tep buffers a body in memory, so this is a
+  # per-request memory bound, and it has to clear what the apps upload
+  # (campfire attachments arrive as multipart bodies through here, and
+  # campfire sets no limit of its own). TEP_MAX_BODY_BYTES overrides it;
+  # a value that is not a positive byte count leaves the default.
+  MAX_BODY_BYTES_DEFAULT = 100 * 1024 * 1024
+
+  def self.max_body_from_env
+    v = Tep.decimal_byte_count(ENV["TEP_MAX_BODY_BYTES"] || "")
+    v > 0 ? v : MAX_BODY_BYTES_DEFAULT
+  end
+
+  # Read once, at load: the environment does not change under a running
+  # server, and this is consulted on every request.
+  @max_body_bytes = Tep.max_body_from_env
+
+  def self.max_body_bytes
+    @max_body_bytes
+  end
+
   # Holder for a Fiber so the cooperative scheduler (Tep::Scheduler, the
   # TEP_SERVER=fiber measurement lane) can keep them in a typed array.
   # Spinel's `[Fiber.new { ... }]` array literal infers IntArray (Fiber is
