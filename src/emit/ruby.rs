@@ -218,13 +218,14 @@ pub(crate) fn materialize_models(
         )
         .0,
     );
-    let lcs = crate::lower::model_to_library::lower_models_inner(
+    let lcs = crate::lower::model_to_library::lower_models_inner_with_ruby_values(
         &app.models,
         &app.schema,
         Vec::new(),
         &params_specs,
         &assoc_scopes,
         materialization,
+        true,
     ).0;
     (lcs, params_specs)
 }
@@ -576,6 +577,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth) -> Vec
         &app.controllers,
         model_extras,
         crate::lower::controller_to_library::LowerControllerOptions {
+            ruby_read_values: true,
             schema: Some(&app.schema),
             views: &app.views,
             library_classes: &app.library_classes,
