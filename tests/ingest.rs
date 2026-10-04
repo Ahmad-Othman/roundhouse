@@ -385,35 +385,62 @@ end
     );
 }
 
+/// A route omission is an error on the recovered table, not a fatal parse.
 #[test]
-fn routes_mount_fails_strict_and_recovers_as_a_survey_gap() {
-    // An engine mount cannot be represented by the host route table.
-    // Strict ingest must refuse it; survey mode records the omission
-    // while keeping the supported sibling route.
+fn routes_mount_diagnostic_preserves_siblings_in_every_mode() {
     let source = br#"Rails.application.routes.draw do
   mount Sidekiq::Web, at: "sidekiq"
   get "/posts", to: "posts#index"
 end
 "#;
-
-    let (strict, _) = roundhouse::ingest::prism::scope(|| {
-        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
-    });
-    let error = strict.expect_err("strict ingest must not silently drop mount");
-    assert!(error.to_string().contains("`mount` of an external engine"), "{error}");
+    let strict = roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+        .expect("mount diagnostics do not abort ingest");
+    assert_eq!(strict.entries.len(), 1);
+    assert_eq!(strict.diagnostics.len(), 1);
+    let diagnostic = &strict.diagnostics[0];
+    assert_eq!(diagnostic.severity, roundhouse::diagnostic::Severity::Error);
+    assert!(!diagnostic.span.is_synthetic());
+    assert_eq!(&source[diagnostic.span.start as usize..diagnostic.span.end as usize],
+        br#"mount Sidekiq::Web, at: "sidekiq""#);
 
     roundhouse::ingest::survey::activate();
-    let (result, _) = roundhouse::ingest::prism::scope(|| {
-        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
-    });
+    let result = roundhouse::ingest::ingest_routes(source, "config/routes.rb");
     let gaps = roundhouse::ingest::survey::drain();
-    let table = result.expect("survey ingest succeeds");
-    assert_eq!(table.entries.len(), 1, "the supported sibling route survives");
-    assert_eq!(gaps.len(), 1, "the omitted mount is reported once: {gaps:?}");
-    assert!(
-        gaps.iter().any(|g| format!("{g:?}").contains("mount")),
-        "the mount drop is ledgered, not silent: {gaps:?}"
-    );
+    let surveyed = result.expect("survey ingest succeeds");
+    assert_eq!(surveyed.entries, strict.entries);
+    assert_eq!(surveyed.diagnostics, strict.diagnostics);
+    assert_eq!(gaps.len(), 1, "one survey ledger entry: {gaps:?}");
+}
+
+/// Draw files retain their own source attribution and share mount recovery.
+#[test]
+fn mounts_in_split_route_files_keep_the_split_file_span() {
+    let table = roundhouse::ingest::routes::ingest_routes_with_draws(
+        b"Rails.application.routes.draw do\n  draw :admin\nend\n",
+        "config/routes.rb",
+        &std::collections::HashMap::from([("admin".to_string(), (
+            b"mount Catalog::Engine, at: '/catalog'\nget '/ok', to: 'posts#index'\n".to_vec(),
+            "config/routes/admin.rb".to_string(),
+        ))]),
+    ).unwrap();
+    assert_eq!(table.entries.len(), 1);
+    assert_eq!(table.diagnostics.len(), 1);
+    assert_eq!(table.diagnostics[0].span.file,
+        roundhouse::ingest::sources::file_id("config/routes/admin.rb"));
+}
+
+/// A top-level draw is transparent to the fixed runtime cable mount.
+#[test]
+fn top_level_draw_preserves_runtime_cable_mount_context() {
+    let table = roundhouse::ingest::routes::ingest_routes_with_draws(
+        b"Rails.application.routes.draw do\n  draw :cable\nend\n",
+        "config/routes.rb",
+        &std::collections::HashMap::from([("cable".to_string(), (
+            b"mount ActionCable.server => '/cable'\n".to_vec(),
+            "config/routes/cable.rb".to_string(),
+        ))]),
+    ).unwrap();
+    assert!(table.diagnostics.is_empty(), "{table:?}");
 }
 
 #[test]

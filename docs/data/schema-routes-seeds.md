@@ -153,10 +153,23 @@ The recognizer covers the verb shortcuts (`get`/`post`/…), `match`,
 `member`/`collection`/`constraints` blocks, `draw(:name)`
 split files under `config/routes/`, and options like `defaults:`,
 `on:`, and `via:` — `src/ingest/routes.rs` is the authority on the
-current surface. A `redirect(...)` target — on a verb or on `root` —
-is not modeled: the route is dropped with a `route dropped:` ledger
-line. Engine `mount` entries instead fail strict ingestion; in survey
-mode they record a gap and only the unsupported entry is omitted.
+current surface. Literal `redirect("/path")` targets on a verb or `root`
+are synthesized into controller actions. Dynamic targets, including block
+redirects, remain a separate known gap: they are dropped and reported only
+in survey mode. The mount diagnostic change does not broaden that existing
+boundary; recognizing or diagnosing dynamic route expressions needs its own
+regressions.
+
+Engine/Rack `mount` entries are omitted with a located error diagnostic
+carried on `RouteTable`, so normal analysis can report them beside other
+errors. Strict emission refuses those errors; `--allow-unsupported` can
+write the incomplete project. Survey mode additionally records the gap
+without clearing the error. The fixed runtime's top-level
+`mount ActionCable.server => "/cable"` (or `at: "/cable"`) is preserved;
+custom paths or enclosing route wrappers are not modeled by that runtime.
+The existing CRuby/JRuby pruning policy still omits Cable from apps without
+a live broadcast surface; the mount exemption does not change that policy.
+
 
 **Downstream consumers (analyze/lower):**
 

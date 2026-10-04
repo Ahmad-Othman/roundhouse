@@ -4,11 +4,13 @@
 //! `draw(:name)` inclusion of `config/routes/<name>.rb` split files.
 //!
 //! Recovery discipline: in survey mode an unsupported DSL construct
-//! (`mount`, `use_doorkeeper`, `devise_for`, …) records a gap and drops
+//! (`use_doorkeeper`, `devise_for`, …) records a gap and drops
 //! that one entry — the rest of the table still flattens. In strict
 //! mode it still fails loud so the fixture that introduces a new form
 //! forces a recognizer. Not-modeled ≠ absent: a dropped entry is a
-//! ledger line, never a silently empty route table.
+//! ledger line, never a silently empty route table. Engine mounts recover
+//! in every mode, with an error diagnostic carried on the route table;
+//! strict emission refuses that error unless explicitly overridden.
 
 use std::collections::HashMap;
 
@@ -18,6 +20,8 @@ use ruby_prism::Node;
 use crate::dialect::{DirectHelper, HttpMethod, ResourceScope, RouteSpec, RouteTable};
 use crate::naming::camelize;
 use crate::{ClassId, Symbol};
+use crate::diagnostic::Diagnostic;
+use crate::span::Span;
 
 use super::util::{
     constant_id_str, constant_path_of, find_call_named, flatten_statements, string_value,
@@ -25,6 +29,7 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+/// Ingest one host route table, retaining recoverable mount diagnostics.
 pub fn ingest_routes(source: &[u8], file: &str) -> IngestResult<RouteTable> {
     ingest_routes_with_draws(source, file, &HashMap::new())
 }
@@ -57,6 +62,7 @@ pub fn ingest_routes_with_draws(
     }
 
     let mut entries = Vec::new();
+    let mut context = RouteContext::default();
     // Collected by a second walk rather than threaded through the
     // recursive entry ingest: a `direct` is not a RouteSpec (it adds no
     // path), so it has nowhere to ride in the `entries` return, and
@@ -68,10 +74,63 @@ pub fn ingest_routes_with_draws(
         let Some(block) = block_node.as_block_node() else { continue };
         let Some(body) = block.body() else { continue };
         direct_helpers.extend(collect_direct_helpers(&body, file)?);
-        entries.extend(ingest_route_body(body, file, None, draws)?);
+        entries.extend(ingest_route_body(body, file, None, draws, &mut context)?);
     }
 
-    Ok(RouteTable { entries, direct_helpers, redirects: redirect_sink::drain() })
+    Ok(RouteTable { entries, direct_helpers, redirects: redirect_sink::drain(), diagnostics: context.diagnostics })
+}
+
+/// Per-table recovered errors and whether a runtime mount is inside a DSL
+/// wrapper whose path or constraints the fixed runtime endpoint cannot honor.
+#[derive(Default)]
+struct RouteContext {
+    diagnostics: Vec<Diagnostic>,
+    depth: usize,
+}
+
+impl RouteContext {
+    /// Restore the outer context even when a nested route fails ingestion.
+    fn nested<T>(&mut self, ingest: impl FnOnce(&mut Self) -> T) -> T {
+        self.depth += 1;
+        let result = ingest(self);
+        self.depth -= 1;
+        result
+    }
+}
+
+/// The runtime supplies only the top-level `/cable` endpoint. Accept the
+/// generated Rails hashrocket form and its equivalent `at:` spelling.
+fn runtime_cable_mount(call: &ruby_prism::CallNode<'_>) -> bool {
+    fn cable_server(node: &Node<'_>) -> bool {
+        let Some(server) = node.as_call_node() else { return false };
+        constant_id_str(&server.name()) == "server"
+            && server.arguments().is_none()
+            && server.block().is_none()
+            && server.receiver().and_then(|r| constant_path_of(&r))
+                .is_some_and(|parts| parts == ["ActionCable"])
+    }
+    let Some(args) = call.arguments() else { return false };
+    let mut server = false;
+    let mut path = None;
+    for arg in args.arguments().iter() {
+        if cable_server(&arg) {
+            server = true;
+            continue;
+        }
+        let Some(hash) = arg.as_keyword_hash_node() else { return false };
+        for item in hash.elements().iter() {
+            let Some(assoc) = item.as_assoc_node() else { return false };
+            if cable_server(&assoc.key()) {
+                server = true;
+                path = string_value(&assoc.value());
+            } else if symbol_value(&assoc.key()).as_deref() == Some("at") {
+                path = string_value(&assoc.value());
+            } else {
+                return false;
+            }
+        }
+    }
+    server && path.as_deref() == Some("/cable") && call.block().is_none()
 }
 
 /// Every top-level `draw` call in `root` — one per `X.routes.draw do
@@ -189,15 +248,18 @@ fn ingest_route_body(
     file: &str,
     parent: Option<&str>,
     draws: &HashMap<String, (Vec<u8>, String)>,
+    context: &mut RouteContext,
 ) -> IngestResult<Vec<RouteSpec>> {
-    ingest_route_stmts(flatten_statements(body).into_iter(), file, parent, draws)
+    ingest_route_stmts(flatten_statements(body).into_iter(), file, parent, draws, context)
 }
 
+/// Preserve sibling entries and propagate mount context through nested DSLs.
 fn ingest_route_stmts<'pr>(
     stmts: impl Iterator<Item = Node<'pr>>,
     file: &str,
     parent: Option<&str>,
     draws: &HashMap<String, (Vec<u8>, String)>,
+    context: &mut RouteContext,
 ) -> IngestResult<Vec<RouteSpec>> {
     let mut entries = Vec::new();
     for stmt in stmts {
@@ -215,7 +277,7 @@ fn ingest_route_stmts<'pr>(
         if constant_id_str(&call.name()) == "each" {
             if let Some(recv) = call.receiver() {
                 if let Some(pattern) = dir_glob_routes_pattern(&recv) {
-                    match ingest_glob_draw_each(&call, &pattern, file, draws) {
+                    match ingest_glob_draw_each(&call, &pattern, file, draws, context) {
                         Ok(new_entries) => entries.extend(new_entries),
                         Err(err) if super::survey::is_active() => super::survey::record(&err),
                         Err(err) => return Err(err),
@@ -252,7 +314,7 @@ fn ingest_route_stmts<'pr>(
                 if let Some(block) = block_node.as_block_node() {
                     if let Some(inner_body) = block.body() {
                         let mut inner =
-                            ingest_route_body(inner_body, file, parent, draws)?;
+                            context.nested(|context| ingest_route_body(inner_body, file, parent, draws, context))?;
                         let scope = match method.as_str() {
                             "member" => Some(ResourceScope::Member),
                             "collection" => Some(ResourceScope::Collection),
@@ -272,10 +334,10 @@ fn ingest_route_stmts<'pr>(
             continue;
         }
 
-        // Per-entry recovery: one `mount`/`use_doorkeeper` must not
+        // Per-entry recovery: one unknown DSL call must not
         // zero the whole table. Survey mode records the gap and keeps
         // walking; strict mode still fails loud.
-        match ingest_route_call(&call, &method, file, parent, draws) {
+        match ingest_route_call(&call, &method, file, parent, draws, context) {
             Ok(Some(spec)) if method == "match" => match expand_match_via(&call, spec, file) {
                 Ok(expanded) => entries.extend(expanded),
                 Err(err) if super::survey::is_active() => super::survey::record(&err),
@@ -525,17 +587,19 @@ fn redirect_expression_is_string(expr: &crate::expr::Expr) -> bool {
     }
 }
 
+/// Recognize one route, recording omitted mounts on the shared table context.
 fn ingest_route_call(
     call: &ruby_prism::CallNode<'_>,
     method: &str,
     file: &str,
     parent: Option<&str>,
     draws: &HashMap<String, (Vec<u8>, String)>,
+    context: &mut RouteContext,
 ) -> IngestResult<Option<RouteSpec>> {
     // Verb shortcuts (`get "/p", to: "c#a"` and the hashrocket form
     // `get "/p" => "c#a"`). `ingest_explicit_route` returns Ok(None)
-    // for shapes it intentionally drops (today: `to: redirect(...)`
-    // helpers — not bench-critical, not modeled in `RouteSpec`).
+    // for dynamic targets it cannot model. Literal redirects are
+    // synthesized below; dynamic targets remain a separate survey-only gap.
     if let Some(http) = http_method_from(method) {
         // A `match` takes its verbs from `via:` in `expand_match_via`,
         // once the entry is built; expanding it here too would copy
@@ -574,10 +638,10 @@ fn ingest_route_call(
     }
     match method {
         "root" => ingest_root_route(call, file),
-        "resources" => ingest_resources_route(call, file, draws, false).map(Some),
-        "resource" => ingest_resources_route(call, file, draws, true).map(Some),
-        "namespace" => ingest_namespace_route(call, file, draws).map(Some),
-        "scope" => ingest_scope_route(call, file, draws).map(Some),
+        "resources" => ingest_resources_route(call, file, draws, context, false).map(Some),
+        "resource" => ingest_resources_route(call, file, draws, context, true).map(Some),
+        "namespace" => ingest_namespace_route(call, file, draws, context).map(Some),
+        "scope" => ingest_scope_route(call, file, draws, context).map(Some),
         // `nested do … end` — the explicit form of the nesting a
         // `resources` block already applies to a child `resources` or
         // verb call. It carries no facets of its own; what it does is
@@ -591,18 +655,35 @@ fn ingest_route_call(
             as_prefix: None,
             defaults: IndexMap::new(),
             nest: true,
-            entries: block_entries(call, file, None, draws)?,
+            entries: block_entries(call, file, None, draws, context)?,
         })),
-        "draw" => ingest_draw_route(call, file, draws),
-        // Engine routes are not composed into the host table, even when
-        // a path-sourced engine's app/ was discovered. Refuse strict ingest;
-        // the caller's per-entry survey recovery records the gap and keeps
-        // sibling routes. Built-in ActiveStorage routes are supplied by the
-        // runtime separately and do not pass through this mount branch.
-        "mount" => Err(IngestError::Unsupported {
-            file: file.into(),
-            message: "unsupported route: `mount` of an external engine".into(),
-        }),
+        "draw" => ingest_draw_route(call, file, draws, context),
+        // Keep supported siblings and the ordinary error stream. A mount
+        // is not a parse failure, and --allow-unsupported can inspect the
+        // incomplete output. Only the existing fixed runtime cable endpoint
+        // is exempt; this does not add engine route composition.
+        "mount" => {
+            if context.depth == 0 && runtime_cable_mount(call) {
+                return Ok(None);
+            }
+            let location = call.location();
+            let detail = "mounted Rack applications and engine routes are not composed into the host route table";
+            context.diagnostics.push(Diagnostic::unsupported(
+                Span {
+                    file: super::sources::file_id(file),
+                    start: location.start_offset() as u32,
+                    end: location.end_offset() as u32,
+                },
+                None,
+                "route mount",
+                detail,
+            ));
+            super::survey::record(&IngestError::Unsupported {
+                file: file.into(),
+                message: format!("route mount: {detail}"),
+            });
+            Ok(None)
+        }
         // `direct :fresh_user_avatar do |user, options| … end` — a
         // custom URL helper, not a route: it adds no path to the table,
         // it names a `<name>_path`/`_url` builder whose body is
@@ -775,22 +856,24 @@ fn first_name_arg(call: &ruby_prism::CallNode<'_>) -> Option<String> {
     None
 }
 
+/// Enter a wrapper whose path/constraints cannot be applied to fixed runtime mounts.
 fn block_entries(
     call: &ruby_prism::CallNode<'_>,
     file: &str,
     parent: Option<&str>,
     draws: &HashMap<String, (Vec<u8>, String)>,
+    context: &mut RouteContext,
 ) -> IngestResult<Vec<RouteSpec>> {
-    match call.block() {
+    context.nested(|context| match call.block() {
         Some(block_node) => match block_node.as_block_node() {
             Some(block) => match block.body() {
-                Some(body) => ingest_route_body(body, file, parent, draws),
+                Some(body) => ingest_route_body(body, file, parent, draws, context),
                 None => Ok(Vec::new()),
             },
             None => Ok(Vec::new()),
         },
         None => Ok(Vec::new()),
-    }
+    })
 }
 
 /// `namespace :admin do … end` — `scope` with path, controller module,
@@ -801,6 +884,7 @@ fn ingest_namespace_route(
     call: &ruby_prism::CallNode<'_>,
     file: &str,
     draws: &HashMap<String, (Vec<u8>, String)>,
+    context: &mut RouteContext,
 ) -> IngestResult<RouteSpec> {
     let Some(name) = first_name_arg(call) else {
         return Err(IngestError::Unsupported {
@@ -808,7 +892,7 @@ fn ingest_namespace_route(
             message: "namespace without a name".into(),
         });
     };
-    let entries = block_entries(call, file, None, draws)?;
+    let entries = block_entries(call, file, None, draws, context)?;
     Ok(RouteSpec::Scope {
         path: Some(name.clone()),
         module: Some(name.clone()),
@@ -826,6 +910,7 @@ fn ingest_scope_route(
     call: &ruby_prism::CallNode<'_>,
     file: &str,
     draws: &HashMap<String, (Vec<u8>, String)>,
+    context: &mut RouteContext,
 ) -> IngestResult<RouteSpec> {
     let mut path = first_name_arg(call);
     let mut module: Option<String> = None;
@@ -871,7 +956,7 @@ fn ingest_scope_route(
             }
         }
     }
-    let entries = block_entries(call, file, None, draws)?;
+    let entries = block_entries(call, file, None, draws, context)?;
     Ok(RouteSpec::Scope { path, module, as_prefix, defaults, nest: false, entries })
 }
 
@@ -883,6 +968,7 @@ fn ingest_draw_route(
     call: &ruby_prism::CallNode<'_>,
     file: &str,
     draws: &HashMap<String, (Vec<u8>, String)>,
+    context: &mut RouteContext,
 ) -> IngestResult<Option<RouteSpec>> {
     let Some(name) = first_name_arg(call) else {
         return Err(IngestError::Unsupported {
@@ -896,7 +982,7 @@ fn ingest_draw_route(
             message: format!("draw(:{name}) — config/routes/{name}.rb not found"),
         });
     };
-    let entries = ingest_routes_file_entries(source, path, draws)?;
+    let entries = ingest_routes_file_entries(source, path, draws, context)?;
     Ok(Some(RouteSpec::Scope {
         path: None,
         module: None,
@@ -942,6 +1028,7 @@ fn ingest_routes_file_entries(
     source: &[u8],
     path: &str,
     draws: &HashMap<String, (Vec<u8>, String)>,
+    context: &mut RouteContext,
 ) -> IngestResult<Vec<RouteSpec>> {
     super::sources::register(path, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, path);
@@ -952,7 +1039,7 @@ fn ingest_routes_file_entries(
             message: "route file is not a program".into(),
         });
     };
-    ingest_route_stmts(program.statements().body().iter(), path, None, draws)
+    ingest_route_stmts(program.statements().body().iter(), path, None, draws, context)
 }
 
 /// Recognize the receiver of a top-level `<recv>.each do |v| draw(...)
@@ -1020,6 +1107,7 @@ fn ingest_glob_draw_each(
     pattern: &str,
     file: &str,
     draws: &HashMap<String, (Vec<u8>, String)>,
+    context: &mut RouteContext,
 ) -> IngestResult<Vec<RouteSpec>> {
     let Some(block) = call.block().and_then(|b| b.as_block_node()) else {
         return Err(IngestError::Unsupported {
@@ -1054,7 +1142,7 @@ fn ingest_glob_draw_each(
             as_prefix: None,
             defaults: IndexMap::new(),
             nest: false,
-            entries: ingest_routes_file_entries(source, path, draws)?,
+            entries: ingest_routes_file_entries(source, path, draws, context)?,
         });
     }
     Ok(entries)
@@ -1285,9 +1373,9 @@ fn ingest_explicit_route(
         }));
     }
     if to_is_unsupported {
-        // Dropped, with a ledger line: the route is not modeled
-        // (`RouteSpec` has no Redirect variant), and a drop nobody can
-        // see is how #82's `root to: redirect(...)` went unnoticed.
+        // Dynamic targets remain a separate, survey-only gap; literal
+        // redirects have already been handled above. This mount fix
+        // does not change the boundary for dynamic route expressions.
         // Strict runs still pass — the hole is a missing route, not a
         // miscompile — so this records rather than errors.
         super::survey::record(&IngestError::Unsupported {
@@ -1349,9 +1437,8 @@ fn ingest_root_route(
     //   1. `root "c#a"` — single positional string arg.
     //   2. `root to: "c#a", as: "root"` — kwargs hash (modern or
     //      hashrocket `:to =>` style; both produce KeywordHashNode).
-    // Any non-string `to:` (`root to: redirect("/scan")`, a lambda) is
-    // the same drop as an explicit verb's `to: redirect(...)`: the
-    // route is not modeled, so it is skipped with a ledger line. It
+    // A dynamic target not handled as a literal redirect is dropped,
+    // like an explicit verb's dynamic target, with a survey ledger line. It
     // used to come back as a Root with an EMPTY target, which the
     // flattener turned into `Route.new("GET", "/", :, :index)` — the
     // one file in the tree that failed `ruby -c`, and the entry point
@@ -1419,6 +1506,7 @@ fn ingest_resources_route(
     call: &ruby_prism::CallNode<'_>,
     file: &str,
     draws: &HashMap<String, (Vec<u8>, String)>,
+    context: &mut RouteContext,
     singular: bool,
 ) -> IngestResult<RouteSpec> {
     let Some(args_node) = call.arguments() else {
@@ -1568,7 +1656,7 @@ fn ingest_resources_route(
             .collect();
     }
 
-    let nested = block_entries(call, file, Some(name_str.as_str()), draws)?;
+    let nested = block_entries(call, file, Some(name_str.as_str()), draws, context)?;
 
     Ok(RouteSpec::Resources {
         name,

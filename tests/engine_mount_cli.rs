@@ -1,5 +1,5 @@
 //! An unsupported engine mount must not disappear from a successful strict
-//! transpile. Survey mode may omit it only with an explicit gap report.
+//! transpile. Explicit emission overrides recover the supported sibling routes.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -65,41 +65,120 @@ fn transpile(app: &Path, target: &str, out: &Path, flags: &[&str]) -> Output {
         .expect("run roundhouse")
 }
 
-/// An emit override cannot recover an unsupported ingest without survey mode.
+/// Strict emission rejects the error in either ingestion mode, before output.
 #[test]
-fn strict_transpile_refuses_an_external_engine_mount_without_writing_output() {
+fn strict_transpile_refuses_an_engine_mount_without_writing_output() {
     let fixture = Fixture::new("strict");
     let app = fixture.write_app(true);
-    for target in ["ruby", "spinel"] {
-        for (label, flags) in [("strict", &[][..]), ("allow-only", &["--allow-unsupported"][..])] {
+    for target in ["ruby", "spinel", "roda"] {
+        for (label, flags) in [("strict", &[][..]), ("survey", &["--survey"][..])] {
             let out = fixture.0.join(format!("{target}-{label}"));
             let result = transpile(&app, target, &out, flags);
             let stderr = String::from_utf8_lossy(&result.stderr);
-            assert!(!result.status.success(), "{target}/{label}: engine mount was silently accepted:\n{stderr}");
-            assert!(stderr.contains("config/routes.rb"), "{stderr}");
-            assert!(stderr.contains("`mount` of an external engine"), "{stderr}");
-            assert!(!out.exists(), "strict ingest must not write an incomplete project: {out:?}");
+            assert!(!result.status.success(), "{target}/{label}: {stderr}");
+            assert!(stderr.contains("config/routes.rb:3:3"), "{stderr}");
+            assert!(stderr.contains("error[unsupported]: route mount"), "{stderr}");
+            assert!(!out.exists(), "strict mode must not write incomplete output: {out:?}");
         }
     }
 }
 
-/// Both survey invocations retain their explicit incomplete-project contract.
+/// The normal diagnostic policy, not survey mode, controls emission recovery.
 #[test]
-fn survey_reports_the_dropped_mount_and_keeps_the_host_route() {
-    let fixture = Fixture::new("survey");
+fn allow_unsupported_reports_the_dropped_mount_and_keeps_host_routes() {
+    let fixture = Fixture::new("allow");
     let app = fixture.write_app(true);
-    for target in ["ruby", "spinel"] {
-        for (label, flags) in [("survey", &["--survey"][..]), ("survey-allow", &["--survey", "--allow-unsupported"][..])] {
+    for target in ["ruby", "spinel", "roda"] {
+        for (label, flags) in [("allow", &["--allow-unsupported"][..]), ("survey-allow", &["--survey", "--allow-unsupported"][..])] {
             let out = fixture.0.join(format!("{target}-{label}"));
             let result = transpile(&app, target, &out, flags);
             let stderr = String::from_utf8_lossy(&result.stderr);
             assert!(result.status.success(), "{target}/{label}: {stderr}");
-            assert!(stderr.contains("Survey: 1 ingest gap(s)"), "{stderr}");
-            assert!(stderr.contains("`mount` of an external engine"), "{stderr}");
-            let routes = std::fs::read_to_string(out.join("config/routes.rb")).unwrap();
-            assert!(routes.contains("/widgets"), "host route disappeared: {routes}");
-            assert!(!routes.contains("/catalog"), "survey must not invent engine support: {routes}");
+            assert!(stderr.contains("warning[unsupported]: route mount"), "{stderr}");
+            assert!(stderr.contains("config/routes.rb:3:3"), "{stderr}");
+            if label == "survey-allow" {
+                assert!(stderr.contains("Survey: 1 ingest gap(s)"), "{stderr}");
+            }
+            let route_file = if target == "roda" { "app.rb" } else { "config/routes.rb" };
+            let routes = std::fs::read_to_string(out.join(route_file)).unwrap();
+            let expected = if target == "roda" { "r.get \"widgets\"" } else { "/widgets" };
+            assert!(routes.contains(expected), "host route disappeared: {routes}");
+            assert!(!routes.contains("catalog"), "override must not invent engine support: {routes}");
         }
+    }
+}
+
+/// Check reports the route omission beside an unrelated source error.
+#[test]
+fn check_reports_mount_and_other_errors_together() {
+    let fixture = Fixture::new("check");
+    let app = fixture.write_app(true);
+    std::fs::write(app.join("app/controllers/widgets_controller.rb"),
+        "class WidgetsController < ActionController::Base\n  def index\n    render plain: 1.no_such_method\n  end\nend\n").unwrap();
+    for mode in ["--strict", "--continue"] {
+        let result = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+            .args(["check", mode]).arg(&app)
+            .env_remove("ROUNDHOUSE_INGEST_SURVEY").output().unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert_eq!(result.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains("config/routes.rb:3:3"), "{stderr}");
+        assert!(stderr.contains("error[unsupported]: route mount"), "{stderr}");
+        assert!(stderr.contains("no_such_method"), "{stderr}");
+        assert!(stderr.contains("app/controllers/widgets_controller.rb"), "{stderr}");
+        assert!(!stderr.contains("ingest failed"), "{stderr}");
+    }
+}
+
+/// Existing top-level cable mounts are provided by the shipped runtimes.
+#[test]
+fn builtin_action_cable_mounts_keep_the_fixed_runtime_endpoint() {
+    let fixture = Fixture::new("cable");
+    let app = fixture.write_app(false);
+    // CRuby retains Cable only when an app has a live broadcast surface.
+    std::fs::create_dir_all(app.join("app/models")).unwrap();
+    std::fs::write(app.join("app/models/widget.rb"),
+        "class Widget < ActiveRecord::Base\n  broadcasts_to ->(_widget) { 'widgets' }\nend\n").unwrap();
+    std::fs::write(app.join("db/schema.rb"),
+        "ActiveRecord::Schema[8.1].define do\n  create_table :widgets do |t|\n    t.string :name\n  end\nend\n").unwrap();
+    for (label, mount) in [
+        ("hashrocket", "mount ActionCable.server => '/cable'"),
+        ("keyword", "mount ActionCable.server, at: '/cable'"),
+    ] {
+        std::fs::write(app.join("config/routes.rb"), format!(
+            "Rails.application.routes.draw do\n  get '/widgets', to: 'widgets#index'\n  {mount}\nend\n"
+        )).unwrap();
+        for target in ["ruby", "spinel"] {
+            let out = fixture.0.join(format!("{target}-{label}"));
+            let result = transpile(&app, target, &out, &[]);
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert!(result.status.success(), "{target}/{label}: {stderr}");
+            assert!(!stderr.contains("route mount"), "{stderr}");
+            let dispatch = if target == "ruby" { "config.ru" } else { "main.rb" };
+            let source = std::fs::read_to_string(out.join(dispatch)).unwrap();
+            assert!(source.contains("== \"/cable\""), "{target}: fixed cable dispatch absent");
+        }
+    }
+}
+
+/// Custom cable paths and nested mounts are not served by the fixed runtime.
+#[test]
+fn unimplemented_cable_mount_shapes_still_report_an_error() {
+    let fixture = Fixture::new("cable-gap");
+    let app = fixture.write_app(false);
+    for (index, mount) in [
+        "mount ActionCable.server, at: '/socket'",
+        "namespace :admin do\n    mount ActionCable.server => '/cable'\n  end",
+        "mount OtherCable.server => '/cable'",
+    ].iter().enumerate() {
+        std::fs::write(app.join("config/routes.rb"), format!(
+            "Rails.application.routes.draw do\n  {mount}\nend\n"
+        )).unwrap();
+        let out = fixture.0.join(format!("out-{index}"));
+        let result = transpile(&app, "ruby", &out, &[]);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(!result.status.success(), "{stderr}");
+        assert!(stderr.contains("error[unsupported]: route mount"), "{stderr}");
+        assert!(!out.exists());
     }
 }
 
@@ -113,7 +192,7 @@ fn builtin_active_storage_routes_do_not_require_an_external_mount() {
         let result = transpile(&app, target, &out, &[]);
         let stderr = String::from_utf8_lossy(&result.stderr);
         assert!(result.status.success(), "{target}: {stderr}");
-        assert!(!stderr.contains("`mount` of an external engine"), "{stderr}");
+        assert!(!stderr.contains("route mount"), "{stderr}");
         let main = std::fs::read_to_string(out.join("main.rb")).unwrap();
         assert!(main.contains("RouteTable.table + ActiveStorage::Routes.table"), "{target}: built-in routes missing");
         assert!(out.join("runtime/active_storage_disk.rb").is_file());

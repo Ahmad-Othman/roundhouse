@@ -115,6 +115,7 @@ fn tiny_blog_round_trips() {
         }],
         direct_helpers: vec![],
         redirects: vec![],
+        diagnostics: vec![],
     };
 
     let app = App {
