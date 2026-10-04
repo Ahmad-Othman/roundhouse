@@ -561,6 +561,37 @@ puts "Unset nonnullable Date JSON is null in both paths"
         .assert_passes();
 }
 
+/// A jbuilder view over a date column renders what Rails 8.1 + jbuilder
+/// 2.15 render: the ISO date, or `null` — both through `json.extract!`
+/// and a bare `json.key record.col` pair. The view used to send the
+/// date's stored text through `encode_datetime`, which quoted the ""
+/// an unset nonnullable slot holds (`"due_on":""`). A timestamp column
+/// in the same view keeps its `encode_datetime` route.
+#[test]
+fn jbuilder_date_column_renders_the_iso_date_or_null() {
+    date_blog()
+        .edit("db/schema.rb", "t.date \"due_on\"", "t.date \"due_on\", null: false")
+        .write("app/controllers/calendar_entries_controller.rb", "class CalendarEntriesController < ApplicationController\n  def show\n    @calendar_entry = CalendarEntry.find(params[:id])\n  end\n\n  def fresh\n    @calendar_entry = CalendarEntry.new\n    render :show\n  end\nend\n")
+        .write("app/views/calendar_entries/show.json.jbuilder", "json.extract! @calendar_entry, :due_on, :observed_at\njson.due @calendar_entry.due_on\n")
+        .edit("config/routes.rb", "  resources :articles do", "  resources :calendar_entries, only: [:show] do\n    get :fresh, on: :collection\n  end\n  resources :articles do")
+        .run_ruby(r#"
+require_relative "app/controllers/calendar_entries_controller"
+entry = CalendarEntry.create!(due_on: Date.new(2024, 1, 31), observed_at: Time.utc(2024, 1, 31, 23, 47, 19, 123456))
+controller = CalendarEntriesController.new
+controller.params = {"id" => entry.id.to_s}
+controller.process_action(:show)
+expected = '{"due_on":"2024-01-31","observed_at":"2024-01-31T23:47:19.123Z","due":"2024-01-31"}'
+raise controller.body.inspect unless controller.body == expected
+controller = CalendarEntriesController.new
+controller.params = {}
+controller.process_action(:fresh)
+expected = '{"due_on":null,"observed_at":null,"due":null}'
+raise controller.body.inspect unless controller.body == expected
+puts "jbuilder Date JSON is the ISO date or null"
+"#)
+        .assert_passes();
+}
+
 /// Alba's inherited declarations are executable property reads, not just a
 /// return-type assertion. Boot loads the generated classes without Alba.
 #[test]
@@ -4085,3 +4116,4 @@ end
         .run_test("test/controllers/articles_preload_controller_test.rb")
         .assert_passes();
 }
+
