@@ -1628,6 +1628,16 @@ class ArticleArrayWrapTest < ActiveSupport::TestCase
     assert_equal "a,b", article.wrapped_probe(%w[a b])
     assert_equal "solo", article.wrapped_probe("solo")
     assert_equal "7", article.wrapped_probe(7)
+    listed = Object.new
+    def listed.to_ary
+      %w[from to_ary]
+    end
+    assert_equal "from,to_ary", article.wrapped_probe(listed)
+    shy = Object.new
+    def shy.to_ary
+      nil
+    end
+    assert_equal shy.inspect, article.wrapped_probe(shy)
   end
 end
 "#,

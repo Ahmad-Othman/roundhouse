@@ -184,6 +184,10 @@ module ActiveSupport
   def self.wrap(object)
     return [] if object.nil?
     return object if object.is_a?(Array)
+    if object.respond_to?(:to_ary)
+      listed = object.to_ary
+      return listed unless listed.nil?
+    end
     [object]
   end
 

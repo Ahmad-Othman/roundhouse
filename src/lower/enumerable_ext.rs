@@ -208,7 +208,10 @@ fn ground_array_wrap(expr: &mut Expr) {
     }
     let Some(receiver) = recv.as_ref() else { return };
     let ExprNode::Const { path } = &*receiver.node else { return };
-    if path.last().is_none_or(|name| name.as_str() != "Array") {
+    // `Reports::Array.wrap` is not ActiveSupport's method. Only the
+    // top-level constant, written `Array` or `::Array`, is.
+    let names: Vec<&str> = path.iter().map(|name| name.as_str()).collect();
+    if names != ["Array"] && names != ["::Array"] {
         return;
     }
     *recv = Some(Expr::new(
