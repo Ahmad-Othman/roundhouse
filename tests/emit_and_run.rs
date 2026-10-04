@@ -3911,12 +3911,12 @@ fn a_string_predicate_the_app_defines_is_not_folded_as_an_inquiry() {
     emit_and_run::real_blog()
         .write(
             "lib/rails_ext/string.rb",
-            "class String\n  def shout?\n    self == upcase\n  end\nend\n",
+            "class String\n  def shout?\n    self == upcase\n  end\n\n  def self.special?\n    true\n  end\nend\n",
         )
         .edit(
             "app/models/article.rb",
             "class Article < ApplicationRecord",
-            "class Article < ApplicationRecord\n  def shouting?\n    title.to_s.shout?\n  end\n\n  def shouting_inquirer?\n    title.to_s.inquiry.shout?\n  end",
+            "class Article < ApplicationRecord\n  def shouting?\n    title.to_s.shout?\n  end\n\n  def shouting_inquirer?\n    title.to_s.inquiry.shout?\n  end\n\n  def class_side_inquirer?\n    title.to_s.inquiry.special?\n  end",
         )
         .run_ruby(
             r#"
@@ -3924,6 +3924,8 @@ raise "folded to a comparison" unless Article.new(title: "LOUD", body: "b").shou
 raise "answers true for everything" if Article.new(title: "quiet", body: "b").shouting?
 raise "inquirer folded to a comparison" unless Article.new(title: "LOUD", body: "b").shouting_inquirer?
 raise "inquirer answers true for everything" if Article.new(title: "quiet", body: "b").shouting_inquirer?
+raise "class-side predicate blocked the fold" unless Article.new(title: "special", body: "b").class_side_inquirer?
+raise "class-side fold answers true for everything" if Article.new(title: "quiet", body: "b").class_side_inquirer?
 "#,
         )
         .assert_passes();

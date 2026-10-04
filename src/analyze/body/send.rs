@@ -1457,7 +1457,7 @@ impl<'a> BodyTyper<'a> {
             // `all_emoji?`) answers where the builtin table has nothing.
             Some(Ty::Str) => match str_method(method) {
                 Ty::Var { .. } => self
-                    .lookup_in_module(&ClassId(Symbol::from("String")), method)
+                    .lookup_string_instance(method)
                     .unwrap_or_else(unknown),
                 ty => ty,
             },
@@ -1561,6 +1561,24 @@ impl<'a> BodyTyper<'a> {
                 }
             }
             current = cls.parent.clone();
+        }
+        None
+    }
+
+    /// A method the app adds by reopening `String`, or by including a
+    /// module into it. Class methods do not answer `"text".foo`.
+    fn lookup_string_instance(&self, method: &Symbol) -> Option<Ty> {
+        let mut stack = vec![ClassId(Symbol::from("String"))];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Some(m) = self.classes().get(&id) else { continue };
+            if let Some(ty) = m.instance_methods.get(method) {
+                return Some(unwrap_fn_ret(ty));
+            }
+            stack.extend(m.includes.iter().cloned());
         }
         None
     }

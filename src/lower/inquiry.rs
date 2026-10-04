@@ -85,7 +85,12 @@ fn app_string_methods(app: &App) -> std::collections::HashSet<Symbol> {
             continue;
         }
         for lc in app.library_classes.iter().filter(|lc| lc.name == id) {
-            out.extend(lc.methods.iter().map(|m| m.name.clone()));
+            out.extend(
+                lc.methods
+                    .iter()
+                    .filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance)
+                    .map(|m| m.name.clone()),
+            );
             stack.extend(lc.includes.iter().cloned());
         }
     }
