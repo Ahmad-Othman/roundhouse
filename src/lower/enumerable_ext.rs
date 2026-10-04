@@ -218,30 +218,125 @@ fn ground_array_wrap(expr: &mut Expr) {
     // reads an untyped parameter, and each read counts against the
     // runtime concrete-type ceiling. Nil is `[]`. An Array is itself,
     // which is what Rails' `to_ary` answers for a real Array. A single
-    // other closed type is a one-element array. A union is not one of
-    // those shapes: `[arg]` would nest an Array or wrap nil. The call
-    // stays, and the catalog already types `Array.wrap` as an Array.
-    // A custom `to_ary` is not called either: an unknown `to_ary` is
-    // dropped, which would wrap the object instead of its records.
+    // other closed type is a one-element array. A union of those
+    // shapes is a branch, so neither arm wraps the other. Anything
+    // else stays the call. A custom `to_ary` is not called: an unknown
+    // `to_ary` is dropped, which would wrap the object instead of its
+    // records.
     let arg = args[0].clone();
     let Some(folded) = fold_array_wrap(span, &arg) else { return };
     expr.ty = folded.ty.clone();
     *expr.node = *folded.node;
 }
 
+fn empty_array(span: crate::span::Span) -> Expr {
+    let mut empty = Expr::new(span, ExprNode::Array { elements: vec![], style: Default::default() });
+    // A later pass reads assignment types. An untyped `[]` is invisible
+    // to it, so a controller ivar assigned both this and a Relation
+    // would keep the Relation.
+    empty.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+    empty
+}
+
 fn fold_array_wrap(span: crate::span::Span, arg: &Expr) -> Option<Expr> {
-    match arg.ty.as_ref() {
-        Some(Ty::Nil) => Some(Expr::new(
+    let empty = empty_array(span);
+    let one = |value: Expr| {
+        let mut wrapped = Expr::new(
             span,
-            ExprNode::Array { elements: vec![], style: Default::default() },
-        )),
+            ExprNode::Array { elements: vec![value], style: Default::default() },
+        );
+        wrapped.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+        wrapped
+    };
+    match arg.ty.as_ref() {
+        Some(Ty::Nil) => Some(empty),
         Some(Ty::Array { .. }) => Some(arg.clone()),
-        Some(Ty::Union { .. }) | None => None,
-        Some(_) => Some(Expr::new(
+        Some(Ty::Union { variants }) => fold_union_wrap(span, arg, variants),
+        None => None,
+        Some(_) => Some(one(arg.clone())),
+    }
+}
+
+/// `Array | Nil` is `[]` or the array. `String | Nil` is `[]` or
+/// `[value]`. A union that also holds an open or nested type is not
+/// one of those answers, so the call stays.
+fn fold_union_wrap(span: crate::span::Span, arg: &Expr, variants: &[Ty]) -> Option<Expr> {
+    let has_nil = variants.iter().any(|v| matches!(v, Ty::Nil));
+    let arrays: Vec<&Ty> = variants.iter().filter(|v| matches!(v, Ty::Array { .. })).collect();
+    let others: Vec<&Ty> = variants
+        .iter()
+        .filter(|v| !matches!(v, Ty::Nil | Ty::Array { .. }))
+        .collect();
+    if arrays.len() > 1 || (!others.is_empty() && !arrays.is_empty()) {
+        return None;
+    }
+    if !has_nil && arrays.is_empty() {
+        return Some(Expr::new(
             span,
             ExprNode::Array { elements: vec![arg.clone()], style: Default::default() },
-        )),
+        ));
     }
+    let bound = bind_once(span, arg);
+    let read = bound.read.clone();
+    let when_nil = empty_array(span);
+    let when_present = if arrays.len() == 1 {
+        read.clone()
+    } else {
+        let mut wrapped = Expr::new(
+            span,
+            ExprNode::Array { elements: vec![read.clone()], style: Default::default() },
+        );
+        wrapped.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+        wrapped
+    };
+    let mut cond = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(read),
+            method: crate::ident::Symbol::from("nil?"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    cond.ty = Some(Ty::Bool);
+    let mut branch = Expr::new(
+        span,
+        ExprNode::If {
+            cond,
+            then_branch: when_nil,
+            else_branch: when_present,
+        },
+    );
+    branch.ty = Some(Ty::Array { elem: Box::new(Ty::Untyped) });
+    Some(Expr::new(
+        span,
+        ExprNode::Seq { exprs: vec![bound.assign, branch] },
+    ))
+}
+
+struct Bound {
+    assign: Expr,
+    read: Expr,
+}
+
+fn bind_once(span: crate::span::Span, arg: &Expr) -> Bound {
+    if matches!(&*arg.node, ExprNode::Var { .. } | ExprNode::Lit { .. }) {
+        return Bound { assign: Expr::new(span, ExprNode::Seq { exprs: vec![] }), read: arg.clone() };
+    }
+    let name = crate::ident::Symbol::from("__array_wrap");
+    let read = Expr::new(
+        span,
+        ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() },
+    );
+    let assign = Expr::new(
+        span,
+        ExprNode::Assign {
+            target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
+            value: arg.clone(),
+        },
+    );
+    Bound { assign, read }
 }
 
 /// words_connector, two_words_connector, last_word_connector — Rails'

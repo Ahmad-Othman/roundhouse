@@ -1663,6 +1663,17 @@ fn array_wrap_keeps_nil_an_array_and_a_scalar_distinct() {
   def wrapped_integer
     Array.wrap(7).map { |item| item.to_s }.join(",")
   end
+
+  # One caller passes an array, the default is nil, so the parameter
+  # is `Array | Nil`. Folding that to one shape would nest the array
+  # or wrap nil. The call stays and answers both.
+  def wrapped_either(value = nil)
+    Array.wrap(value).map { |item| item.to_s }.join(",")
+  end
+
+  def either_from_array
+    wrapped_either(%w[a b])
+  end
 "#,
         )
         .write(
@@ -1676,6 +1687,9 @@ class ArticleArrayWrapTest < ActiveSupport::TestCase
     assert_equal "a,b", article.wrapped_array
     assert_equal "solo", article.wrapped_string
     assert_equal "7", article.wrapped_integer
+    assert_equal "", article.wrapped_either
+    assert_equal "", article.wrapped_either(nil)
+    assert_equal "a,b", article.wrapped_either(%w[a b])
   end
 end
 "#,
