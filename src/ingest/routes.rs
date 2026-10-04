@@ -306,10 +306,20 @@ mod redirect_sink {
     /// it: the path, made into an identifier, with a counter appended
     /// if an earlier route already took that name.
     pub(super) fn push(path: &str, location: String, status: u16) -> Symbol {
-        push_with(path, location, status, false)
+        push_with(path, location, status, false, false)
     }
 
-    fn push_with(path: &str, location: String, status: u16, location_is_expression: bool) -> Symbol {
+    pub(super) fn push_keeping_query(path: &str, location: String, status: u16) -> Symbol {
+        push_with(path, location, status, false, true)
+    }
+
+    fn push_with(
+        path: &str,
+        location: String,
+        status: u16,
+        location_is_expression: bool,
+        keep_query: bool,
+    ) -> Symbol {
         SINK.with(|sink| {
             let mut sink = sink.borrow_mut();
             let base = action_name(path);
@@ -320,7 +330,13 @@ mod redirect_sink {
                 name = format!("{base}_{n}");
             }
             let action = Symbol::from(name.as_str());
-            sink.push(RedirectRoute { action: action.clone(), location, status, location_is_expression });
+            sink.push(RedirectRoute {
+                action: action.clone(),
+                location,
+                status,
+                location_is_expression,
+                keep_query,
+            });
             action
         })
     }
@@ -366,7 +382,7 @@ pub const RAILS_HEALTH_CONTROLLER: &str = "Rails::HealthController";
 /// `redirect("/path")` / `redirect("/path", status: 302)` — the literal
 /// form, which is all that can be served without running Rails'
 /// redirect block. Answers the location and the status Rails would use.
-fn redirect_literal(node: &Node<'_>) -> Option<(String, u16)> {
+fn redirect_literal(node: &Node<'_>) -> Option<(String, u16, bool)> {
     let call = node.as_call_node()?;
     if call.receiver().is_some() {
         return None;
@@ -376,11 +392,13 @@ fn redirect_literal(node: &Node<'_>) -> Option<(String, u16)> {
         return None;
     }
     if let Some(block) = call.block().and_then(|block| block.as_block_node()) {
-        return redirect_block(block, redirect_status_from_call(&call));
+        let (location, status) = redirect_block(block, redirect_status_from_call(&call))?;
+        return Some((location, status, false));
     }
     let Some(arguments) = call.arguments() else { return None };
     let mut location = None;
     let mut status = 301;
+    let mut path_option = false;
     for argument in arguments.arguments().iter() {
         if let Some(s) = string_value(&argument) {
             location.get_or_insert(s);
@@ -390,18 +408,34 @@ fn redirect_literal(node: &Node<'_>) -> Option<(String, u16)> {
         for element in hash.elements().iter() {
             let Some(assoc) = element.as_assoc_node() else { continue };
             let Some(key) = symbol_value(&assoc.key()) else { continue };
-            if key.as_str() != "status" {
-                return None;
+            match key.as_str() {
+                "status" => {
+                    let value = assoc.value();
+                    let code = value
+                        .as_integer_node()
+                        .and_then(|i| super::util::integer_i64(&i.value()))
+                        .and_then(|i| u16::try_from(i).ok())?;
+                    status = code;
+                }
+                // `redirect(path: "/login")` is Rails' options form of a
+                // path-only redirect: the same location a positional
+                // string carries, without host, protocol, or query.
+                // Other options (`subdomain:`, `host:`) rebuild the
+                // request URL and stay unmodeled.
+                "path" => {
+                    // Distinct from a positional string: the caller marks
+                    // this route so the synthesized action keeps the
+                    // request query string. Rails' options hash wins
+                    // over a positional string, so `redirect("/old",
+                    // path: "/new")` goes to `/new`, not `/old`.
+                    path_option = true;
+                    location = Some(string_value(&assoc.value())?);
+                }
+                _ => return None,
             }
-            let value = assoc.value();
-            let code = value
-                .as_integer_node()
-                .and_then(|i| super::util::integer_i64(&i.value()))
-                .and_then(|i| u16::try_from(i).ok())?;
-            status = code;
         }
     }
-    Some((location?, status))
+    Some((location?, status, path_option))
 }
 
 /// `redirect { |params, request| "/path" }` when the block returns a
@@ -997,7 +1031,7 @@ fn ingest_explicit_route(
     let mut path: Option<String> = None;
     let mut to: Option<String> = None;
     let mut to_is_unsupported = false;
-    let mut redirect_target: Option<(String, u16)> = None;
+    let mut redirect_target: Option<(String, u16, bool)> = None;
     let mut as_name: Option<Symbol> = None;
     let mut action_kwarg: Option<String> = None;
     // The INLINE spelling of `member do … end` / `collection do … end`.
@@ -1132,12 +1166,16 @@ fn ingest_explicit_route(
         }
     }
 
-    if let Some((location, status)) = redirect_target {
+    if let Some((location, status, keep_query)) = redirect_target {
         // Served by a synthesized action rather than dropped: the app
         // gets the 301 it asked for, and no emitter learns a new route
         // kind for it.
         let path = path.clone().unwrap_or_else(|| "/".to_string());
-        let action = redirect_sink::push(&path, location, status);
+        let action = if keep_query {
+            redirect_sink::push_keeping_query(&path, location, status)
+        } else {
+            redirect_sink::push(&path, location, status)
+        };
         return Ok(Some(RouteSpec::Explicit {
             method,
             path,
@@ -1221,7 +1259,7 @@ fn ingest_root_route(
     // one file in the tree that failed `ruby -c`, and the entry point
     // (#82).
     let mut target: Option<String> = None;
-    let mut redirect_target: Option<(String, u16)> = None;
+    let mut redirect_target: Option<(String, u16, bool)> = None;
     if let Some(args_node) = call.arguments() {
         for arg in args_node.arguments().iter() {
             if let Some(s) = string_value(&arg) {
@@ -1247,8 +1285,12 @@ fn ingest_root_route(
         // `root to: redirect("/scan")` — served by a synthesized action
         // rather than dropped, so the emitted app answers `/` the way
         // Rails does (#82 recorded the drop; this lowers it).
-        let (location, status) = redirect;
-        let action = redirect_sink::push("/", location, status);
+        let (location, status, keep_query) = redirect;
+        let action = if keep_query {
+            redirect_sink::push_keeping_query("/", location, status)
+        } else {
+            redirect_sink::push("/", location, status)
+        };
         return Ok(Some(RouteSpec::Explicit {
             method: HttpMethod::Get,
             path: "/".to_string(),

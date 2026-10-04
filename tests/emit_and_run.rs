@@ -1601,6 +1601,103 @@ end
         .assert_passes();
 }
 
+/// `Hash#to_query` is the scalar query string Rails builds: symbol or
+/// string keys, a nil value with no `=`, and insertion order. Nested
+/// hashes stay on the ruby-family reopen.
+#[test]
+fn a_hash_to_query_renders_symbol_and_string_keys() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def query_probe
+    [
+      { name: "Ada", role: nil }.to_query,
+      { "name" => "Ada", "role" => "editor" }.to_query,
+      {}.to_query
+    ].join("|")
+  end
+"#,
+        )
+        .write(
+            "test/models/article_hash_query_test.rb",
+            r#"require "test_helper"
+
+class ArticleHashQueryTest < ActiveSupport::TestCase
+  test "Hash#to_query renders symbol keys, string keys, and a nil value" do
+    assert_equal "name=Ada&role|name=Ada&role=editor|", Article.new.query_probe
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_hash_query_test.rb")
+        .assert_passes();
+}
+
+/// `Array.wrap` is ActiveSupport's class method: nil is empty, an array
+/// stays an array, and a scalar becomes a one-element array.
+#[test]
+fn array_wrap_keeps_nil_an_array_and_a_scalar_distinct() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def wrapped_nil
+    Array.wrap(nil).map { |item| item.to_s }.join(",")
+  end
+
+  def wrapped_array
+    Array.wrap(%w[a b]).map { |item| item.to_s }.join(",")
+  end
+
+  def wrapped_string
+    Array.wrap("solo").map { |item| item.to_s }.join(",")
+  end
+
+  def wrapped_integer
+    Array.wrap(7).map { |item| item.to_s }.join(",")
+  end
+
+  # One caller passes an array, the default is nil, so the parameter
+  # is `Array | Nil`. Folding that to one shape would nest the array
+  # or wrap nil. The call stays and answers both.
+  def wrapped_either(value = nil)
+    Array.wrap(value).map { |item| item.to_s }.join(",")
+  end
+
+  def either_from_array
+    wrapped_either(%w[a b])
+  end
+"#,
+        )
+        .write(
+            "test/models/article_array_wrap_test.rb",
+            r#"require "test_helper"
+
+class ArticleArrayWrapTest < ActiveSupport::TestCase
+  test "Array.wrap keeps nil, an array, and a scalar distinct" do
+    article = Article.new
+    assert_equal "", article.wrapped_nil
+    assert_equal "a,b", article.wrapped_array
+    assert_equal "solo", article.wrapped_string
+    assert_equal "7", article.wrapped_integer
+    assert_equal "", article.wrapped_either
+    assert_equal "", article.wrapped_either(nil)
+    assert_equal "a,b", article.wrapped_either(%w[a b])
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_array_wrap_test.rb")
+        .assert_passes();
+}
+
 /// Not a diagnostic count: each core method's value is held to what CRuby answers.
 #[test]
 fn core_integer_float_string_array_methods_run() {

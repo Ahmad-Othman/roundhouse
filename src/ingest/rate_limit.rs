@@ -191,7 +191,7 @@ fn take_from_controller_body(controller: &mut Controller) -> Vec<Limit> {
 }
 
 /// `rate_limit to: N, within: D, by: -> {…}, with: -> {…}, name: "…",
-/// only: […], except: […]` → its parts, or None for any call this is
+/// scope: …, only: […], except: […]` → its parts, or None for any call this is
 /// not, or an option it cannot expand.
 fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*call.node else {
@@ -207,6 +207,7 @@ fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
     let mut by_src: Option<String> = None;
     let mut with_src: Option<String> = None;
     let mut name: Option<String> = None;
+    let mut scope_src: Option<String> = None;
     let mut only: Vec<Symbol> = Vec::new();
     let mut except: Vec<Symbol> = Vec::new();
     let mut if_cond = None;
@@ -224,6 +225,11 @@ fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
                 let ExprNode::Lit { value: Literal::Str { value } } = &*v.node else { return None };
                 name = Some(value.clone());
             }
+            // Rails defaults the cache-key scope to this controller's
+            // path. `scope:` replaces that, so two controllers can share
+            // one budget: a symbol, a string, or a call such as
+            // `OtherController.controller_path`.
+            "scope" => scope_src = Some(scope_source(v)?),
             "only" => only = symbol_list(v)?,
             "except" => except = symbol_list(v)?,
             "if" => match &*v.node {
@@ -259,18 +265,39 @@ fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
         (None, [one]) => format!("rate_limit_{}", one.as_str()),
         (None, _) => "rate_limit".to_string(),
     };
-    // Rails: ["rate-limit", controller_path, name, by].compact.join(":")
-    let mut prefix = format!("rate-limit:{controller_path}");
-    if let Some(n) = &name {
-        prefix.push(':');
-        prefix.push_str(n);
-    }
-    prefix.push(':');
-    let key_src = format!(
-        "{} + ({}).to_s",
-        ruby_string_literal(&prefix),
-        by_src.unwrap_or_else(|| "request.remote_ip".to_string())
-    );
+    // Rails: ["rate-limit", scope || controller_path, name, by].compact.join(":")
+    let key_src = match scope_src {
+        Some(scope) => {
+            let mut parts = vec![format!(
+                "{} + ({}).to_s",
+                ruby_string_literal("rate-limit:"),
+                scope
+            )];
+            if let Some(n) = &name {
+                parts.push(ruby_string_literal(&format!(":{n}:")));
+            } else {
+                parts.push(ruby_string_literal(":"));
+            }
+            parts.push(format!(
+                "({}).to_s",
+                by_src.unwrap_or_else(|| "request.remote_ip".to_string())
+            ));
+            parts.join(" + ")
+        }
+        None => {
+            let mut prefix = format!("rate-limit:{controller_path}");
+            if let Some(n) = &name {
+                prefix.push(':');
+                prefix.push_str(n);
+            }
+            prefix.push(':');
+            format!(
+                "{} + ({}).to_s",
+                ruby_string_literal(&prefix),
+                by_src.unwrap_or_else(|| "request.remote_ip".to_string())
+            )
+        }
+    };
     Some(Limit {
         method,
         to_src: to_src?,
@@ -284,6 +311,22 @@ fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
         if_cond_expr,
         unless_cond_expr,
     })
+}
+
+/// `scope:` as the cache-key segment Rails joins. A symbol or string is
+/// that segment; a call (`SessionsController.controller_path`) is
+/// evaluated, which is how one controller names another's path.
+fn scope_source(v: &Expr) -> Option<String> {
+    // A symbol or string is captured when the macro expands, which is
+    // when Rails evaluates `scope:`. A call is not: Rails would run it
+    // once at declaration, and a nil or false result would fall back to
+    // this controller's path. Emitting the call inside the request would
+    // re-run it, and a nil result would collapse unrelated budgets.
+    match &*v.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(ruby_string_literal(value.as_str())),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(ruby_string_literal(value)),
+        _ => None,
+    }
 }
 
 /// The body of a `-> { … }` as source; None for anything else.
@@ -317,7 +360,20 @@ fn seconds_source(v: &Expr) -> String {
 }
 
 fn ruby_string_literal(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    // A double-quoted literal interpolates `#{…}`, `#@ivar`, and
+    // `#$global`. The scope was a literal, so each marker stays text.
+    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut out = String::with_capacity(escaped.len());
+    let chars: Vec<char> = escaped.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '#' && matches!(chars.get(i + 1), Some('{' | '@' | '$')) {
+            out.push('\\');
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    format!("\"{out}\"")
 }
 
 /// `:create` / `[:create, :update]` → the names; anything else → None.
@@ -383,6 +439,64 @@ mod tests {
         assert_eq!(l.key_src, "\"rate-limit:api/tokens:signup:\" + (params[:email]).to_s");
         assert_eq!(l.with_src, "head(:too_many_requests)");
         assert!(l.only.is_empty());
+    }
+
+    #[test]
+    fn a_shared_scope_replaces_the_controller_path_in_the_cache_key() {
+        // Two controllers count against one budget when the second names
+        // the first's path, a symbol, or a string. Rails joins
+        // `scope || controller_path` between `rate-limit` and `name`.
+        // A call is evaluated by Rails when the filter is declared.
+        // Expanding it into the request method would re-run it, and a
+        // nil result would collapse this controller's budget into
+        // another. The macro stays in place.
+        let mut shared = controller(
+            "class Users::Sessions::OtpsController < ApplicationController\n  \
+             rate_limit to: 10, within: 3.minutes, only: :create, scope: Users::SessionsController.controller_path\nend\n",
+        );
+        assert!(take_from_controller_body(&mut shared).is_empty());
+
+        let mut symbol = controller(
+            "class Api::TokensController < ApplicationController\n  \
+             rate_limit to: 100, within: 5.minutes, scope: :api_global\nend\n",
+        );
+        let symbol = &take_from_controller_body(&mut symbol)[0];
+        assert_eq!(
+            symbol.key_src,
+            "\"rate-limit:\" + (\"api_global\").to_s + \":\" + (request.remote_ip).to_s"
+        );
+
+        let mut named = controller(
+            "class Api::TokensController < ApplicationController\n  \
+             rate_limit to: 100, within: 5.minutes, name: \"burst\", scope: \"api\"\nend\n",
+        );
+        let named = &take_from_controller_body(&mut named)[0];
+        assert!(named.key_src.contains("\"api\""), "{}", named.key_src);
+        assert!(named.key_src.contains(":burst:"), "{}", named.key_src);
+
+        let mut marked = controller(
+            "class Api::TokensController < ApplicationController\n  \
+             rate_limit to: 100, within: 5.minutes, scope: \"budget-\\#{id}\"\nend\n",
+        );
+        let marked = &take_from_controller_body(&mut marked)[0];
+        assert!(
+            marked.key_src.contains("\\#{"),
+            "a literal interpolation marker stays literal; {}",
+            marked.key_src
+        );
+
+        // Single quotes keep `#@` and `#$` as text. Emitting them inside
+        // a double-quoted key would interpolate the ivar or the global.
+        let mut shorthand = controller(
+            "class Api::TokensController < ApplicationController\n  \
+             rate_limit to: 100, within: 5.minutes, scope: '#@token #$budget'\nend\n",
+        );
+        let shorthand = &take_from_controller_body(&mut shorthand)[0];
+        assert!(
+            shorthand.key_src.contains("\\#@token") && shorthand.key_src.contains("\\#$budget"),
+            "shorthand interpolation markers stay literal; {}",
+            shorthand.key_src
+        );
     }
 
     #[test]

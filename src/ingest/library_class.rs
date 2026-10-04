@@ -1249,6 +1249,63 @@ fn is_class_methods_bridge(def: &ruby_prism::DefNode<'_>) -> bool {
         .is_some_and(|c| constant_id_str(&c.name()) == "ClassMethods"))
 }
 
+/// `if enabled; attr_reader :token; end` is a declaration this walk
+/// would lower when it stands alone. Inside a branch it sometimes runs,
+/// which a synthesized method cannot express. Reject it rather than
+/// drop the name. A modifier (`return x if x`) has no statement body,
+/// so it is not this shape.
+fn reject_conditional_accessor(node: &ruby_prism::Node<'_>, file: &str) -> IngestResult<()> {
+    fn body_declares(body: Option<ruby_prism::Node<'_>>) -> bool {
+        body.is_some_and(|body| {
+            flatten_statements(body).iter().any(|stmt| {
+                stmt.as_call_node().is_some_and(|call| {
+                    call.receiver().is_none()
+                        && matches!(
+                            constant_id_str(&call.name()),
+                            "attr_reader"
+                                | "attr_writer"
+                                | "attr_accessor"
+                                | "cattr_reader"
+                                | "cattr_writer"
+                                | "cattr_accessor"
+                                | "mattr_reader"
+                                | "mattr_writer"
+                                | "mattr_accessor"
+                        )
+                })
+            })
+        })
+    }
+    let declares = if let Some(branch) = node.as_if_node() {
+        body_declares(branch.statements().map(|s| s.as_node()))
+            || branch.subsequent().is_some_and(|sub| {
+                sub.as_else_node()
+                    .and_then(|e| e.statements())
+                    .is_some_and(|s| body_declares(Some(s.as_node())))
+                    || sub.as_if_node().is_some_and(|inner| {
+                        body_declares(inner.statements().map(|s| s.as_node()))
+                    })
+            })
+    } else if let Some(branch) = node.as_unless_node() {
+        body_declares(branch.statements().map(|s| s.as_node()))
+            || branch
+                .else_clause()
+                .and_then(|clause| clause.statements())
+                .is_some_and(|s| body_declares(Some(s.as_node())))
+    } else {
+        false
+    };
+    if declares {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "conditional attr_reader, attr_writer, attr_accessor, cattr_*, or mattr_* \
+                      is not a declaration this walk can keep"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
 fn walk_decl_body<'pr>(
     body: Option<ruby_prism::Node<'pr>>,
     owner: &ClassId,
@@ -1296,6 +1353,17 @@ fn walk_decl_body_with_visibility<'pr>(
     let has_class_methods = statements.iter().any(|stmt| stmt.as_module_node()
         .is_some_and(|m| module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()])));
     for statement in statements {
+        // An `if` / `unless` around a `def`, a visibility marker, or an
+        // accessor this walk would otherwise lower is not a statement it
+        // can keep. Check the source statement, before a visibility
+        // wrapper replaces it with its inner `def`. An accessor in the
+        // branch has neither a `def` nor a marker, so reject it here:
+        // skipping it would drop `attr_reader :token` with no error.
+        if statement.as_if_node().is_some() || statement.as_unless_node().is_some() {
+            Visibility::reject_conditional_declaration(&statement, file)?;
+            reject_conditional_accessor(&statement, file)?;
+            continue;
+        }
         let definition = visibility::definition(&statement).map(|d| d.as_node());
         let stmt = definition.as_ref().unwrap_or(&statement);
         if stmt.as_def_node().is_none() && statement.as_call_node().is_some_and(|c| visibility::marker(&c)) {
@@ -1672,6 +1740,10 @@ fn walk_decl_body_with_visibility<'pr>(
         }
         // Nested class/module declarations also fall through here; they
         // surface as separate entries via the plural API.
+        // An `if` / `unless` that wraps a `def` or a visibility marker
+        // is not one of those. Leaving it unrecorded dropped the method
+        // with no diagnostic. A modifier (`return x if x`) has no `def`
+        // in its body and stays an ordinary expression.
     }
 
     // Class-variable reads/writes in CLASS-receiver bodies normalize to

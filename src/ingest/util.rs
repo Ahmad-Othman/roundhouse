@@ -337,6 +337,14 @@ fn body_has_direct_method_decl(body: Option<Node<'_>>) -> bool {
         if super::visibility::definition(&stmt).is_some() {
             return true;
         }
+        // `if ready; def hidden; end; end` is a declaration this walk
+        // cannot keep. Surface the module so the refusal is reported
+        // instead of the file vanishing.
+        if (stmt.as_if_node().is_some() || stmt.as_unless_node().is_some())
+            && super::visibility::Visibility::hides_declaration(&stmt)
+        {
+            return true;
+        }
         if let Some(call) = stmt.as_call_node() {
             if call.receiver().is_none() {
                 let kw = constant_id_str(&call.name());

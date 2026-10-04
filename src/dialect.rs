@@ -1371,6 +1371,11 @@ pub struct RedirectRoute {
     pub location_is_expression: bool,
     /// Rails' `redirect` answers 301 unless the call says otherwise.
     pub status: u16,
+    /// `redirect(path: "/login")`, not `redirect("/login")`. Rails keeps
+    /// the request query string on the options form and drops it on the
+    /// positional form.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_query: bool,
 }
 
 /// A `direct` custom URL helper.
