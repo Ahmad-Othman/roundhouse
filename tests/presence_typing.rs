@@ -52,3 +52,34 @@ fn presence_on_a_typed_receiver_is_that_type_or_nil() {
         gradual.join("\n")
     );
 }
+
+#[test]
+fn presence_on_an_untyped_receiver_stays_untyped() {
+    // `Untyped | Nil` is not the same as `Untyped`: later inference
+    // treats the union as a known type and reports missing methods on it.
+    let app = app_from(&[
+        ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/articles_controller.rb",
+            "class ArticlesController < ApplicationController\n  def show\n    render plain: maybe.presence\n  end\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/articles/:id\", to: \"articles#show\"\nend\n",
+        ),
+    ]);
+    let kinds: Vec<_> = diagnose(&app)
+        .into_iter()
+        .filter(|d| matches!(d.kind, DiagnosticKind::SendDispatchFailed { .. }))
+        .map(|d| d.message)
+        .collect();
+    assert!(
+        kinds.is_empty(),
+        "untyped.presence must not become Untyped | Nil:\n{}",
+        kinds.join("\n")
+    );
+}

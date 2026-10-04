@@ -737,7 +737,9 @@ impl<'a> BodyTyper<'a> {
         // the untyped half of `rel.presence || [x]` as its sign that
         // the value may be either.
         if method.as_str() == "presence" {
-            if let Some(ty) = recv_ty.filter(|ty| !matches!(ty, Ty::Var { .. } | Ty::Array { .. })) {
+            if let Some(ty) = recv_ty.filter(|ty| {
+                !matches!(ty, Ty::Var { .. } | Ty::Array { .. } | Ty::Untyped)
+            }) {
                 return super::union_of(ty.clone(), Ty::Nil);
             }
         }
