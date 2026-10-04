@@ -408,7 +408,10 @@ class Routing(unittest.TestCase):
         ]:
             with self.subTest(path=path):
                 plan = ci.select([path])
-                self.assertEqual(plan["spinel_tests"], ["param_binds"])
+                self.assertEqual(
+                    plan["spinel_tests"],
+                    ci.PARAM_BIND_TESTS if path.startswith("src/") or path == "tests/support/emit_and_run.rs" else ["param_binds"],
+                )
                 self.assertEqual(
                     self.extras(plan), set(ci.CORE) | {"framework-tests-spinel"}
                 )
@@ -416,7 +419,7 @@ class Routing(unittest.TestCase):
             ci.select(["runtime/spinel/db.rb"])["spinel_tests"],
             [
                 "spinel_db_lease",
-                "param_binds",
+                *ci.PARAM_BIND_TESTS,
                 "spinel_stmt_cache_lru",
                 "db_sqlite_concurrency",
             ],
@@ -426,7 +429,7 @@ class Routing(unittest.TestCase):
             [
                 "date_columns_spinel",
                 "spinel_db_lease",
-                "param_binds",
+                *ci.PARAM_BIND_TESTS,
                 "spinel_stmt_cache_lru",
                 "db_sqlite_concurrency",
             ],
@@ -456,6 +459,14 @@ class Routing(unittest.TestCase):
                 self.assertEqual(plan["spinel_tests"], suites)
                 self.assertEqual(plan["smoke"], [])
                 self.assertEqual(plan["archives"], [])
+
+    def test_param_bind_suite_drivers_select_their_native_harness(self):
+        for suite in ci.PARAM_BIND_TESTS:
+            for suffix in (".rs", ".rb", "_runtime.rb"):
+                with self.subTest(suite=suite, suffix=suffix):
+                    plan = ci.select(["tests/" + suite + suffix])
+                    self.assertEqual(plan["spinel_tests"], [suite])
+                    self.assertIn("framework-tests-spinel", plan["jobs"])
 
     def test_runtime_owners_choose_asymmetric_focused_binaries(self):
         cases = {
@@ -504,18 +515,18 @@ class Routing(unittest.TestCase):
             "tests/spinel_stmt_cache_lru.rb": ["spinel_stmt_cache_lru"],
             "tests/support/db_concurrency_spinel.rb": ["db_sqlite_concurrency"],
             "runtime/spinel/db.rb": [
-                "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru",
+                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru",
                 "db_sqlite_concurrency",
             ],
             "runtime/spinel/sqlite_adapter.rb": [
                 "date_columns_spinel",
                 "spinel_db_lease",
-                "param_binds",
+                *ci.PARAM_BIND_TESTS,
                 "spinel_stmt_cache_lru",
                 "db_sqlite_concurrency",
             ],
             "runtime/spinel/active_support_time_parsing.rb": [
-                "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru",
+                "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru",
                 "db_sqlite_concurrency",
             ],
             "runtime/spinel/date.rb": ["date_columns_spinel"],
@@ -562,7 +573,7 @@ class Routing(unittest.TestCase):
                 "date_columns_spinel",
                 "spinel_web_push_crypto",
                 "spinel_db_lease",
-                "param_binds",
+                *ci.PARAM_BIND_TESTS,
                 "spinel_stmt_cache_lru",
                 "db_sqlite_concurrency",
             ],
