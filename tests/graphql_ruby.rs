@@ -298,3 +298,62 @@ fn lowering_removes_the_synthesized_methods() {
     let names: Vec<&str> = lc.methods.iter().map(|m| m.name.as_str()).collect();
     assert_eq!(names, ["shout"]);
 }
+
+/// A method an included app module defines is the type's own.
+#[test]
+fn a_method_from_an_included_app_module_resolves_the_field() {
+    let concern = "module PostFields\n  def headline\n    object.title.upcase\n  end\nend\n";
+    let post = "module Types\n  class PostType < BaseObject\n    include PostFields\n\n    \
+        field :headline, String, null: false\n  end\nend\n";
+    let app = analyzed(&[
+        ("app/graphql/post_fields.rb", concern),
+        ("app/graphql/types/post_type.rb", post),
+    ]);
+    assert!(graphql_diagnostics(&app).is_empty(), "{:?}", graphql_diagnostics(&app));
+}
+
+/// A module computed at load time (`include Resolvers.for(:post)`), or
+/// one the app does not define, may hold the method: a field with none
+/// in sight is skipped, not reported as missing on the record.
+#[test]
+fn an_include_out_of_sight_makes_unanswered_fields_skipped() {
+    for include in ["include Resolvers.for(:post)", "include SomeGem::PostFields"] {
+        let post = format!(
+            "module Types\n  class PostType < BaseObject\n    {include}\n\n    \
+             field :headline, String, null: false\n    field :title, String, null: false\n  end\nend\n"
+        );
+        let app = analyzed(&[("app/graphql/types/post_type.rb", &post)]);
+        assert!(graphql_diagnostics(&app).is_empty(), "{include}: {:?}", graphql_diagnostics(&app));
+        let post_type = app.graphql_types.iter().find(|t| t.class.0.as_str() == "Types::PostType");
+        let resolution = |name: &str| {
+            post_type.unwrap().fields.iter().find(|f| f.name.as_str() == name).unwrap().resolution.clone()
+        };
+        assert!(matches!(resolution("headline"), GraphqlResolution::Skipped { .. }), "{include}");
+        assert!(matches!(resolution("title"), GraphqlResolution::Skipped { .. }), "{include}");
+    }
+}
+
+/// The summary `check` prints: a clean run's denominator, and the
+/// reasons the rest was not followed.
+#[test]
+fn coverage_counts_checked_unreached_arguments_and_skipped() {
+    let post = post_type(
+        "    field :title, String, null: false\n    \
+         field :excerpt, String, null: false\n\n    def excerpt(length: nil)\n      object.title\n    end\n    \
+         field :tags, String, null: false, hash_key: :tags\n",
+    );
+    let orphan = "module Types\n  class OrphanType < BaseObject\n    \
+        field :anything, String, null: false\n  end\nend\n";
+    let app = analyzed(&[
+        ("app/graphql/types/post_type.rb", &post),
+        ("app/graphql/types/orphan_type.rb", orphan),
+    ]);
+    let coverage = roundhouse::analyze::graphql::coverage(&app).expect("graphql coverage");
+    // Checked: QueryType.posts, PostType.title. Nothing here leads to
+    // UserType (no author field) or OrphanType: their 3 are unreached.
+    assert_eq!(
+        coverage.summary(),
+        "graphql: 4 object type(s), 7 field(s): 2 checked, 3 on types nothing reaches, \
+         1 take arguments, 1 skipped (hash lookup 1)"
+    );
+}

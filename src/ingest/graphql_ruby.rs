@@ -63,8 +63,10 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
         .enumerate()
         .map(|(i, c)| (c.name.clone(), i))
         .collect();
+    let names: HashSet<ClassId> = by_name.keys().cloned().collect();
     let ctx = Ctx {
         classes: &app.library_classes,
+        names: &names,
         parents: &parents,
         by_name: &by_name,
     };
@@ -148,6 +150,7 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
     concrete.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
     for class_id in concrete {
         let chain = ctx.chain(class_id);
+        let opaque = ctx.opaque(&chain);
         let mut fields = Vec::new();
         // Ancestors first: a subclass's own `field` replaces an
         // inherited one of the same name, as graphql-ruby's does.
@@ -203,6 +206,11 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
                                 format!("self.{}", decl.resolver_method.as_str()),
                             ),
                             None if decl.block => (skipped("field arguments"), String::new()),
+                            // The method may be in a module out of sight;
+                            // `object.<name>` would be a guess.
+                            None if opaque.is_some() => {
+                                (skipped(opaque.as_deref().unwrap()), String::new())
+                            }
                             None => (
                                 GraphqlResolution::Value { method: value },
                                 format!("object.{}", decl.method_sym.as_str()),
@@ -293,12 +301,15 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
 
 struct Ctx<'a> {
     classes: &'a [LibraryClass],
+    names: &'a HashSet<ClassId>,
     parents: &'a HashMap<ClassId, Option<ClassId>>,
     by_name: &'a HashMap<ClassId, usize>,
 }
 
 impl<'a> Ctx<'a> {
-    /// The class itself, then each app-defined ancestor.
+    /// The class itself, then each app-defined ancestor, each followed
+    /// by the app modules it includes (last included first), the order
+    /// Ruby looks a method up in.
     fn chain(&self, class: &ClassId) -> Vec<&'a LibraryClass> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
@@ -310,10 +321,53 @@ impl<'a> Ctx<'a> {
             if !seen.insert(c.clone()) {
                 break;
             }
-            out.push(&self.classes[i]);
+            let class = &self.classes[i];
+            out.push(class);
+            self.push_modules(class, &mut out, &mut seen);
             cursor = self.parents.get(&c).cloned().flatten();
         }
         out
+    }
+
+    fn push_modules(
+        &self,
+        class: &'a LibraryClass,
+        out: &mut Vec<&'a LibraryClass>,
+        seen: &mut HashSet<ClassId>,
+    ) {
+        for include in class.includes.iter().rev() {
+            let Some(module) = self.module(include, &class.name) else {
+                continue;
+            };
+            if seen.insert(module.name.clone()) {
+                out.push(module);
+                self.push_modules(module, out, seen);
+            }
+        }
+    }
+
+    /// An `include`d name, resolved lexically against the app's modules.
+    fn module(&self, include: &ClassId, scope: &ClassId) -> Option<&'a LibraryClass> {
+        let path: Vec<Symbol> = include.0.as_str().split("::").map(Symbol::from).collect();
+        let id = resolve_const(&path, scope, self.names)?;
+        Some(&self.classes[self.by_name[&id]]).filter(|c| c.is_module)
+    }
+
+    /// Why `chain` may have methods this pass cannot see: an included
+    /// module the app does not define, or one computed at load time.
+    fn opaque(&self, chain: &[&'a LibraryClass]) -> Option<String> {
+        chain.iter().find_map(|class| {
+            if class.unknown_calls.iter().any(|call| {
+                matches!(&*call.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "include")
+            }) {
+                return Some("computed include".to_owned());
+            }
+            class
+                .includes
+                .iter()
+                .find(|i| self.module(i, &class.name).is_none())
+                .map(|i| format!("includes `{}`", i.0.as_str()))
+        })
     }
 
     /// The nearest instance method `name` along `chain`.

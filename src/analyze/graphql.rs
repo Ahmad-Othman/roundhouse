@@ -13,17 +13,27 @@
 //!   rules out (a required `belongs_to` on a NOT NULL column with a
 //!   foreign key).
 
+use std::collections::{BTreeMap, HashMap};
+
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::dialect::{Association, GraphqlResolution, LibraryClass, MethodDef};
 use crate::expr::{Expr, ExprNode};
-use crate::ident::Symbol;
+use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 use crate::App;
 
 pub(super) fn diagnose(app: &App, walk: fn(&Expr, &mut Vec<Diagnostic>)) -> Vec<Diagnostic> {
     let mut out = Vec::new();
+    if app.graphql_types.is_empty() {
+        return out;
+    }
+    // Indexed once: a large schema has thousands of types over a
+    // hundred thousand library classes.
+    let classes = class_index(app);
+    let models: HashMap<&ClassId, &crate::dialect::Model> =
+        app.models.iter().map(|m| (&m.name, m)).collect();
     for gql in &app.graphql_types {
-        let Some(class) = app.library_classes.iter().find(|c| c.name == gql.class) else {
+        let Some(class) = classes.get(&gql.class).copied() else {
             continue;
         };
         let takes_arguments: Vec<&Symbol> = gql
@@ -67,7 +77,7 @@ pub(super) fn diagnose(app: &App, walk: fn(&Expr, &mut Vec<Diagnostic>)) -> Vec<
             let Some(Ty::Fn { ret, .. }) = &def.signature else {
                 continue;
             };
-            if !may_be_nil(ret) || proven_non_nil(app, class, &def.body, 3) {
+            if !may_be_nil(ret) || proven_non_nil(app, &models, class, &def.body, 3) {
                 continue;
             }
             let kind = DiagnosticKind::GraphqlNullableField {
@@ -110,7 +120,13 @@ fn may_be_nil(ty: &Ty) -> bool {
 /// foreign key constrains. A stored row's association then always
 /// loads. Follows a body that only calls another method on the same
 /// object (`self.posted_by`) a few steps, to its tail.
-fn proven_non_nil(app: &App, class: &LibraryClass, body: &Expr, depth: u8) -> bool {
+fn proven_non_nil(
+    app: &App,
+    models: &HashMap<&ClassId, &crate::dialect::Model>,
+    class: &LibraryClass,
+    body: &Expr,
+    depth: u8,
+) -> bool {
     let tail = tail_of(body);
     let ExprNode::Send {
         recv,
@@ -128,7 +144,7 @@ fn proven_non_nil(app: &App, class: &LibraryClass, body: &Expr, depth: u8) -> bo
     match recv.as_ref().map(|r| &*r.node) {
         None | Some(ExprNode::SelfRef) if depth > 0 => {
             return instance_method(class, method)
-                .is_some_and(|m| proven_non_nil(app, class, &m.body, depth - 1));
+                .is_some_and(|m| proven_non_nil(app, models, class, &m.body, depth - 1));
         }
         None | Some(ExprNode::SelfRef) => return false,
         _ => {}
@@ -140,7 +156,7 @@ fn proven_non_nil(app: &App, class: &LibraryClass, body: &Expr, depth: u8) -> bo
     !classes.is_empty()
         && classes
             .iter()
-            .all(|id| required_belongs_to(app, id, method))
+            .all(|id| required_belongs_to(app, models, id, method))
 }
 
 fn tail_of(expr: &Expr) -> &Expr {
@@ -168,8 +184,13 @@ fn non_nil_classes(ty: &Ty) -> Vec<&crate::ident::ClassId> {
     out
 }
 
-fn required_belongs_to(app: &App, model: &crate::ident::ClassId, assoc: &Symbol) -> bool {
-    let Some(model) = app.models.iter().find(|m| &m.name == model) else {
+fn required_belongs_to(
+    app: &App,
+    models: &HashMap<&ClassId, &crate::dialect::Model>,
+    model: &ClassId,
+    assoc: &Symbol,
+) -> bool {
+    let Some(model) = models.get(model) else {
         return false;
     };
     let Some(Association::BelongsTo {
@@ -192,4 +213,93 @@ fn required_belongs_to(app: &App, model: &crate::ident::ClassId, assoc: &Symbol)
             .foreign_keys
             .iter()
             .any(|fk| &fk.from_column == foreign_key)
+}
+
+fn class_index(app: &App) -> HashMap<&ClassId, &LibraryClass> {
+    app.library_classes.iter().map(|c| (&c.name, c)).collect()
+}
+
+/// How much of a graphql-ruby schema `check` could follow: the
+/// denominator for a clean result, and, on an app the analysis cannot
+/// reach into yet, the list of what to model next.
+#[derive(Debug, Default, PartialEq)]
+pub struct GraphqlCoverage {
+    pub types: usize,
+    pub fields: usize,
+    /// Fields whose value was typed on a type the roots reach.
+    pub checked: usize,
+    /// Fields with a value, on a type no modeled field constructs.
+    pub unreached: usize,
+    /// Fields resolving through a method that takes arguments.
+    pub arguments: usize,
+    /// Skipped fields by reason, most frequent first.
+    pub skipped: Vec<(String, usize)>,
+}
+
+impl GraphqlCoverage {
+    pub fn summary(&self) -> String {
+        let mut line = format!(
+            "graphql: {} object type(s), {} field(s): {} checked, {} on types nothing reaches, {} take arguments",
+            self.types, self.fields, self.checked, self.unreached, self.arguments
+        );
+        let skipped: usize = self.skipped.iter().map(|(_, n)| n).sum();
+        if skipped > 0 {
+            const MAX_SHOWN: usize = 8;
+            let shown: Vec<String> = self
+                .skipped
+                .iter()
+                .take(MAX_SHOWN)
+                .map(|(reason, n)| format!("{reason} {n}"))
+                .collect();
+            line.push_str(&format!(", {skipped} skipped ({}", shown.join(", ")));
+            if self.skipped.len() > MAX_SHOWN {
+                line.push_str(&format!(", … {} more reasons", self.skipped.len() - MAX_SHOWN));
+            }
+            line.push(')');
+        }
+        line
+    }
+}
+
+/// `None` for an app without graphql-ruby object types.
+pub fn coverage(app: &App) -> Option<GraphqlCoverage> {
+    let types: Vec<_> = app.graphql_types.iter().filter(|t| !t.resolver).collect();
+    if types.is_empty() {
+        return None;
+    }
+    let classes = class_index(app);
+    let mut out = GraphqlCoverage { types: types.len(), ..Default::default() };
+    let mut skipped: BTreeMap<String, usize> = BTreeMap::new();
+    for gql in types {
+        let reached = classes.get(&gql.class).is_some_and(|c| reached(gql, c));
+        for field in &gql.fields {
+            out.fields += 1;
+            match &field.resolution {
+                GraphqlResolution::Value { .. } if reached => out.checked += 1,
+                GraphqlResolution::Value { .. } => out.unreached += 1,
+                GraphqlResolution::Arguments { .. } => out.arguments += 1,
+                GraphqlResolution::Skipped { reason } => *skipped.entry(reason.clone()).or_default() += 1,
+            }
+        }
+    }
+    out.skipped = skipped.into_iter().collect();
+    out.skipped.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Some(out)
+}
+
+/// A root, or a type some modeled field constructs: its `object` has a
+/// known non-nil type (a record, or a scalar such as a count).
+fn reached(gql: &crate::dialect::GraphqlObjectType, class: &LibraryClass) -> bool {
+    if gql.synthesized.iter().any(|m| m.as_str() == "__gql_root") {
+        return true;
+    }
+    let Some(Ty::Fn { ret, .. }) = instance_method(class, &Symbol::from("object")).and_then(|m| m.signature.as_ref())
+    else {
+        return false;
+    };
+    let variants: Vec<&Ty> = match &**ret {
+        Ty::Union { variants } => variants.iter().collect(),
+        other => vec![other],
+    };
+    variants.iter().any(|v| !matches!(v, Ty::Nil | Ty::Var { .. } | Ty::Untyped | Ty::Bottom))
 }

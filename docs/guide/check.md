@@ -283,6 +283,12 @@ does inside controllers:
   constrains it: then a stored row's association always loads;
 - a type method's body is checked like an action's.
 
+A method an included app module defines counts as the type's own. A
+type that includes a module the app does not define, or one computed
+at load time (`include Resolvers.for(:product)`), may have methods out
+of sight, so a field with none visible is skipped rather than read off
+`object`.
+
 What is not modeled is skipped, not guessed, and reports nothing:
 field arguments (a field resolving through a method that takes
 parameters, or a resolver/mutation `resolve` that does), connections,
@@ -291,6 +297,20 @@ from a root constructs. A `resolver:`/`mutation:` class is followed
 when its `resolve` takes no arguments, or, for search_object, through
 its `scope { … }` block. The methods this adds are for the analyzer
 only; the transpiled output never contains them.
+
+Because a skipped field reports nothing, a quiet run proves only what
+was followed. `check` prints the denominator beside the gem census:
+
+```text
+roundhouse-check: graphql: 10 object type(s), 38 field(s): 1 checked, 9 on types nothing reaches, 2 take arguments, 26 skipped (computed include 26)
+```
+
+*Checked* fields had their value typed on a type the roots reach. *On
+types nothing reaches* had a value, but no followed field constructs
+their type, often because the field that would is skipped. *Take
+arguments* resolve through a method with parameters. *Skipped* lists
+the rest by reason, most frequent first; on a large schema it is the
+list of what to model next.
 
 ## Exit status
 
