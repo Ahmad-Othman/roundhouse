@@ -2274,6 +2274,10 @@ pub(super) fn hash_method(
         },
         // `values_at`/`fetch_values(*keys)` → Array of the value type.
         "values_at" | "fetch_values" => Ty::Array { elem: Box::new(value.clone()) },
+        // ActiveSupport `Hash#to_query` / `to_param` answers a String.
+        // The shared runtime hosts the scalar form; nesting stays in
+        // the ruby-family reopen.
+        "to_query" | "to_param" => Ty::Str,
         // `sort`/`sort_by` evaluate the hash to a sorted Array of
         // `[key, value]` pairs (same element shape as `to_a`).
         "sort" | "sort_by" => Ty::Array {

@@ -181,6 +181,51 @@ impl Visibility {
         Ok(())
     }
 
+    pub(super) fn reject_conditional_declaration(node: &Node<'_>, file: &str) -> IngestResult<()> {
+        Self::reject_dynamic_declarations(node, file)
+    }
+
+    /// An `if` / `unless` whose body holds a `def` or a visibility marker.
+    /// A modifier (`return x if x`) does not.
+    pub(super) fn hides_declaration(node: &Node<'_>) -> bool {
+        struct Declarations {
+            invalid: bool,
+        }
+        impl<'pr> ruby_prism::Visit<'pr> for Declarations {
+            fn visit_branch_node_enter(&mut self, node: Node<'pr>) {
+                let body_hides = |body: Option<Node<'pr>>| {
+                    body.is_some_and(|body| {
+                        super::util::flatten_statements(body).iter().any(|stmt| {
+                            stmt.as_def_node().is_some()
+                                || stmt.as_call_node().is_some_and(|c| c.receiver().is_none() && marker(&c))
+                        })
+                    })
+                };
+                self.invalid |= if let Some(branch) = node.as_if_node() {
+                    body_hides(branch.statements().map(|s| s.as_node()))
+                        || branch.subsequent().is_some_and(|sub| {
+                            sub.as_else_node()
+                                .and_then(|e| e.statements())
+                                .is_some_and(|s| body_hides(Some(s.as_node())))
+                                || sub.as_if_node().is_some()
+                        })
+                } else if let Some(branch) = node.as_unless_node() {
+                    body_hides(branch.statements().map(|s| s.as_node()))
+                        || branch
+                            .else_clause()
+                            .and_then(|clause| clause.statements())
+                            .is_some_and(|s| body_hides(Some(s.as_node())))
+                } else {
+                    false
+                };
+            }
+            fn visit_def_node(&mut self, _node: &ruby_prism::DefNode<'pr>) {}
+        }
+        let mut declarations = Declarations { invalid: false };
+        ruby_prism::Visit::visit(&mut declarations, node);
+        declarations.invalid
+    }
+
     fn reject_dynamic_declarations(node: &Node<'_>, file: &str) -> IngestResult<()> {
         struct Declarations {
             invalid: bool,
@@ -188,9 +233,34 @@ impl Visibility {
         }
         impl<'pr> ruby_prism::Visit<'pr> for Declarations {
             fn visit_branch_node_enter(&mut self, node: Node<'pr>) {
-                self.invalid |= node
-                    .as_call_node()
-                    .is_some_and(|c| c.receiver().is_none() && marker(&c));
+                // A modifier (`return value if value.is_a?(Kind)`) is one
+                // expression, not a declaration that sometimes runs. Only a
+                // branch whose body can hold a visibility marker is dynamic.
+                let body_has_marker = |body: Option<Node<'pr>>| {
+                    body.is_some_and(|body| {
+                        super::util::flatten_statements(body).iter().any(|stmt| {
+                            stmt.as_call_node().is_some_and(|c| c.receiver().is_none() && marker(&c))
+                        })
+                    })
+                };
+                self.invalid |= if let Some(branch) = node.as_if_node() {
+                    body_has_marker(branch.statements().map(|s| s.as_node()))
+                        || branch.subsequent().is_some_and(|sub| {
+                            sub.as_else_node()
+                                .and_then(|e| e.statements())
+                                .is_some_and(|s| body_has_marker(Some(s.as_node())))
+                                || sub.as_else_node().is_none() && body_has_marker(Some(sub))
+                        })
+                } else if let Some(branch) = node.as_unless_node() {
+                    // `statements` is the body; `else_clause` is the else.
+                    body_has_marker(branch.statements().map(|s| s.as_node()))
+                        || branch
+                            .else_clause()
+                            .and_then(|clause| clause.statements())
+                            .is_some_and(|s| body_has_marker(Some(s.as_node())))
+                } else {
+                    node.as_call_node().is_some_and(|c| c.receiver().is_none() && marker(&c))
+                };
             }
             fn visit_def_node(&mut self, _node: &ruby_prism::DefNode<'pr>) {
                 // DSL blocks (e.g. has_many extensions) own their defs, not
@@ -245,12 +315,16 @@ impl Visibility {
                 };
                 let named_class = kw.ends_with("_class_method");
                 if class_side && named_class {
-                    // These address the singleton of the current carrier,
-                    // not the methods flattened from its instance side.
-                    return Err(Self::unsupported(
-                        file,
-                        "class-method visibility on a nested singleton level is not modeled",
-                    ));
+                    // `class << self` has no further singleton to address.
+                    // A module's `def self` is already that singleton, so
+                    // `private_class_method :jwks` after it is the same
+                    // change a class body makes.
+                    if module_owner.is_none() {
+                        return Err(Self::unsupported(
+                            file,
+                            "class-method visibility on a nested singleton level is not modeled",
+                        ));
+                    }
                 }
                 if let Some(def) = &def {
                     let side = class_side || def.receiver().is_some();
@@ -372,6 +446,9 @@ impl Visibility {
                 continue;
             }
             let Some(call) = node.as_call_node() else {
+                // A `def` is handled above. Anything else — an `if` that
+                // wraps a definition, a modifier that does not — still
+                // has to be rejected when it hides a marker or a `def`.
                 Self::reject_dynamic_declarations(node, file)?;
                 continue;
             };
@@ -460,7 +537,7 @@ impl Visibility {
                         }
                     }
                 }
-            } else {
+            } else if statement.as_def_node().is_none() {
                 Self::reject_dynamic_declarations(node, file)?;
             }
         }

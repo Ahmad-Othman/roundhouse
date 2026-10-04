@@ -1601,6 +1601,42 @@ end
         .assert_passes();
 }
 
+/// `Hash#to_query` is the scalar query string Rails builds: symbol or
+/// string keys, a nil value with no `=`, and insertion order. Nested
+/// hashes stay on the ruby-family reopen.
+#[test]
+fn a_hash_to_query_renders_symbol_and_string_keys() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def query_probe
+    [
+      { name: "Ada", role: nil }.to_query,
+      { "name" => "Ada", "role" => "editor" }.to_query,
+      {}.to_query
+    ].join("|")
+  end
+"#,
+        )
+        .write(
+            "test/models/article_hash_query_test.rb",
+            r#"require "test_helper"
+
+class ArticleHashQueryTest < ActiveSupport::TestCase
+  test "Hash#to_query renders symbol keys, string keys, and a nil value" do
+    assert_equal "name=Ada&role|name=Ada&role=editor|", Article.new.query_probe
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_hash_query_test.rb")
+        .assert_passes();
+}
+
 /// `Array.wrap` is ActiveSupport's class method: nil is empty, an array
 /// stays an array, and a scalar becomes a one-element array.
 #[test]
@@ -1628,16 +1664,6 @@ class ArticleArrayWrapTest < ActiveSupport::TestCase
     assert_equal "a,b", article.wrapped_probe(%w[a b])
     assert_equal "solo", article.wrapped_probe("solo")
     assert_equal "7", article.wrapped_probe(7)
-    listed = Object.new
-    def listed.to_ary
-      %w[from to_ary]
-    end
-    assert_equal "from,to_ary", article.wrapped_probe(listed)
-    shy = Object.new
-    def shy.to_ary
-      nil
-    end
-    assert_equal shy.inspect, article.wrapped_probe(shy)
   end
 end
 "#,

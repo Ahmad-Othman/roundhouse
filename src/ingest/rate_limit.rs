@@ -468,7 +468,7 @@ mod tests {
 
         let mut marked = controller(
             "class Api::TokensController < ApplicationController\n  \
-             rate_limit to: 100, within: 5.minutes, scope: \"budget-#{id}\"\nend\n",
+             rate_limit to: 100, within: 5.minutes, scope: \"budget-\\#{id}\"\nend\n",
         );
         let marked = &take_from_controller_body(&mut marked)[0];
         assert!(

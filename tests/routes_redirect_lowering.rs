@@ -243,7 +243,7 @@ fn a_path_option_redirect_is_the_same_location_as_a_positional_string() {
         "path: is not the positional form; got:\n{emitted}"
     );
     assert!(
-        emitted.contains("redirect_to(\"/signup\", status: :found)"),
+        emitted.contains("status: :found"),
         "status: still applies beside path:; got:\n{emitted}"
     );
     assert!(

@@ -1296,6 +1296,13 @@ fn walk_decl_body_with_visibility<'pr>(
     let has_class_methods = statements.iter().any(|stmt| stmt.as_module_node()
         .is_some_and(|m| module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()])));
     for statement in statements {
+        // An `if` / `unless` around a `def` or a visibility marker is not
+        // a statement this walk can keep. Check the source statement,
+        // before a visibility wrapper replaces it with its inner `def`.
+        if statement.as_if_node().is_some() || statement.as_unless_node().is_some() {
+            Visibility::reject_conditional_declaration(&statement, file)?;
+            continue;
+        }
         let definition = visibility::definition(&statement).map(|d| d.as_node());
         let stmt = definition.as_ref().unwrap_or(&statement);
         if stmt.as_def_node().is_none() && statement.as_call_node().is_some_and(|c| visibility::marker(&c)) {
@@ -1672,6 +1679,10 @@ fn walk_decl_body_with_visibility<'pr>(
         }
         // Nested class/module declarations also fall through here; they
         // surface as separate entries via the plural API.
+        // An `if` / `unless` that wraps a `def` or a visibility marker
+        // is not one of those. Leaving it unrecorded dropped the method
+        // with no diagnostic. A modifier (`return x if x`) has no `def`
+        // in its body and stays an ordinary expression.
     }
 
     // Class-variable reads/writes in CLASS-receiver bodies normalize to

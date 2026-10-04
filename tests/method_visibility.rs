@@ -199,6 +199,42 @@ fn private_class_method_accepts_several_defined_class_methods() {
 }
 
 #[test]
+fn a_modifier_if_is_not_a_conditional_visibility_declaration() {
+    // `return value if value.is_a?(Kind)` is one expression. A visibility
+    // marker inside `if` / `unless` / `else` is still dynamic.
+    for (body, accepted) in [
+        ("def parse(value)\n    return value if value.is_a?(String)\n    value\n  end", true),
+        ("def parse(value)\n    return value unless value.nil?\n    value\n  end", true),
+        ("def self.helper; 1; end\n  private_class_method :helper", true),
+        ("def self.helper; 1; end\n  private_class_method :helper, :other", false),
+        ("def parse(value)\n    if value\n      private :parse\n    end\n    value\n  end", true),
+        ("def parse(value)\n    unless value\n      private :parse\n    else\n      value\n    end\n  end", true),
+        ("if ready\n    private\n    def hidden; 1; end\n  end", false),
+        ("unless ready\n    def hidden; 1; end\n  else\n    private :helper\n  end\n  def helper; 1; end", false),
+        ("def self.helper; 1; end\n  class << self\n    private_class_method :helper\n  end", false),
+    ] {
+        let source = format!("module Toolkit\n  {body}\nend");
+        let result = ingest_library_classes(source.as_bytes(), "toolkit.rb");
+        if result.is_ok() != accepted {
+            panic!("body={body}\nresult={result:?}");
+        }
+        if accepted && body.contains("private_class_method :helper") && !body.contains(",") {
+            let classes = result.unwrap();
+            let methods = &classes
+                .iter()
+                .find(|c| c.methods.iter().any(|m| m.name.as_str() == "helper"))
+                .expect("helper class")
+                .methods;
+            assert_eq!(
+                visibility(&methods, "helper", MethodReceiver::Class),
+                MethodVisibility::Private,
+                "{body}"
+            );
+        }
+    }
+}
+
+#[test]
 fn forward_inherited_dynamic_and_ambiguous_changes_stay_errors() {
     for body in [
         "private :later\n def later; 1; end",
