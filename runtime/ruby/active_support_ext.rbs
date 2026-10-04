@@ -30,6 +30,7 @@ module ActiveSupport
   def self.symbolize_keys: (Hash[String, untyped] hash) -> Hash[Symbol, untyped]
   def self.stringify_keys: (Hash[Symbol, untyped] hash) -> Hash[String, untyped]
   def self.cast_boolean: (untyped value) -> bool?
+  def self.wrap: (untyped object) -> Array[untyped]
   def self.squish: (String text) -> String
   # `untyped`, and this one was learned the hard way: it said
   # `Array[untyped]` for a day, on the reasoning that the only receiver

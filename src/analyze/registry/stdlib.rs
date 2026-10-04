@@ -521,6 +521,16 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // JSON dispatch is already intrinsic in BodyTyper and the emitters;
     // a source-backed reference must also recognize its exact namespace.
     register_stdlib_class(classes, "JSON", &[], &[]);
+    // `Array.wrap` is ActiveSupport's class method, not `Array.new`.
+    // Nil is empty, an array stays an array, and a scalar is wrapped.
+    // The element type is not known from the call, so the answer is
+    // `Array[untyped]` rather than a lie about the contents.
+    register_stdlib_class(
+        classes,
+        "Array",
+        &[("wrap", Ty::Array { elem: Box::new(Ty::Untyped) })],
+        &[],
+    );
     // CRuby supplies Sets here, the Spinel port supplies Arrays. Both
     // implement the collection operations the app uses; don't invent
     // one concrete representation for the two runtimes.

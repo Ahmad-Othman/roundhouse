@@ -95,6 +95,10 @@ fn rewrite(expr: &mut Expr) {
     // call is the form Rails' counter-and-`any?` body reduces to a
     // length test, and the block form counts MATCHES instead, which is
     // a different question no corpus app asks.
+    if method.as_str() == "wrap" {
+        ground_array_wrap(expr);
+        return;
+    }
     let wants_block = match method.as_str() {
         "index_by" => true,
         "many?" | "to_sentence" | "sole" | "squish" => false,
@@ -189,6 +193,28 @@ fn rewrite(expr: &mut Expr) {
             lit
         }));
     }
+    *parenthesized = true;
+}
+
+/// `Array.wrap(value)` → `ActiveSupport.wrap(value)`. A receiverless
+/// `wrap`, or a wrap on something other than the Array class, stays.
+fn ground_array_wrap(expr: &mut Expr) {
+    let span = expr.span;
+    let ExprNode::Send { recv, method, args, block, parenthesized } = &mut *expr.node else {
+        return;
+    };
+    if method.as_str() != "wrap" || block.is_some() || args.len() != 1 {
+        return;
+    }
+    let Some(receiver) = recv.as_ref() else { return };
+    let ExprNode::Const { path } = &*receiver.node else { return };
+    if path.last().is_none_or(|name| name.as_str() != "Array") {
+        return;
+    }
+    *recv = Some(Expr::new(
+        span,
+        ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+    ));
     *parenthesized = true;
 }
 

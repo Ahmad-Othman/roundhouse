@@ -177,6 +177,16 @@ module ActiveSupport
   #
   # campfire's `content_filters_test` writes `<<~HTML.squish` to put a
   # multi-line fixture body on one line before handing it to a filter.
+  # AS `Array.wrap`: nil is an empty array, an array-like value answers
+  # its `to_ary`, and everything else is a one-element array. A nil
+  # `to_ary` is the one-element array too, which is how a String stays
+  # a String rather than becoming its characters.
+  def self.wrap(object)
+    return [] if object.nil?
+    return object if object.is_a?(Array)
+    [object]
+  end
+
   def self.squish(text)
     out = +""
     pending_space = false

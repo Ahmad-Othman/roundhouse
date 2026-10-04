@@ -1601,6 +1601,41 @@ end
         .assert_passes();
 }
 
+/// `Array.wrap` is ActiveSupport's class method: nil is empty, an array
+/// stays an array, and a scalar becomes a one-element array.
+#[test]
+fn array_wrap_keeps_nil_an_array_and_a_scalar_distinct() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def wrapped_probe(value)
+    Array.wrap(value).map { |item| item.to_s }.join(",")
+  end
+"#,
+        )
+        .write(
+            "test/models/article_array_wrap_test.rb",
+            r#"require "test_helper"
+
+class ArticleArrayWrapTest < ActiveSupport::TestCase
+  test "Array.wrap keeps nil, an array, and a scalar distinct" do
+    article = Article.new
+    assert_equal "", article.wrapped_probe(nil)
+    assert_equal "a,b", article.wrapped_probe(%w[a b])
+    assert_equal "solo", article.wrapped_probe("solo")
+    assert_equal "7", article.wrapped_probe(7)
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_array_wrap_test.rb")
+        .assert_passes();
+}
+
 /// Not a diagnostic count: each core method's value is held to what CRuby answers.
 #[test]
 fn core_integer_float_string_array_methods_run() {
