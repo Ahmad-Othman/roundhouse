@@ -187,7 +187,7 @@ fn take_from_controller_body(controller: &mut Controller) -> Vec<Limit> {
 }
 
 /// `rate_limit to: N, within: D, by: -> {…}, with: -> {…}, name: "…",
-/// only: […], except: […]` → its parts, or None for any call this is
+/// scope: …, only: […], except: […]` → its parts, or None for any call this is
 /// not, or an option it cannot expand.
 fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*call.node else {
@@ -203,6 +203,7 @@ fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
     let mut by_src: Option<String> = None;
     let mut with_src: Option<String> = None;
     let mut name: Option<String> = None;
+    let mut scope_src: Option<String> = None;
     let mut only: Vec<Symbol> = Vec::new();
     let mut except: Vec<Symbol> = Vec::new();
     for (k, v) in entries {
@@ -216,8 +217,16 @@ fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
                 let ExprNode::Lit { value: Literal::Str { value } } = &*v.node else { return None };
                 name = Some(value.clone());
             }
+            // Rails defaults the cache-key scope to this controller's
+            // path. `scope:` replaces that, so two controllers can share
+            // one budget: a symbol, a string, or a call such as
+            // `OtherController.controller_path`.
+            "scope" => scope_src = Some(scope_source(v)?),
             "only" => only = symbol_list(v)?,
             "except" => except = symbol_list(v)?,
+            // `store:` names a cache the shared limiter does not take.
+            // `if:` / `unless:` are filter options, not key material.
+            // Leaving them in place is the fail-closed path.
             _ => return None,
         }
     }
@@ -226,18 +235,39 @@ fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
         (None, [one]) => format!("rate_limit_{}", one.as_str()),
         (None, _) => "rate_limit".to_string(),
     };
-    // Rails: ["rate-limit", controller_path, name, by].compact.join(":")
-    let mut prefix = format!("rate-limit:{controller_path}");
-    if let Some(n) = &name {
-        prefix.push(':');
-        prefix.push_str(n);
-    }
-    prefix.push(':');
-    let key_src = format!(
-        "{} + ({}).to_s",
-        ruby_string_literal(&prefix),
-        by_src.unwrap_or_else(|| "request.remote_ip".to_string())
-    );
+    // Rails: ["rate-limit", scope || controller_path, name, by].compact.join(":")
+    let key_src = match scope_src {
+        Some(scope) => {
+            let mut parts = vec![format!(
+                "{} + ({}).to_s",
+                ruby_string_literal("rate-limit:"),
+                scope
+            )];
+            if let Some(n) = &name {
+                parts.push(ruby_string_literal(&format!(":{n}:")));
+            } else {
+                parts.push(ruby_string_literal(":"));
+            }
+            parts.push(format!(
+                "({}).to_s",
+                by_src.unwrap_or_else(|| "request.remote_ip".to_string())
+            ));
+            parts.join(" + ")
+        }
+        None => {
+            let mut prefix = format!("rate-limit:{controller_path}");
+            if let Some(n) = &name {
+                prefix.push(':');
+                prefix.push_str(n);
+            }
+            prefix.push(':');
+            format!(
+                "{} + ({}).to_s",
+                ruby_string_literal(&prefix),
+                by_src.unwrap_or_else(|| "request.remote_ip".to_string())
+            )
+        }
+    };
     Some(Limit {
         method,
         to_src: to_src?,
@@ -247,6 +277,18 @@ fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
         only,
         except,
     })
+}
+
+/// `scope:` as the cache-key segment Rails joins. A symbol or string is
+/// that segment; a call (`SessionsController.controller_path`) is
+/// evaluated, which is how one controller names another's path.
+fn scope_source(v: &Expr) -> Option<String> {
+    match &*v.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(ruby_string_literal(value.as_str())),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(ruby_string_literal(value)),
+        ExprNode::Send { .. } | ExprNode::Const { .. } => Some(crate::emit::ruby::expr::emit_expr(v)),
+        _ => None,
+    }
 }
 
 /// The body of a `-> { … }` as source; None for anything else.
@@ -346,6 +388,43 @@ mod tests {
         assert_eq!(l.key_src, "\"rate-limit:api/tokens:signup:\" + (params[:email]).to_s");
         assert_eq!(l.with_src, "head(:too_many_requests)");
         assert!(l.only.is_empty());
+    }
+
+    #[test]
+    fn a_shared_scope_replaces_the_controller_path_in_the_cache_key() {
+        // Two controllers count against one budget when the second names
+        // the first's path, a symbol, or a string. Rails joins
+        // `scope || controller_path` between `rate-limit` and `name`.
+        let mut shared = controller(
+            "class Users::Sessions::OtpsController < ApplicationController\n  \
+             rate_limit to: 10, within: 3.minutes, only: :create, scope: Users::SessionsController.controller_path\nend\n",
+        );
+        let call = take_from_controller_body(&mut shared);
+        assert_eq!(call.len(), 1);
+        assert!(
+            call[0].key_src.contains("Users::SessionsController.controller_path"),
+            "{}",
+            call[0].key_src
+        );
+        assert!(!call[0].key_src.contains("users/sessions/otps"), "{}", call[0].key_src);
+
+        let mut symbol = controller(
+            "class Api::TokensController < ApplicationController\n  \
+             rate_limit to: 100, within: 5.minutes, scope: :api_global\nend\n",
+        );
+        let symbol = &take_from_controller_body(&mut symbol)[0];
+        assert_eq!(
+            symbol.key_src,
+            "\"rate-limit:\" + (\"api_global\").to_s + \":\" + (request.remote_ip).to_s"
+        );
+
+        let mut named = controller(
+            "class Api::TokensController < ApplicationController\n  \
+             rate_limit to: 100, within: 5.minutes, name: \"burst\", scope: \"api\"\nend\n",
+        );
+        let named = &take_from_controller_body(&mut named)[0];
+        assert!(named.key_src.contains("\"api\""), "{}", named.key_src);
+        assert!(named.key_src.contains(":burst:"), "{}", named.key_src);
     }
 
     #[test]
