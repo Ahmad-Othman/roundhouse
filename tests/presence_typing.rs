@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use roundhouse::analyze::{diagnose, DiagnosticKind};
+use roundhouse::expr::ExprNode;
 use roundhouse::ingest::ingest_app_from_tree;
+use roundhouse::ty::Ty;
 
 fn app_from(files: &[(&str, &str)]) -> roundhouse::App {
     let tree: HashMap<PathBuf, Vec<u8>> = files
@@ -51,6 +53,27 @@ fn presence_on_a_typed_receiver_is_that_type_or_nil() {
         "`title.presence` should type as String?, and `title.upcase` under the `&&` as String:\n{}",
         gradual.join("\n")
     );
+    let mut presence = None;
+    fn visit(expr: &roundhouse::Expr, presence: &mut Option<Ty>) {
+        if let ExprNode::Send { method, .. } = &*expr.node {
+            if method.as_str() == "presence" {
+                *presence = expr.ty.clone();
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, presence));
+    }
+    for action in app.controllers.iter().flat_map(|c| c.actions()) {
+        visit(&action.body, &mut presence);
+    }
+    match presence {
+        Some(Ty::Union { variants }) => {
+            assert!(
+                variants.contains(&Ty::Str) && variants.contains(&Ty::Nil),
+                "name.presence should be String?, got {variants:?}"
+            );
+        }
+        other => panic!("name.presence should be String?, got {other:?}"),
+    }
 }
 
 #[test]
