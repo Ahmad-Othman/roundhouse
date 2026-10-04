@@ -1,3 +1,4 @@
+require "zlib"
 require_relative "tep_core"
 require_relative "url"
 require_relative "net"

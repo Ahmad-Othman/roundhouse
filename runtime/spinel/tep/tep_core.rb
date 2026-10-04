@@ -97,6 +97,36 @@ module Tep
     @max_body_bytes
   end
 
+  # Honour Accept-Encoding: gzip the way campfire's `use Rack::Deflater`
+  # does on CRuby. Inline bodies only — sendfile/streaming/websocket stay
+  # as they are. Mutates res.body and stamps Content-Encoding + Vary.
+  def self.maybe_gzip!(req, res)
+    return if res.streaming || res.upgrading_ws
+    return if res.file_path.length > 0
+    return if res.body.bytesize < 64
+    return if res.headers["Content-Encoding"].length > 0
+    accept = req.req_headers["accept-encoding"]
+    return unless accept.downcase.include?("gzip")
+    ct = res.headers["Content-Type"]
+    return if ct.start_with?("image/") || ct.start_with?("audio/") ||
+              ct.start_with?("video/") || ct.start_with?("font/") ||
+              ct.start_with?("application/octet-stream") ||
+              ct.start_with?("application/zip") ||
+              ct.start_with?("application/gzip") ||
+              ct.start_with?("application/wasm")
+    # DEFAULT_COMPRESSION matches Rack::Deflater. Level 1 was measured
+    # and did not recover uncompressed throughput — the cost is gzip
+    # itself, not Huffman tables (room page 1984 → ~700 req/s either way).
+    res.body = Zlib.gzip(res.body)
+    res.headers["Content-Encoding"] = "gzip"
+    vary = res.headers["Vary"]
+    if vary.length == 0
+      res.headers["Vary"] = "Accept-Encoding"
+    elsif !vary.downcase.include?("accept-encoding")
+      res.headers["Vary"] = vary + ", Accept-Encoding"
+    end
+  end
+
   # Holder for a Fiber so the cooperative scheduler (Tep::Scheduler, the
   # TEP_SERVER=fiber measurement lane) can keep them in a typed array.
   # Spinel's `[Fiber.new { ... }]` array literal infers IntArray (Fiber is

@@ -2908,8 +2908,11 @@ header. Grouped by cause, largest first:
   which every Rails response carries. Without `X-Frame-Options` any
   site can frame a signed-in campfire page. The one to close first.
 - **The app's own `config.ru` middleware is not applied.** campfire's
-  `config.ru` says `use Rack::Deflater`; no response of ours is gzipped
-  (65) and none varies on `Accept-Encoding` (71).
+  `config.ru` says `use Rack::Deflater`. The CRuby overlay now has the
+  same `use Rack::Deflater` (after Static); spinel tep gzips inline
+  bodies when `Accept-Encoding` includes gzip. Re-run
+  `scripts/campfire-http-shape` before treating the 65 Content-Encoding
+  misses as current.
 - **Rails' `Rack::ETag` / `Rack::ConditionalGet` are absent**: no weak
   ETag on a 200 (52), no `Cache-Control: max-age=0, private,
   must-revalidate`, so a revisit is 200 where Rails answers 304 (10-14).
