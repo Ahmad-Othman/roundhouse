@@ -4566,6 +4566,30 @@ fn extract_autoload_path_roots(source: &[u8]) -> Vec<String> {
     roots
 }
 
+/// `get "up" => "rails/health#show"` — every `rails new` app's health
+/// check (what a Kamal proxy probes) — names Rails' OWN
+/// `Rails::HealthController`, which no app tree holds: the route
+/// dispatched to nothing and `/up` answered 404. Written here as the
+/// controller Rails ships (8.1: `render html:` of the green page; the
+/// `rescue_from` → red 500 half needs a boot failure, which a one-shot
+/// process reports by not answering at all). Synthesized only when a
+/// route targets it and the app doesn't define its own. A namespaced
+/// class, so only the targets that emit one receive it
+/// (`project::target_files` drops it, with a warning, for the rest).
+fn synthesize_rails_health_controller(app: &mut crate::App) {
+    use super::routes::RAILS_HEALTH_CONTROLLER;
+    let routed = crate::lower::routes::flatten_routes(app)
+        .iter()
+        .any(|r| r.controller.0.as_str() == RAILS_HEALTH_CONTROLLER);
+    if !routed || app.controllers.iter().any(|c| c.name.0.as_str() == RAILS_HEALTH_CONTROLLER) {
+        return;
+    }
+    let src = "class Rails::HealthController < ActionController::Base\n  def show\n    render html: \"<!DOCTYPE html><html><body style=\\\"background-color: green\\\"></body></html>\".html_safe\n  end\nend\n";
+    if let Ok(Some(controller)) = super::controller::ingest_controller(src.as_bytes(), "<rails/health>") {
+        app.controllers.push(controller);
+    }
+}
+
 /// The controller the `to: redirect(...)` routes dispatch to: one
 /// action per redirect, each answering the location Rails' routing
 /// redirect would.
@@ -4575,27 +4599,6 @@ fn extract_autoload_path_roots(source: &[u8]) -> Vec<String> {
 /// string over to the target. A `redirect_to "/x"` does not, and
 /// nothing in the synthesized action can see the query string to pass
 /// on.
-/// `get "up" => "rails/health#show"` — every `rails new` app's health
-/// check (what a Kamal proxy probes) — names Rails' OWN
-/// `Rails::HealthController`, which no app tree holds: the route
-/// dispatched to nothing and `/up` answered 404. Written here as the
-/// controller Rails ships (8.1: `render html:` of the green page; the
-/// `rescue_from` → red 500 half needs a boot failure, which a one-shot
-/// process reports by not answering at all). Synthesized only when a
-/// route targets it and the app doesn't define its own.
-fn synthesize_rails_health_controller(app: &mut crate::App) {
-    let routed = crate::lower::routes::flatten_routes(app)
-        .iter()
-        .any(|r| r.controller.0.as_str() == "Rails::HealthController");
-    if !routed || app.controllers.iter().any(|c| c.name.0.as_str() == "Rails::HealthController") {
-        return;
-    }
-    let src = "class Rails::HealthController < ActionController::Base\n  def show\n    render html: \"<!DOCTYPE html><html><body style=\\\"background-color: green\\\"></body></html>\".html_safe\n  end\nend\n";
-    if let Ok(Some(controller)) = super::controller::ingest_controller(src.as_bytes(), "<rails/health>") {
-        app.controllers.push(controller);
-    }
-}
-
 fn synthesize_redirect_controller(
     redirects: &[crate::dialect::RedirectRoute],
 ) -> crate::dialect::Controller {
