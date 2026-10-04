@@ -642,6 +642,8 @@ class MergeTree(unittest.TestCase):
                             **os.environ,
                             "GITHUB_EVENT_PATH": str(event_path),
                             "GITHUB_EVENT_NAME": "push",
+                            # Not inherited: on main's own CI run GITHUB_REF is main, whose pushes select full validation.
+                            "GITHUB_REF": "refs/heads/feature",
                             "GITHUB_SHA": head,
                             "GITHUB_OUTPUT": os.devnull,
                             "GITHUB_STEP_SUMMARY": os.devnull,
@@ -879,6 +881,8 @@ class ProjectScope(unittest.TestCase):
                     **os.environ,
                     "GITHUB_EVENT_PATH": str(event_path),
                     "GITHUB_EVENT_NAME": "push",
+                    # Not inherited: on main's own CI run GITHUB_REF is main, whose pushes select full validation.
+                    "GITHUB_REF": "refs/heads/feature",
                     "GITHUB_SHA": native,
                     "GITHUB_OUTPUT": os.devnull,
                     "CI_FULL": "false",
