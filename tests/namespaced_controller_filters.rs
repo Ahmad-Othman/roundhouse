@@ -4,19 +4,17 @@
 //! base's filters, its own before_actions, `only:`/`except:`/`skip_`,
 //! and the `rescue_from` wrapper.
 //!
-//! Two separate resolution bugs left module-nested controllers
-//! unprotected:
+//! A relative superclass (`module Ns; class XController <
+//! BaseController`) was left bare, so the ancestry walk matched no
+//! parent and the dispatcher's preamble came out EMPTY — no
+//! ApplicationController filters, no intermediate base's filters.
 //!
-//!   * A relative superclass (`module Ns; class XController <
-//!     BaseController`) was left bare, so the ancestry walk matched no
-//!     parent and the dispatcher's preamble came out EMPTY — no
-//!     ApplicationController filters, no intermediate base's filters.
-//!   * A route's `module:` option was dropped (`resource :archival,
-//!     module: :clients`), so the controller never matched a route and
-//!     was emitted with NO `process_action` at all.
-//!
-//! In the driving app that was 16 routed controllers — every `Admin::*`
-//! among them — running with no authentication and no CSRF check.
+//! Resolving it is Ruby's lexical constant lookup, not a walk over the
+//! class's name: a compact `class Admin::XController < BaseController`
+//! at top level has only the top level in scope, so with both
+//! `::BaseController` and `Admin::BaseController` defined it inherits
+//! the top-level one. The second fixture below pins every spelling
+//! against competing bases.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -201,4 +199,162 @@ fn the_top_level_control_is_unchanged() {
         "top-level controller regressed:\n{things}"
     );
     assert!(things.contains("require_authentication"), "inherited filter missing:\n{things}");
+}
+
+// Competing bases: the same bare `BaseController` names a different
+// class depending on how the subclass is written.
+
+const TOP_BASE: &str = r#"class BaseController < ApplicationController
+  before_action :top_gate
+
+  private
+    def top_gate
+      @gate = :top
+    end
+end
+"#;
+
+const ADMIN_BASE: &str = r#"module Admin
+  class BaseController < ApplicationController
+    before_action :admin_gate
+
+    private
+      def admin_gate
+        @gate = :admin
+      end
+  end
+end
+"#;
+
+const ADMIN_REPORTS_BASE: &str = r#"class Admin::Reports::BaseController < ApplicationController
+  before_action :reports_gate
+
+  private
+    def reports_gate
+      @gate = :reports
+    end
+end
+"#;
+
+fn action_controller(head: &str, tail: &str) -> String {
+    format!("{head}\n  def index\n  end\n{tail}\n")
+}
+
+fn competing_bases() -> (roundhouse::App, HashMap<String, String>) {
+    let controllers: Vec<(&str, String)> = vec![
+        ("application_controller.rb", APPLICATION_CONTROLLER.to_string()),
+        ("base_controller.rb", TOP_BASE.to_string()),
+        ("admin/base_controller.rb", ADMIN_BASE.to_string()),
+        ("admin/reports/base_controller.rb", ADMIN_REPORTS_BASE.to_string()),
+        // Compact, top level: only `::` is in lexical scope.
+        (
+            "admin/widgets_controller.rb",
+            action_controller("class Admin::WidgetsController < BaseController", "end"),
+        ),
+        // Nested: `Admin` is in scope.
+        (
+            "admin/reports_controller.rb",
+            action_controller("module Admin\nclass ReportsController < BaseController", "end\nend"),
+        ),
+        // Mixed: nesting is [Admin]; the `Reports::` prefix opens nothing.
+        (
+            "admin/reports/exports_controller.rb",
+            action_controller(
+                "module Admin\nclass Reports::ExportsController < BaseController",
+                "end\nend",
+            ),
+        ),
+        // Fully nested: [Admin::Reports, Admin] — innermost wins.
+        (
+            "admin/reports/summaries_controller.rb",
+            action_controller(
+                "module Admin\nmodule Reports\nclass SummariesController < BaseController",
+                "end\nend\nend",
+            ),
+        ),
+        // Same name one level down: `Admin::NotesController` is the
+        // class being declared, never its own superclass.
+        (
+            "notes_controller.rb",
+            action_controller("class NotesController < ApplicationController", "end"),
+        ),
+        (
+            "admin/notes_controller.rb",
+            action_controller("module Admin\nclass NotesController < NotesController", "end\nend"),
+        ),
+        // Rooted: `::BaseController` skips the nesting.
+        (
+            "admin/audits_controller.rb",
+            action_controller(
+                "module Admin\nclass AuditsController < ::BaseController",
+                "end\nend",
+            ),
+        ),
+    ];
+    let routes = "Rails.application.routes.draw do\n  namespace :admin do\n    resources :widgets, only: [:index]\n    resources :reports, only: [:index]\n    resources :audits, only: [:index]\n    resources :notes, only: [:index]\n    namespace :reports do\n      resources :exports, only: [:index]\n      resources :summaries, only: [:index]\n    end\n  end\nend\n";
+    let mut tree: HashMap<PathBuf, Vec<u8>> = controllers
+        .into_iter()
+        .map(|(p, c)| (PathBuf::from(format!("app/controllers/{p}")), c.into_bytes()))
+        .collect();
+    tree.insert(PathBuf::from("config/routes.rb"), routes.as_bytes().to_vec());
+    tree.insert(
+        PathBuf::from("db/schema.rb"),
+        b"ActiveRecord::Schema.define do\nend\n".to_vec(),
+    );
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    let parents = app
+        .controllers
+        .iter()
+        .map(|c| {
+            let parent = c.parent.as_ref().map(|p| p.0.as_str().to_string());
+            (c.name.0.as_str().to_string(), parent.unwrap_or_default())
+        })
+        .collect();
+    roundhouse::session::analyze_and_lower(&mut app);
+    (app, parents)
+}
+
+#[test]
+fn a_relative_superclass_resolves_against_the_lexical_nesting_not_the_name() {
+    let (_, parents) = competing_bases();
+    for (controller, parent) in [
+        ("Admin::WidgetsController", "BaseController"),
+        ("Admin::ReportsController", "Admin::BaseController"),
+        ("Admin::Reports::ExportsController", "Admin::BaseController"),
+        ("Admin::Reports::SummariesController", "Admin::Reports::BaseController"),
+        ("Admin::AuditsController", "BaseController"),
+        ("Admin::NotesController", "NotesController"),
+    ] {
+        assert_eq!(parents[controller], parent, "{controller}'s superclass");
+    }
+}
+
+#[test]
+fn each_spelling_inherits_its_own_base_filters() {
+    let (app, _) = competing_bases();
+    let files = ruby::emit_lowered_controllers(&app);
+    for (file, gate) in [
+        ("admin/widgets_controller.rb", "top_gate"),
+        ("admin/reports_controller.rb", "admin_gate"),
+        ("admin/reports/exports_controller.rb", "admin_gate"),
+        ("admin/reports/summaries_controller.rb", "reports_gate"),
+        ("admin/audits_controller.rb", "top_gate"),
+    ] {
+        let content = &files
+            .iter()
+            .find(|f| f.path.to_string_lossy().ends_with(&format!("app/controllers/{file}")))
+            .unwrap_or_else(|| panic!("{file}"))
+            .content;
+        let dispatch = content
+            .split("def process_action")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{file}: no dispatcher\n{content}"));
+        for other in ["top_gate", "admin_gate", "reports_gate"] {
+            assert_eq!(
+                dispatch.contains(other),
+                other == gate,
+                "{file} must run {gate} and no other base's gate:\n{content}"
+            );
+        }
+    }
 }
