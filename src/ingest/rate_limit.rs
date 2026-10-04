@@ -360,12 +360,20 @@ fn seconds_source(v: &Expr) -> String {
 }
 
 fn ruby_string_literal(s: &str) -> String {
-    format!(
-        "\"{}\"",
-        s.replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace("#{", "\\#{")
-    )
+    // A double-quoted literal interpolates `#{…}`, `#@ivar`, and
+    // `#$global`. The scope was a literal, so each marker stays text.
+    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut out = String::with_capacity(escaped.len());
+    let chars: Vec<char> = escaped.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '#' && matches!(chars.get(i + 1), Some('{' | '@' | '$')) {
+            out.push('\\');
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    format!("\"{out}\"")
 }
 
 /// `:create` / `[:create, :update]` → the names; anything else → None.
@@ -475,6 +483,19 @@ mod tests {
             marked.key_src.contains("\\#{"),
             "a literal interpolation marker stays literal; {}",
             marked.key_src
+        );
+
+        // Single quotes keep `#@` and `#$` as text. Emitting them inside
+        // a double-quoted key would interpolate the ivar or the global.
+        let mut shorthand = controller(
+            "class Api::TokensController < ApplicationController\n  \
+             rate_limit to: 100, within: 5.minutes, scope: '#@token #$budget'\nend\n",
+        );
+        let shorthand = &take_from_controller_body(&mut shorthand)[0];
+        assert!(
+            shorthand.key_src.contains("\\#@token") && shorthand.key_src.contains("\\#$budget"),
+            "shorthand interpolation markers stay literal; {}",
+            shorthand.key_src
         );
     }
 

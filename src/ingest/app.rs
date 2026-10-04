@@ -4727,10 +4727,12 @@ fn synthesize_redirect_controller(
                 // Rails' options form keeps the request query. The
                 // dispatcher stores it on the request object. An empty
                 // query leaves the path unchanged; a path that already
-                // has `?` is joined with `&`.
+                // has `?` is joined with `&`. A fragment stays after the
+                // query: `/login#step` plus `x=1` is `/login?x=1#step`,
+                // not `/login#step?x=1`.
                 (
                     format!(
-                        "q = ActionController::Current.request.query_string.to_s\n    q == \"\" ? {location} : {location} + ({location}.include?(\"?\") ? \"&\" : \"?\") + q"
+                        "q = ActionController::Current.request.query_string.to_s\n    parts = {location}.split(\"#\", 2)\n    base = parts[0]\n    joined = q == \"\" ? base : base + (base.include?(\"?\") ? \"&\" : \"?\") + q\n    parts.length == 1 ? joined : joined + \"#\" + parts[1]"
                     ),
                     true,
                 )

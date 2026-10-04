@@ -256,3 +256,29 @@ fn a_path_option_redirect_is_the_same_location_as_a_positional_string() {
     );
 }
 
+#[test]
+fn a_path_option_replaces_a_positional_location() {
+    // Rails' options hash wins: `redirect("/old", path: "/new")` goes to
+    // `/new` and keeps the request query, the options-form behavior.
+    let app = app_with(
+        "  get \"/reports\", to: \"reports#index\"\n  get \"/legacy\", to: redirect(\"/old\", path: \"/new\")\n  get \"/step\", to: redirect(path: \"/login#step\")\n",
+    );
+    let emitted = redirect_controller(&app);
+    assert!(
+        emitted.contains("split(\"#\", 2)") && emitted.contains("parts.length == 1"),
+        "the options form keeps the query and puts it before a fragment; got:\n{emitted}"
+    );
+    assert!(
+        !emitted.contains("\"/old\""),
+        "path: replaces the positional string; got:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("\"/new\""),
+        "the options path is the location; got:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("\"/login#step\""),
+        "a fragment stays in the location so the split can move the query ahead of it; got:\n{emitted}"
+    );
+}
+

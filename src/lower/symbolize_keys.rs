@@ -159,10 +159,12 @@ fn scalar_hash(ty: Option<&Ty>) -> bool {
 fn is_scalar(ty: &Ty) -> bool {
     match ty {
         Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool | Ty::Nil | Ty::Time => true,
-        // A value the analyzer has not closed is still a scalar for
-        // `to_query`: the runtime calls `to_s`. A Hash or Array is the
-        // nested form this pass does not claim.
-        Ty::Var { .. } | Ty::Untyped => true,
+        // An empty literal is an open variable, not a nested hash. The
+        // ruby emit has no `Hash#to_query` of its own, so leaving that
+        // call ungrounded is a missing method. A value typed `Untyped`
+        // can still be a Hash or an Array, and that stays on the
+        // dynamic path.
+        Ty::Var { .. } => true,
         Ty::Union { variants } => variants.iter().all(is_scalar),
         _ => false,
     }

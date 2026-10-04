@@ -210,6 +210,14 @@ fn a_modifier_if_is_not_a_conditional_visibility_declaration() {
         ("def parse(value)\n    if value\n      private :parse\n    end\n    value\n  end", true),
         ("def parse(value)\n    unless value\n      private :parse\n    else\n      value\n    end\n  end", true),
         ("if ready\n    private\n    def hidden; 1; end\n  end", false),
+        // A neighboring `def` is what makes the module surface. Without
+        // it, an accessor inside `if` would be dropped with the module
+        // and the error would never be raised.
+        ("def present; 1; end\n  if enabled\n    attr_reader :token\n  end", false),
+        ("def present; 1; end\n  unless enabled\n    attr_writer :token\n  else\n    attr_accessor :other\n  end", false),
+        ("def present; 1; end\n  if enabled\n    cattr_reader :domain\n  end", false),
+        ("def present; 1; end\n  mattr_accessor :label", true),
+        ("return value if value", true),
         ("unless ready\n    def hidden; 1; end\n  else\n    private :helper\n  end\n  def helper; 1; end", false),
         ("def self.helper; 1; end\n  class << self\n    private_class_method :helper\n  end", false),
     ] {
@@ -218,8 +226,14 @@ fn a_modifier_if_is_not_a_conditional_visibility_declaration() {
         if result.is_ok() != accepted {
             panic!("body={body}\nresult={result:?}");
         }
-        if accepted && body.contains("private_class_method :helper") && !body.contains(",") {
-            let classes = result.unwrap();
+        if accepted && body.contains("mattr_accessor :label") {
+            let classes = result.expect("bare accessor");
+            assert!(
+                classes[0].methods.iter().any(|m| m.name.as_str() == "label"),
+                "a bare accessor is kept; {body}"
+            );
+        } else if accepted && body.contains("private_class_method :helper") && !body.contains(",") {
+            let classes = result.expect("private_class_method");
             let methods = &classes
                 .iter()
                 .find(|c| c.methods.iter().any(|m| m.name.as_str() == "helper"))

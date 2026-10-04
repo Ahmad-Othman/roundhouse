@@ -217,20 +217,31 @@ fn ground_array_wrap(expr: &mut Expr) {
     // Folded here, not hosted as `ActiveSupport.wrap`. That method
     // reads an untyped parameter, and each read counts against the
     // runtime concrete-type ceiling. Nil is `[]`. An Array is itself,
-    // which is what Rails' `to_ary` answers. Anything else is a
-    // one-element array. A custom `to_ary` is not called: an unknown
-    // `to_ary` is dropped, which would wrap the object instead of its
-    // records.
+    // which is what Rails' `to_ary` answers for a real Array. A single
+    // other closed type is a one-element array. A union is not one of
+    // those shapes: `[arg]` would nest an Array or wrap nil. The call
+    // stays, and the catalog already types `Array.wrap` as an Array.
+    // A custom `to_ary` is not called either: an unknown `to_ary` is
+    // dropped, which would wrap the object instead of its records.
     let arg = args[0].clone();
-    let folded = if matches!(arg.ty.as_ref(), Some(Ty::Nil)) {
-        Expr::new(span, ExprNode::Array { elements: vec![], style: Default::default() })
-    } else if matches!(arg.ty.as_ref(), Some(Ty::Array { .. })) {
-        arg
-    } else {
-        Expr::new(span, ExprNode::Array { elements: vec![arg], style: Default::default() })
-    };
+    let Some(folded) = fold_array_wrap(span, &arg) else { return };
     expr.ty = folded.ty.clone();
     *expr.node = *folded.node;
+}
+
+fn fold_array_wrap(span: crate::span::Span, arg: &Expr) -> Option<Expr> {
+    match arg.ty.as_ref() {
+        Some(Ty::Nil) => Some(Expr::new(
+            span,
+            ExprNode::Array { elements: vec![], style: Default::default() },
+        )),
+        Some(Ty::Array { .. }) => Some(arg.clone()),
+        Some(Ty::Union { .. }) | None => None,
+        Some(_) => Some(Expr::new(
+            span,
+            ExprNode::Array { elements: vec![arg.clone()], style: Default::default() },
+        )),
+    }
 }
 
 /// words_connector, two_words_connector, last_word_connector — Rails'

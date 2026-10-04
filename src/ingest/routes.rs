@@ -425,9 +425,11 @@ fn redirect_literal(node: &Node<'_>) -> Option<(String, u16, bool)> {
                 "path" => {
                     // Distinct from a positional string: the caller marks
                     // this route so the synthesized action keeps the
-                    // request query string.
+                    // request query string. Rails' options hash wins
+                    // over a positional string, so `redirect("/old",
+                    // path: "/new")` goes to `/new`, not `/old`.
                     path_option = true;
-                    location.get_or_insert(string_value(&assoc.value())?);
+                    location = Some(string_value(&assoc.value())?);
                 }
                 _ => return None,
             }
