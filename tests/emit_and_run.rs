@@ -386,6 +386,34 @@ end
         .assert_passes();
 }
 
+/// An app with no jobs still runs its tests. The test helper switches
+/// `ActiveJob` to enqueue at load, so it needs the runtime even when no
+/// app file names `ActiveJob`.
+#[test]
+fn an_app_without_jobs_runs_its_tests() {
+    emit_and_run::real_blog()
+        .remove("app/jobs/application_job.rb")
+        .run_test("test/models/article_test.rb")
+        .assert_passes();
+}
+
+/// `thread_state` replaces the job queue methods with locked, per-thread
+/// versions. Boot loads `active_job` first, so a job class that loads it
+/// again later does not put the unlocked versions back.
+#[test]
+fn the_job_queue_keeps_its_thread_safe_methods() {
+    emit_and_run::real_blog()
+        .run_ruby(
+            r#"%i[enqueue drain pending_count record_performed performed].each do |m|
+  file = ActiveJob.method(m).source_location[0]
+  raise "ActiveJob.#{m} comes from #{file}" unless file.end_with?("runtime/thread_state.rb")
+end
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
 /// Source inference must preserve Ruby parameter binding and the existing
 /// test lowering; inferred signatures are not permission to rewrite calls.
 #[test]
