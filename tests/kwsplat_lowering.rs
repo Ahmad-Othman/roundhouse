@@ -427,3 +427,63 @@ end
         "expected the forwarded splat expanded against the class's own helper:\n{src}"
     );
 }
+
+/// `f(**h)` into `def f(**rest)` must keep the splat. Ingest erases
+/// `**h` to a positional Hash; Ruby 3 will not auto-convert it, so the
+/// call is `wrong number of arguments (given 1, expected 0)` —
+/// campfire's `embeds_from(**details)` → `attachments_for(details)`.
+#[test]
+fn a_splat_into_keyword_rest_is_restored() {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(
+        PathBuf::from("db/schema.rb"),
+        b"ActiveRecord::Schema.define(version: 1) do\n  create_table :rooms do |t|\n    t.string :name\n  end\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("app/models/room.rb"),
+        b"class Room < ApplicationRecord\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("config/routes.rb"),
+        b"Rails.application.routes.draw do\n  resources :rooms\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("test/models/room_test.rb"),
+        br#"require "test_helper"
+
+class RoomTest < ActiveSupport::TestCase
+  test "forwards" do
+    assert_equal "a", embed_from(href: "a", url: "b")
+  end
+
+  private
+    def attachments_for(**details)
+      details
+    end
+
+    def embeds_from(**details)
+      attachments_for(**details)
+    end
+end
+"#
+        .to_vec(),
+    );
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let src = roundhouse::emit::ruby::emit_spinel(&app)
+        .into_iter()
+        .filter(|f| f.path.to_string_lossy().contains("room_test"))
+        .map(|f| f.content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        src.contains("attachments_for(**details)"),
+        "expected the splat restored into **rest:\n{src}"
+    );
+    assert!(
+        !src.contains("attachments_for(details)"),
+        "must not pass the Hash positionally into **rest:\n{src}"
+    );
+}
