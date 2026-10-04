@@ -14,6 +14,91 @@ mod data_factory;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
 
+/// Build each query case independently: declaring a model class method
+/// must not accidentally open the old gate for the order/where.not cases.
+fn scope_free_query_app(action: &str) -> emit_and_run::Overlay {
+    let (model, query) = match action {
+        "index" => ("class Widget < ApplicationRecord\nend\n", "Widget.order(:name).limit(1)"),
+        "named" => ("class Widget < ApplicationRecord\nend\n", "Widget.where.not(name: nil).order(:name)"),
+        "recent" => (
+            "class Widget < ApplicationRecord\n  def self.recent\n    order(:name).limit(1)\n  end\nend\n",
+            "Widget.recent",
+        ),
+        _ => panic!("unknown scope-free query action: {action}"),
+    };
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#)
+        .write("app/models/widget.rb", model)
+        .write("config/routes.rb", &format!(
+            "Rails.application.routes.draw do\n  get \"/widgets\", to: \"widgets#{action}\"\nend\n"
+        ))
+        .write("app/controllers/widgets_controller.rb", &format!(
+            "class WidgetsController < ApplicationController\n  def {action}\n    render plain: {query}.map {{ |w| w.name }}.join(\",\")\n  end\nend\n"
+        ))
+}
+
+/// Exercise one action independently, so an order failure cannot mask
+/// where.not or the model class method's implicit-self query root.
+fn scope_free_query_assertions(action: &str, expected: &str) -> String {
+    let nullable_row = if action == "named" { "Widget.create!(name: nil)" } else { "" };
+    format!(r#"
+require_relative "app/controllers/widgets_controller"
+Widget.create!(name: "beta")
+Widget.create!(name: "alpha")
+{nullable_row}
+controller = WidgetsController.new
+controller.process_action(:{action})
+raise "{action} lost its relation: #{{controller.body}}" unless controller.body == "{expected}"
+puts "scope-free {action} passed"
+"#)
+}
+
+/// Class-root order needs a Relation even without any declared scope.
+#[test]
+fn scope_free_model_order_runs() {
+    scope_free_query_app("index")
+        .run_ruby(&scope_free_query_assertions("index", "alpha"))
+        .assert_passes();
+}
+
+/// Zero-argument where reaches WhereChain independently of the order case.
+#[test]
+fn scope_free_model_where_not_runs() {
+    scope_free_query_app("named")
+        .run_ruby(&scope_free_query_assertions("named", "alpha,beta"))
+        .assert_passes();
+}
+
+/// A model class method's bare order root remains supported without named
+/// scopes; this control is independent of other class-root query demands.
+#[test]
+fn scope_free_model_bare_root_class_method_runs() {
+    scope_free_query_app("recent")
+        .run_ruby(&scope_free_query_assertions("recent", "alpha"))
+        .assert_passes();
+}
+
+/// Compile and execute the same three controller actions after booting
+/// their emitted in-memory SQLite database.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn scope_free_model_query_builders_run_on_spinel() {
+    for (action, expected) in [("index", "alpha"), ("named", "alpha,beta"), ("recent", "alpha")] {
+        let script = format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{}",
+            scope_free_query_assertions(action, expected)
+        );
+        scope_free_query_app(action).run_spinel(&script).assert_passes();
+    }
+}
+
 #[test]
 fn finite_concern_class_configuration_runs_without_replaying_rails() {
     for (overlay, assertions) in [
