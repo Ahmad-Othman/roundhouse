@@ -388,15 +388,25 @@ fn redirect_literal(node: &Node<'_>) -> Option<(String, u16)> {
         for element in hash.elements().iter() {
             let Some(assoc) = element.as_assoc_node() else { continue };
             let Some(key) = symbol_value(&assoc.key()) else { continue };
-            if key.as_str() != "status" {
-                return None;
+            match key.as_str() {
+                "status" => {
+                    let value = assoc.value();
+                    let code = value
+                        .as_integer_node()
+                        .and_then(|i| super::util::integer_i64(&i.value()))
+                        .and_then(|i| u16::try_from(i).ok())?;
+                    status = code;
+                }
+                // `redirect(path: "/login")` is Rails' options form of a
+                // path-only redirect: the same location a positional
+                // string carries, without host, protocol, or query.
+                // Other options (`subdomain:`, `host:`) rebuild the
+                // request URL and stay unmodeled.
+                "path" => {
+                    location.get_or_insert(string_value(&assoc.value())?);
+                }
+                _ => return None,
             }
-            let value = assoc.value();
-            let code = value
-                .as_integer_node()
-                .and_then(|i| super::util::integer_i64(&i.value()))
-                .and_then(|i| u16::try_from(i).ok())?;
-            status = code;
         }
     }
     Some((location?, status))

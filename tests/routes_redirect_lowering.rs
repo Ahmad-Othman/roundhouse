@@ -143,3 +143,36 @@ fn a_path_placeholder_is_filled_from_the_matched_params() {
         "got:\n{emitted}"
     );
 }
+
+#[test]
+fn a_path_option_redirect_is_the_same_location_as_a_positional_string() {
+    // `redirect(path: "/login")` is Rails' options form of a path-only
+    // redirect. A positional string and the keyword carry the same
+    // location; `status:` still overrides the 301 default. Options that
+    // rebuild the request (`host:`, `subdomain:`) stay dropped.
+    let app = app_with(
+        "  get \"/reports\", to: \"reports#index\"\n  get \"/session/new\", to: redirect(path: \"/login\")\n  get \"/register\", to: redirect(path: \"/signup\", status: 302)\n  get \"/store/:name\", to: redirect(subdomain: \"stores\", path: \"/%{name}\")\n",
+    );
+    let emitted = redirect_controller(&app);
+    assert!(
+        emitted.contains("def session_new"),
+        "a path-only options redirect is served; got:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("redirect_to(\"/login\", status: :moved_permanently)"),
+        "got:\n{emitted}"
+    );
+    assert!(
+        emitted.contains("redirect_to(\"/signup\", status: :found)"),
+        "status: still applies beside path:; got:\n{emitted}"
+    );
+    assert!(
+        !app.routes.entries.iter().any(|e| matches!(
+            e,
+            roundhouse::dialect::RouteSpec::Explicit { path, .. } if path == "/store/:name"
+        )),
+        "a host-changing options redirect stays dropped; routes = {:?}",
+        app.routes.entries
+    );
+}
+
