@@ -214,11 +214,23 @@ fn ground_array_wrap(expr: &mut Expr) {
     if names != ["Array"] && names != ["::Array"] {
         return;
     }
-    *recv = Some(Expr::new(
-        span,
-        ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
-    ));
-    *parenthesized = true;
+    // Folded here, not hosted as `ActiveSupport.wrap`. That method
+    // reads an untyped parameter, and each read counts against the
+    // runtime concrete-type ceiling. Nil is `[]`. An Array is itself,
+    // which is what Rails' `to_ary` answers. Anything else is a
+    // one-element array. A custom `to_ary` is not called: an unknown
+    // `to_ary` is dropped, which would wrap the object instead of its
+    // records.
+    let arg = args[0].clone();
+    let folded = if matches!(arg.ty.as_ref(), Some(Ty::Nil)) {
+        Expr::new(span, ExprNode::Array { elements: vec![], style: Default::default() })
+    } else if matches!(arg.ty.as_ref(), Some(Ty::Array { .. })) {
+        arg
+    } else {
+        Expr::new(span, ExprNode::Array { elements: vec![arg], style: Default::default() })
+    };
+    expr.ty = folded.ty.clone();
+    *expr.node = *folded.node;
 }
 
 /// words_connector, two_words_connector, last_word_connector — Rails'

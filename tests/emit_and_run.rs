@@ -1648,8 +1648,20 @@ fn array_wrap_keeps_nil_an_array_and_a_scalar_distinct() {
             r#"class Article < ApplicationRecord
   has_many :comments, dependent: :destroy
 
-  def wrapped_probe(value)
-    Array.wrap(value).map { |item| item.to_s }.join(",")
+  def wrapped_nil
+    Array.wrap(nil).map { |item| item.to_s }.join(",")
+  end
+
+  def wrapped_array
+    Array.wrap(%w[a b]).map { |item| item.to_s }.join(",")
+  end
+
+  def wrapped_string
+    Array.wrap("solo").map { |item| item.to_s }.join(",")
+  end
+
+  def wrapped_integer
+    Array.wrap(7).map { |item| item.to_s }.join(",")
   end
 "#,
         )
@@ -1660,10 +1672,10 @@ fn array_wrap_keeps_nil_an_array_and_a_scalar_distinct() {
 class ArticleArrayWrapTest < ActiveSupport::TestCase
   test "Array.wrap keeps nil, an array, and a scalar distinct" do
     article = Article.new
-    assert_equal "", article.wrapped_probe(nil)
-    assert_equal "a,b", article.wrapped_probe(%w[a b])
-    assert_equal "solo", article.wrapped_probe("solo")
-    assert_equal "7", article.wrapped_probe(7)
+    assert_equal "", article.wrapped_nil
+    assert_equal "a,b", article.wrapped_array
+    assert_equal "solo", article.wrapped_string
+    assert_equal "7", article.wrapped_integer
   end
 end
 "#,

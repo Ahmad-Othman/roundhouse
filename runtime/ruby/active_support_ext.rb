@@ -177,18 +177,6 @@ module ActiveSupport
   #
   # campfire's `content_filters_test` writes `<<~HTML.squish` to put a
   # multi-line fixture body on one line before handing it to a filter.
-  # AS `Array.wrap` for the shapes a typed body can host: nil is empty,
-  # an Array stays an Array, and anything else is a one-element array.
-  # Rails also calls `to_ary` on array-like objects. That call is not
-  # lowered here: an unknown `to_ary` is dropped, which would wrap the
-  # object instead of its records. A Relation reaches this as an Array
-  # after `to_a`; a custom `to_ary` stays on CRuby.
-  def self.wrap(object)
-    return [] if object.nil?
-    return object if object.is_a?(Array)
-    [object]
-  end
-
   def self.squish(text)
     out = +""
     pending_space = false
