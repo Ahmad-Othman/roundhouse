@@ -595,8 +595,11 @@ jobs:
       # `scripts/campfire-test-bcrypt.rb`, which `require "bcrypt"`. A
       # runner without the gem fails those tests; a dev box that has it
       # hides the gap.
+      # The built-in Cable mount control loads the emitted config.ru and
+      # sends real Rack requests. The fixture archive contains app source,
+      # so this job must install Rack independently of fixture generation.
       - name: Install gems used by emitted Ruby and Campfire harness tests
-        run: gem install sqlite3 bcrypt --no-document
+        run: gem install sqlite3 bcrypt rack --no-document
       # Bounded build → run → free waves: every --all-targets identity still
       # goes through Cargo (lib, bins, each integration target). Finished
       # integration executables and their own split-DWARF sidecars are freed
