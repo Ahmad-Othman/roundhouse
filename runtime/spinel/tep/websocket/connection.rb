@@ -92,8 +92,12 @@ module Tep
               break
             end
             if r.outcome == "close"
-              @driver.close(r.close_code, "protocol error")
-              Connection.dispatch_close(@driver, r.close_code, "protocol error")
+              reason = "protocol error"
+              if r.close_code == Tep::WebSocket::CLOSE_MESSAGE_TOO_BIG
+                reason = "message too big"
+              end
+              @driver.close(r.close_code, reason)
+              Connection.dispatch_close(@driver, r.close_code, reason)
               return 0
             end
             Connection.dispatch_frame(@driver, r.frame)
