@@ -18,7 +18,7 @@ use crate::Symbol;
 use crate::dialect::{LibraryClass, MethodReceiver, TestModule};
 use crate::vfs::{FsVfs, MapVfs, Vfs};
 
-use super::controller::ingest_controller;
+use super::controller::ingest_controller_with_nesting;
 use super::expr::ingest_ruby_program;
 use super::fixture::ingest_fixture_file;
 use super::jbuilder::ingest_jbuilder;
@@ -1112,6 +1112,10 @@ end
         }
     }
 
+    // Each controller's lexical nesting, for resolving its superclass
+    // once every controller is known (see
+    // `qualify_relative_controller_superclasses`).
+    let mut controller_nesting = std::collections::HashMap::new();
     for root in &roots {
         let controllers_dir = dir.join(root).join("controllers");
         if !vfs.is_dir(&controllers_dir) {
@@ -1121,9 +1125,10 @@ end
             let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
             let path_str = entry.display().to_string();
             if let Some(maybe_controller) =
-                unwrap_or_record(ingest_controller(&source, &path_str))?
+                unwrap_or_record(ingest_controller_with_nesting(&source, &path_str))?
             {
-                if let Some(controller) = maybe_controller {
+                if let Some((controller, nesting)) = maybe_controller {
+                    controller_nesting.insert(controller.name.clone(), nesting);
                     // `helper_method :x` exposes controller methods to
                     // templates. The ARG-PURE ones (no ivar reads)
                     // register like app-helper functions — the bare
@@ -1219,6 +1224,7 @@ end
                     app.controllers.push(synthesize_redirect_controller(&routes.redirects));
                 }
                 app.routes = routes;
+                synthesize_rails_health_controller(&mut app);
             }
         }
     }
@@ -1618,6 +1624,36 @@ end
     // Registered source paths are prefixed with this (the fs walk
     // joins `dir`); map-VFS trees pass `""` and register app-relative.
     app.root = dir.display().to_string().trim_end_matches('/').to_string();
+
+    // A module-nested controller's relative superclass
+    // (`module Ns; class XController < BaseController`) names
+    // `Ns::BaseController` under Ruby's lexical lookup. Left bare, the
+    // parent matched no controller, the ancestry walk came back empty,
+    // and the whole filter chain (its own base's before_action AND
+    // ApplicationController's) vanished from the synthesized dispatcher.
+    qualify_relative_controller_superclasses(&mut app, &controller_nesting);
+
+    // `app/models/post/summary.rb` often reopens `class Post` only to
+    // hold `Post::Summary`. That reopen is a namespace, not a class of
+    // its own: kept as a library class, it owns the file
+    // `app/models/post.rb` and the emit writes it over the model. With
+    // the reopen dropped, the nested class keeps its own file, as a
+    // class nested in the model's own file does. This runs after every
+    // walk, because `app/services` and `lib` can hold the same reopen,
+    // and `lib` can hold the model.
+    let model_names: std::collections::HashSet<&str> =
+        app.models.iter().map(|m| m.name.0.as_str()).collect();
+    app.library_classes.retain(|lc| {
+        let bodiless = !lc.is_module
+            && lc.parent.is_none()
+            && lc.includes.is_empty()
+            && lc.methods.is_empty()
+            && lc.class_ivar_initializers.is_empty()
+            && lc.constants.is_empty()
+            && lc.unknown_calls.is_empty()
+            && lc.origin.is_none();
+        !(bodiless && model_names.contains(lc.name.0.as_str()))
+    });
 
     // Before the splice: it (and every later consumer) looks concerns up
     // by ClassId, so the lexical-scope resolution has to have happened.
@@ -3310,6 +3346,47 @@ fn map_enum_labels(app: &mut App) {
     crate::lower::for_each_hook_body(app, &mut |expr| map_const_receiver_sites(expr, &tables));
 }
 
+/// Resolve a controller's relative superclass against Ruby's lexical
+/// scope. The superclass expression is evaluated in the nesting around
+/// the `class` keyword, so `module Ns; class XController <
+/// BaseController` tries `Ns::BaseController` before a top-level
+/// `BaseController`, while a top-level `class Ns::XController <
+/// BaseController` has only the top level in scope: the `Ns::` prefix
+/// names the class without opening `Ns`. Hence `nesting` (recorded at
+/// ingest, innermost first), never the segments of the class's name.
+///
+/// Rewrites only when a candidate names an ingested controller, so
+/// `ApplicationController` inside `module Ns` stays top-level. A
+/// superclass written qualified (`Admin::BaseController`) or rooted
+/// (`::BaseController`, recorded with an empty nesting) is left alone.
+fn qualify_relative_controller_superclasses(
+    app: &mut App,
+    nesting: &std::collections::HashMap<crate::ident::ClassId, Vec<String>>,
+) {
+    let known: std::collections::HashSet<crate::ident::ClassId> =
+        app.controllers.iter().map(|c| c.name.clone()).collect();
+    for controller in &mut app.controllers {
+        let Some(parent) = controller.parent.clone() else { continue };
+        let raw = parent.0.as_str();
+        if raw.contains("::") {
+            continue;
+        }
+        for scope in nesting.get(&controller.name).into_iter().flatten() {
+            let id = crate::ident::ClassId(crate::ident::Symbol::from(format!("{scope}::{raw}")));
+            // `module Admin; class NotesController < NotesController`
+            // names the top-level one: a class is never its own
+            // superclass.
+            if id == controller.name {
+                continue;
+            }
+            if known.contains(&id) {
+                controller.parent = Some(id);
+                break;
+            }
+        }
+    }
+}
+
 /// Resolve a model's `include <Const>` against Ruby's lexical scope:
 /// inside `class User`, `include Avatar` names `User::Avatar` when such
 /// a module exists, and only falls back to a top-level `Avatar`.
@@ -4592,6 +4669,30 @@ fn extract_autoload_path_roots(source: &[u8]) -> Vec<String> {
         }
     }
     roots
+}
+
+/// `get "up" => "rails/health#show"` — every `rails new` app's health
+/// check (what a Kamal proxy probes) — names Rails' OWN
+/// `Rails::HealthController`, which no app tree holds: the route
+/// dispatched to nothing and `/up` answered 404. Written here as the
+/// controller Rails ships (8.1: `render html:` of the green page; the
+/// `rescue_from` → red 500 half needs a boot failure, which a one-shot
+/// process reports by not answering at all). Synthesized only when a
+/// route targets it and the app doesn't define its own. A namespaced
+/// class, so only the targets that emit one receive it
+/// (`project::target_files` drops it, with a warning, for the rest).
+fn synthesize_rails_health_controller(app: &mut crate::App) {
+    use super::routes::RAILS_HEALTH_CONTROLLER;
+    let routed = crate::lower::routes::flatten_routes(app)
+        .iter()
+        .any(|r| r.controller.0.as_str() == RAILS_HEALTH_CONTROLLER);
+    if !routed || app.controllers.iter().any(|c| c.name.0.as_str() == RAILS_HEALTH_CONTROLLER) {
+        return;
+    }
+    let src = "class Rails::HealthController < ActionController::Base\n  def show\n    render html: \"<!DOCTYPE html><html><body style=\\\"background-color: green\\\"></body></html>\".html_safe\n  end\nend\n";
+    if let Ok(Some(controller)) = super::controller::ingest_controller(src.as_bytes(), "<rails/health>") {
+        app.controllers.push(controller);
+    }
 }
 
 /// The controller the `to: redirect(...)` routes dispatch to: one

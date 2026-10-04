@@ -357,6 +357,12 @@ mod redirect_sink {
 /// generator produces.
 pub const REDIRECT_CONTROLLER: &str = "RoundhouseRedirectsController";
 
+/// Rails' own health-check controller (`get "up" => "rails/health#show"`
+/// in every `rails new` app). Ingest synthesizes it when a route
+/// targets it and the app defines none; see
+/// `project::emits_namespaced_controllers` for the targets that receive it.
+pub const RAILS_HEALTH_CONTROLLER: &str = "Rails::HealthController";
+
 /// `redirect("/path")` / `redirect("/path", status: 302)` — the literal
 /// form, which is all that can be served without running Rails'
 /// redirect block. Answers the location and the status Rails would use.
