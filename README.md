@@ -178,6 +178,12 @@ Include a repro, a regression test, and what you verified. Start with
 see [CI for contributors](docs/ci/README.md) to request full/fresh validation
 and interpret advisory results. PR validation never deploys Pages.
 
+Contributors also have a chat room. It is Campfire, compiled by
+Roundhouse and running on Spinel, so everyone in it is also testing
+it. The invite link isn't posted publicly; if you have opened an issue
+or pull request and would like to join, say so there and you'll get an
+invite privately.
+
 ## License
 
 Dual-licensed under either of
