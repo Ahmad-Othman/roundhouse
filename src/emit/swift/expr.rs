@@ -1845,8 +1845,21 @@ fn emit_case(scrutinee: &Expr, arms: &[Arm], returning: bool) -> String {
 /// `wrap_return`.
 pub(super) fn emit_stmts(exprs: &[Expr], returning: bool) -> String {
     let mut lines: Vec<String> = Vec::new();
+    // Reassigned locals a terminal nil-guard proved non-nil: read as `x!` until the next assignment.
+    let mut narrowed: Vec<String> = Vec::new();
     let mut i = 0;
     while i < exprs.len() {
+        if !narrowed.is_empty() {
+            let mut counts = HashMap::new();
+            count_assigns(&exprs[i], &mut counts, &mut HashMap::new(), &mut HashSet::new());
+            narrowed.retain(|n| {
+                let keep = !counts.contains_key(n);
+                if !keep {
+                    NONNULL_PROPS.with(|s| s.borrow_mut().remove(n));
+                }
+                keep
+            });
+        }
         let is_last = i == exprs.len() - 1;
         // A bare `nil` statement (a lowered no-op branch filler) has no
         // contextual type in Swift — drop it.
@@ -1872,6 +1885,14 @@ pub(super) fn emit_stmts(exprs: &[Expr], returning: bool) -> String {
                 i += 1;
                 continue;
             }
+            if let Some(n) = reassigned_nil_guard(&exprs[i]) {
+                lines.push(emit_expr(&exprs[i]));
+                if NONNULL_PROPS.with(|s| s.borrow_mut().insert(n.clone())) {
+                    narrowed.push(n);
+                }
+                i += 1;
+                continue;
+            }
         }
         if returning && is_last {
             lines.push(wrap_return(&exprs[i]));
@@ -1880,7 +1901,41 @@ pub(super) fn emit_stmts(exprs: &[Expr], returning: bool) -> String {
         }
         i += 1;
     }
+    NONNULL_PROPS.with(|s| {
+        let mut set = s.borrow_mut();
+        for n in &narrowed {
+            set.remove(n);
+        }
+    });
     lines.join("\n")
+}
+
+/// `if x.nil? { <terminal> }` over an Optional local that is reassigned
+/// later, so `try_param_guard` declined to shadow it: the name to read
+/// force-unwrapped until its next assignment.
+fn reassigned_nil_guard(stmt: &Expr) -> Option<String> {
+    let ExprNode::If { cond, then_branch, else_branch } = &*stmt.node else {
+        return None;
+    };
+    if !is_empty_branch(else_branch) || !branch_is_terminal(then_branch) {
+        return None;
+    }
+    let ExprNode::Send { recv: Some(r), method, args, .. } = &*cond.node else {
+        return None;
+    };
+    if method.as_str() != "nil?" || !args.is_empty() {
+        return None;
+    }
+    let ExprNode::Var { name, .. } = &*r.node else {
+        return None;
+    };
+    let optionalish = matches!(
+        r.ty.as_ref(),
+        Some(crate::ty::Ty::Union { variants })
+            if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+    );
+    let n = camel(name.as_str());
+    (optionalish && REASSIGNED.with(|s| s.borrow().contains(&n))).then_some(n)
 }
 
 fn try_guard_let(assign: &Expr, guard: &Expr) -> Option<String> {
@@ -2013,6 +2068,10 @@ fn try_param_guard(stmt: &Expr) -> Option<String> {
         return None;
     }
     let n = camel(name.as_str());
+    // Not shadowed when reassigned later: the `let` rebinding would reject the next assignment.
+    if REASSIGNED.with(|r| r.borrow().contains(&n)) {
+        return None;
+    }
     let extra = match rest {
         Some(rhs) => format!(", !({})", emit_expr(rhs)),
         None => String::new(),

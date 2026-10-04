@@ -181,6 +181,35 @@ fn xctest_counts_are_per_suite_not_the_total() {
     }
 }
 
+#[test]
+fn a_reassigned_nil_checked_local_reads_unwrapped_not_shadowed() {
+    let test_file = "runtime/ruby/test/action_dispatch/router_test.rb";
+    let source = std::fs::read(test_file).expect("read router test");
+    let mut app = App::new();
+    app.test_modules.push(
+        ingest_test_file(&source, test_file)
+            .expect("ingest router test")
+            .expect("router test class"),
+    );
+    load_framework_rbs(&mut app);
+    Analyzer::new(&app).analyze(&mut app);
+    let router = swift::emit(&app)
+        .into_iter()
+        .find(|f| f.path.ends_with("RouterTest.swift"))
+        .expect("RouterTest.swift");
+    let body = router
+        .content
+        .split("func testAnyRouteMatchesEveryMethod")
+        .nth(1)
+        .expect("testAnyRouteMatchesEveryMethod")
+        .split("\n    func ")
+        .next()
+        .unwrap();
+    // Not `guard let m = m`: that rebinds `m` as a constant, and the method assigns `m` again.
+    assert!(!body.contains("guard let m = m"), "{body}");
+    assert!(body.contains("m!.action") && body.contains("m!.pathParams"), "{body}");
+}
+
 // errors + ac_base were the last deferred pair; both are green now and CI
 // runs this file unfiltered. What it took, recorded because kotlin needed
 // the same four fixes and rust still does:
