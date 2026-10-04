@@ -181,6 +181,15 @@ fn private_class_method_follows_module_function() {
 }
 
 #[test]
+fn public_ends_module_function_copy_tracking() {
+    let source = "module BulkWrite\n  module_function\n  def build_row\n    1\n  end\n  public\n  def later\n    2\n  end\n  private_class_method :later\nend\n";
+    assert!(
+        ingest_library_classes(source.as_bytes(), "thing.rb").is_err(),
+        "public ends module_function, so later is not a class method"
+    );
+}
+
+#[test]
 fn private_class_method_accepts_several_defined_class_methods() {
     let source = "class Probe\n  def self.a; 1; end\n  def self.b; 2; end\n  def self.c; 3; end\n  private_class_method :a, :b, :c\n  public_class_method :b\nend\n";
     let methods = methods(source, false);

@@ -228,12 +228,14 @@ fn limit_from_call(call: &Expr, controller_path: &str) -> Option<Limit> {
             "except" => except = symbol_list(v)?,
             "if" => match &*v.node {
                 ExprNode::Lit { value: Literal::Sym { value } } => if_cond = Some(value.clone()),
-                ExprNode::Lambda { .. } => if_cond_expr = Some(v.clone()),
+                // The guard evaluates the predicate. Storing the lambda
+                // would test the lambda object, which is always truthy.
+                ExprNode::Lambda { body, .. } => if_cond_expr = Some((*body).clone()),
                 _ => return None,
             },
             "unless" => match &*v.node {
                 ExprNode::Lit { value: Literal::Sym { value } } => unless_cond = Some(value.clone()),
-                ExprNode::Lambda { .. } => unless_cond_expr = Some(v.clone()),
+                ExprNode::Lambda { body, .. } => unless_cond_expr = Some((*body).clone()),
                 _ => return None,
             },
             // A custom store changes which counter increments. The shared

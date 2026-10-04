@@ -289,6 +289,12 @@ impl Visibility {
                         ));
                     }
                     default = visibility;
+                    if !class_side && !named_class {
+                        // A bare public/protected/private ends Ruby's
+                        // module_function mode. The library walker stops
+                        // promoting later defs; copy tracking must stop too.
+                        module_function = false;
+                    }
                     continue;
                 }
             }

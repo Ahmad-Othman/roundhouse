@@ -497,11 +497,25 @@ fn ingest_route_call(
             return ingest_explicit_route(call, http, file, parent);
         }
         let mut entries = Vec::new();
+        let mut dropped = false;
         for method in via {
+            // A dropped target is the same for every verb. Do not ingest
+            // it again: that repeated the survey line and, before the
+            // empty check, panicked.
+            if dropped {
+                continue;
+            }
             if let Some(route) = ingest_explicit_route(call, method, file, parent)? {
                 entries.push(route);
+            } else {
+                dropped = true;
             }
         }
+        let Some(first) = entries.pop() else { return Ok(None) };
+        if entries.is_empty() {
+            return Ok(Some(first));
+        }
+        entries.insert(0, first);
         return Ok(Some(entries.into_iter().reduce(|left, right| match (left, right) {
             (RouteSpec::Scope { mut entries, .. }, route) => {
                 entries.push(route);

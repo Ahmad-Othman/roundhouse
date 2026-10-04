@@ -94,6 +94,24 @@ end
     assert!(gaps[0].to_string().contains("non-string target"), "{}", gaps[0]);
 }
 
+/// Every verb of a `via:` route can be dropped. That is a missing
+/// route, not an ingest panic, and the survey line is recorded once.
+#[test]
+fn via_with_a_dropped_target_does_not_panic() {
+    roundhouse::ingest::survey::activate();
+    let table = ingest_routes(
+        br#"Rails.application.routes.draw do
+  match "/old", to: redirect { |params, request| 7 }, via: [:get, :post]
+end
+"#,
+        "config/routes.rb",
+    )
+    .expect("dropped via target");
+    assert!(table.entries.is_empty(), "{:?}", table.entries);
+    let gaps = roundhouse::ingest::survey::drain();
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+}
+
 #[test]
 fn resources_param_renames_the_member_segment() {
     let got = routes(
