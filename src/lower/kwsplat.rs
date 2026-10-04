@@ -547,6 +547,20 @@ fn index(hash: &Expr, key: &Symbol, value_ty: Ty) -> Expr {
 /// the read of an OPTIONAL keyword, with the callee's default standing
 /// in for an absent key as Ruby's `**` would have it.
 fn fetch(hash: &Expr, key: &Symbol, default: &Expr, value_ty: Ty) -> Expr {
+    // `diagnose` treats an untyped send on a known receiver as
+    // "no known method". The hash value is often untyped; the
+    // default is the shape this read answers, the same rule
+    // `hash_method` uses for a closed default.
+    let ty = match default.ty.as_ref() {
+        Some(default_ty) if !default_ty.is_open() && matches!(value_ty, Ty::Untyped | Ty::Var { .. }) => {
+            default_ty.clone()
+        }
+        Some(default_ty) if !default_ty.is_open() => crate::analyze::union_of(value_ty, default_ty.clone()),
+        _ if matches!(value_ty, Ty::Untyped | Ty::Var { .. }) => {
+            default.ty.clone().unwrap_or(value_ty)
+        }
+        _ => value_ty,
+    };
     let mut e = Expr::new(
         hash.span,
         ExprNode::Send {
@@ -559,7 +573,7 @@ fn fetch(hash: &Expr, key: &Symbol, default: &Expr, value_ty: Ty) -> Expr {
             parenthesized: true,
         },
     );
-    e.ty = Some(value_ty);
+    e.ty = Some(ty);
     e
 }
 
