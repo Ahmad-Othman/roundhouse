@@ -333,6 +333,17 @@ fn expand(args: &mut Vec<Expr>, splat: ErasedSplat, diags: &mut Vec<Diagnostic>)
         return;
     };
     let (read, literal): (Expr, Vec<(Expr, Expr)>) = (read.clone(), literal.to_vec());
+    // `f(k: compute(), **h)` evaluates `compute()` even when `h` has
+    // `:k`. `h.fetch(:k, compute())` does not. Leave that call as the
+    // positional merge; a literal value is the only default fetch can
+    // hold without changing evaluation.
+    if bundle_wins && literal.iter().any(|(_, v)| !is_literal(v) && !is_pure_read(v)) {
+        diags.push(residue(
+            hash,
+            "a keyword value beside a later splat is not a literal, so fetch would skip it",
+        ));
+        return;
+    }
 
     let hash = args.pop().expect("checked above");
     let value_ty = match &read.ty {

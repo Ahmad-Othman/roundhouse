@@ -338,6 +338,35 @@ end
     assert_eq!(diags.len(), 1, "expected one residue entry: {diags:?}");
 }
 
+#[test]
+fn a_computed_value_beside_a_later_splat_is_ledgered_not_expanded() {
+    // `f(size: compute(), **opts)` evaluates `compute()` even when
+    // `opts` has `:size`. Expanding to `opts.fetch(:size, compute())`
+    // would skip it. The positional merge stays.
+    let (out, diags) = expand_and_emit(
+        r##"
+class Badge
+  def svg(**opts)
+    render_code(size: compute(), **opts)
+  end
+
+  def compute
+    7
+  end
+
+  def render_code(size:, color: "black")
+    "#{size}:#{color}"
+  end
+end
+"##,
+    );
+    assert!(
+        out.contains("render_code({ size: compute }.merge(opts)"),
+        "expected the positional bundle left intact:\n{out}"
+    );
+    assert_eq!(diags.len(), 1, "expected one residue entry: {diags:?}");
+}
+
 /// A TEST CLASS forwarding `**attributes` from one of its own helpers
 /// into another that declares keywords — campfire's
 /// `embed_from(**attributes) = attachment_for(**attributes).attachable`
