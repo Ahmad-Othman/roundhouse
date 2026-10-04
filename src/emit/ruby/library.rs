@@ -1958,9 +1958,11 @@ fn resolve_through_chain(
         return None;
     }
     // The through association on the owner (`:votes`, `:taggings`, `:tags`).
-    let (thr_target, thr_fk, thr_through) = model.associations().find_map(|a| match a {
-        Association::HasMany { name, target, foreign_key, through, .. } if name == thr_name => {
-            Some((target, foreign_key, through))
+    let (thr_target, thr_fk, thr_through, as_interface) = model.associations().find_map(|a| match a {
+        Association::HasMany { name, target, foreign_key, through, as_interface, .. }
+            if name == thr_name =>
+        {
+            Some((target, foreign_key, through, as_interface))
         }
         _ => None,
     })?;
@@ -1973,6 +1975,7 @@ fn resolve_through_chain(
     let thr_model = models.iter().find(|m| &m.name == thr_target)?;
     let thr_table = pluralize_snake(thr_target.0.as_str());
     let target_table = pluralize_snake(target.0.as_str());
+    let owner_type = through_owner_type_predicate(&thr_table, as_interface, &model.name);
     // The source belongs_to on the join model (`Vote.belongs_to :story`)
     // — matched by target class, so `source:` renames resolve without a
     // name convention.
@@ -1980,8 +1983,9 @@ fn resolve_through_chain(
         Association::BelongsTo { target: t, foreign_key, .. } if t == target => Some(foreign_key),
         _ => None,
     }) {
-        let mut joins =
-            vec![format!("INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id")];
+        let mut joins = vec![format!(
+            "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id{owner_type}"
+        )];
         joins.extend(back_joins);
         return Some((joins, edge_table, edge_fk));
     }
@@ -1997,8 +2001,9 @@ fn resolve_through_chain(
         }
         _ => None,
     }) {
-        let mut joins =
-            vec![format!("INNER JOIN {thr_table} ON {thr_table}.id = {target_table}.{src_fk}")];
+        let mut joins = vec![format!(
+            "INNER JOIN {thr_table} ON {thr_table}.id = {target_table}.{src_fk}{owner_type}"
+        )];
         joins.extend(back_joins);
         return Some((joins, edge_table, edge_fk));
     }
@@ -2013,10 +2018,22 @@ fn resolve_through_chain(
         resolve_through_chain(models, thr_model, src_through, target, depth + 1)?;
     let mut joins = src_joins;
     joins.push(format!(
-        "INNER JOIN {thr_table} ON {thr_table}.id = {src_edge_table}.{src_edge_fk}"
+        "INNER JOIN {thr_table} ON {thr_table}.id = {src_edge_table}.{src_edge_fk}{owner_type}"
     ));
     joins.extend(back_joins);
     Some((joins, edge_table, edge_fk))
+}
+
+/// Keep the same polymorphic owner restriction on lazy and batched through joins.
+/// An id alone is not unique across the classes sharing an `as:` interface.
+fn through_owner_type_predicate(table: &str, as_interface: &Option<Symbol>, owner: &ClassId) -> String {
+    match as_interface {
+        Some(interface) => {
+            let owner_name = owner.0.as_str().replace('\'', "''");
+            format!(" AND {table}.{interface}_type = '{owner_name}'")
+        }
+        None => String::new(),
+    }
 }
 
 /// The joined Relation chain, carrying the eager-load cache (see
@@ -7469,7 +7486,9 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
                         None => continue,
                     },
                 };
-                let Some(Association::HasMany { target: thr_target, foreign_key: thr_fk, .. }) =
+                let Some(Association::HasMany {
+                    target: thr_target, foreign_key: thr_fk, as_interface, ..
+                }) =
                     model.associations().find(|a| {
                         matches!(a, Association::HasMany { name, .. } if name == thr_name)
                     })
@@ -7488,12 +7507,13 @@ fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, Pre
                 };
                 let thr_table = pluralize_snake(thr_target.0.as_str());
                 let target_table = pluralize_snake(target.0.as_str());
+                let owner_type = through_owner_type_predicate(&thr_table, as_interface, &model.name);
                 out.push((
                     name.as_str().to_string(),
                     PreloadKind::Through {
                         target: target.0.as_str().to_string(),
                         join: format!(
-                            "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id"
+                            "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id{owner_type}"
                         ),
                         group_col: format!("{thr_table}.{thr_fk}"),
                         order: order.map(|o| o.to_string()),
