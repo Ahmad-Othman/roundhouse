@@ -1243,6 +1243,17 @@ fn emit_expr_inner(e: &Expr) -> String {
                 ExprNode::Ivar { name } => ivar_field_ty(name.as_str())
                     .map(|t| is_option_of(&t, target_ty))
                     .unwrap_or(false),
+                // `arr[i]` types as `T | nil`, as Ruby's does, but a
+                // typed Vec index renders as the element itself
+                // (`send/index.rs`: `v[(i) as usize]`), never an Option.
+                ExprNode::Send { recv: Some(r), method, args, .. }
+                    if method.as_str() == "[]"
+                        && args.len() == 1
+                        && matches!(r.ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Array { .. }))
+                        && matches!(args[0].ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Int)) =>
+                {
+                    false
+                }
                 _ => matches!(
                     value.ty.as_ref(),
                     Some(t) if is_option_of(t, target_ty)

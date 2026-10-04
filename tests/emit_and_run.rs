@@ -3784,3 +3784,51 @@ end
         .run_test("test/models/article_summary_test.rb")
         .assert_passes();
 }
+
+/// `includes(:comments)` distributes each parent's children by binary
+/// search over the children's foreign keys, sorted by the preload query
+/// (`ActiveRecord.lower_bound`), where it used to scan every child per
+/// parent — O(N * M), a million comparisons at 1,000 x 1,000, which put
+/// the emitted index behind Rails' keyed preloader
+/// (koduki/example-rails-aot). The comment-byte gates are blind to
+/// grouping, so this renders each article's preloaded comments by body:
+/// inserts interleaved across articles, a parent with no children, and
+/// a run at the end of the sorted list all have to land, in insertion
+/// order within each article.
+#[test]
+fn includes_distributes_each_parents_children_in_order() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/views/articles/_article.html.erb",
+            "(<%= pluralize(article.comments.size, \"comment\") %>)",
+            "(<%= pluralize(article.comments.size, \"comment\") %>)<i class=\"pc\"><%= article.title %>=<%= article.comments.map(&:body).join(\",\") %></i>",
+        )
+        .write(
+            "test/controllers/articles_preload_controller_test.rb",
+            r#"require "test_helper"
+
+class ArticlesPreloadControllerTest < ActionDispatch::IntegrationTest
+  test "includes distributes each article's comments" do
+    a = Article.create!(title: "Alpha", body: "A sufficiently long body for validation.")
+    b = Article.create!(title: "Beta", body: "A sufficiently long body for validation.")
+    c = Article.create!(title: "Gamma", body: "A sufficiently long body for validation.")
+    Article.create!(title: "Delta", body: "A sufficiently long body for validation.")
+    Comment.create!(article_id: c.id, commenter: "x", body: "c1")
+    Comment.create!(article_id: a.id, commenter: "x", body: "a1")
+    Comment.create!(article_id: c.id, commenter: "x", body: "c2")
+    Comment.create!(article_id: b.id, commenter: "x", body: "b1")
+    Comment.create!(article_id: a.id, commenter: "x", body: "a2")
+    Comment.create!(article_id: c.id, commenter: "x", body: "c3")
+    get articles_url
+    assert_response :success
+    assert_match(/<i class="pc">Alpha=a1,a2<\/i>/, response.body)
+    assert_match(/<i class="pc">Beta=b1<\/i>/, response.body)
+    assert_match(/<i class="pc">Gamma=c1,c2,c3<\/i>/, response.body)
+    assert_match(/<i class="pc">Delta=<\/i>/, response.body)
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/articles_preload_controller_test.rb")
+        .assert_passes();
+}
