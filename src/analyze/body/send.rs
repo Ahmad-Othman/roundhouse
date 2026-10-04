@@ -727,6 +727,22 @@ impl<'a> BodyTyper<'a> {
                 return ty.clone();
             }
         }
+        // `presence` hands the receiver back or nil, so on a typed
+        // receiver it is `T?` — what `lower::blank` stamps on the
+        // `blank? ? nil : r` it rewrites the site to. Resolved ahead of
+        // the receiver-agnostic table, which answers `Untyped`.
+        //
+        // Not an Array: a `has_many` reader types as one while the
+        // runtime answers a Relation, and `lower::enumerable_ext` reads
+        // the untyped half of `rel.presence || [x]` as its sign that
+        // the value may be either.
+        if method.as_str() == "presence" {
+            if let Some(ty) = recv_ty.filter(|ty| {
+                !matches!(ty, Ty::Var { .. } | Ty::Array { .. } | Ty::Untyped)
+            }) {
+                return super::union_of(ty.clone(), Ty::Nil);
+            }
+        }
         // `.call` on a value TYPED as a function (an RBS `^() -> T`
         // parameter — `broadcast_render(blk)`'s `blk.call` is the
         // runtime site) answers the function's declared return. Only
@@ -1439,7 +1455,14 @@ impl<'a> BodyTyper<'a> {
             }
             Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret, args),
             Some(Ty::Record { row }) => record_method(method, row, args),
-            Some(Ty::Str) => str_method(method),
+            // A method the app adds by reopening `String` (campfire's
+            // `all_emoji?`) answers where the builtin table has nothing.
+            Some(Ty::Str) => match str_method(method) {
+                Ty::Var { .. } => self
+                    .lookup_string_instance(method)
+                    .unwrap_or_else(unknown),
+                ty => ty,
+            },
             Some(Ty::Sym) => sym_method(method),
             // A `Ty::Time` value (datetime-column read, `Time.now`, etc.)
             // dispatches through the same table the `Time` class constant
@@ -1540,6 +1563,24 @@ impl<'a> BodyTyper<'a> {
                 }
             }
             current = cls.parent.clone();
+        }
+        None
+    }
+
+    /// A method the app adds by reopening `String`, or by including a
+    /// module into it. Class methods do not answer `"text".foo`.
+    fn lookup_string_instance(&self, method: &Symbol) -> Option<Ty> {
+        let mut stack = vec![ClassId(Symbol::from("String"))];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Some(m) = self.classes().get(&id) else { continue };
+            if let Some(ty) = m.instance_methods.get(method) {
+                return Some(unwrap_fn_ret(ty));
+            }
+            stack.extend(m.includes.iter().cloned());
         }
         None
     }
@@ -2614,8 +2655,9 @@ pub(super) fn universal_method(method: &Symbol) -> Option<Ty> {
         "dig" => Some(Ty::Untyped),
         // `presence` and `present?` are ActiveSupport's
         // blank-aware predicates. `presence` returns the receiver or
-        // nil; we don't statically distinguish, so Untyped is the
-        // gradual answer. `present?` / `blank?` are universally Bool.
+        // nil; a typed receiver is answered `T?` before this table, so
+        // Untyped is the answer only for an unknown one. `present?` /
+        // `blank?` are universally Bool.
         "present?" | "blank?" => Some(Ty::Bool),
         "presence" => Some(Ty::Untyped),
         _ => None,
