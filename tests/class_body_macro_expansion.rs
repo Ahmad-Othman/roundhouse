@@ -1178,3 +1178,26 @@ fn explicit_keyword_producers_bind_values_without_nested_argument_markers() {
         assert!(skips[0].3.is_empty());
     }
 }
+
+#[test]
+fn a_parameterized_rate_limit_guard_is_not_inlined_unbound() {
+    use roundhouse::dialect::ControllerBodyItem;
+    let source = br#"class ProbeController < ApplicationController
+  rate_limit to: 5, within: 1.minute, if: ->(controller) { controller.admin? }
+  def show
+  end
+end
+"#;
+    let controller = roundhouse::ingest::ingest_controller(source, "probe_controller.rb")
+        .expect("ingest")
+        .expect("controller");
+    assert!(
+        !controller.body.iter().any(|item| matches!(item, ControllerBodyItem::Filter { .. })),
+        "a parameterized guard must not become a filter whose body names an unbound parameter: {:?}",
+        controller.body.iter().map(|item| match item {
+            ControllerBodyItem::Filter { .. } => "filter",
+            ControllerBodyItem::Unknown { .. } => "unknown",
+            _ => "other",
+        }).collect::<Vec<_>>()
+    );
+}
