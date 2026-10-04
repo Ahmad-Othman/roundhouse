@@ -4084,12 +4084,6 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     // this is the three-branch shape `ipaddr` would have if there were a
     // `packages/ipaddr`.
     //
-    // `Zlib`: same three-branch. The CRC-32 port stays for targets with
-    // no zlib; spinel's `packages/zlib` is the real codec (gzip/deflate),
-    // which tep uses to honour Accept-Encoding the way campfire's
-    // Rack::Deflater does on CRuby. Without the swap, `Zlib.gzip` is a
-    // NameError and every HTML page ships uncompressed.
-    //
     // THE REASON IS THE ONE THE PORT'S OWN HEADER NAMES. Ruby's `create`
     // opens `O_EXCL` and retries, so it cannot be made to clobber a file
     // an attacker pre-created; the port opens by name.
@@ -4102,6 +4096,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
     // left behind reopens a class as a module — the collision
     // `runtime/spinel/erb_spinel.rb`'s header records, which cost the
     // lobsters AOT lane ten days.
+    //
+    // `Zlib`: same three-branch swap, different reason. The CRC-32 port
+    // stays for targets with no zlib; spinel's `packages/zlib` is the
+    // real codec (gzip/deflate), which tep uses to honour
+    // Accept-Encoding the way campfire's Rack::Deflater does on CRuby.
+    // Without the swap, `Zlib.gzip` is a NameError and every HTML page
+    // ships uncompressed. Its .rbs goes too: the port's surface is not
+    // the library's.
     //
     // HERE rather than in `spin_shape`, because `spin_shape` is not the
     // only tree that ships: `spinel_base_files` is what

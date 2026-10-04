@@ -129,19 +129,28 @@ end
 
 # insert_all skips Message::Searchable's after_create_commit, so the FTS
 # index that `/searches?q=` reads would otherwise be empty and a search
-# workload would time an empty page. Keep it in step with the rows above.
+# workload would time an empty page. Index the same plain text Rails
+# would (`Message#plain_text_body`), not the Action Text HTML — markup
+# tokens (`b`, `code`) would otherwise match searches they shouldn't.
 if Message.any?
   indexed = ActiveRecord::Base.connection.select_value("SELECT count(*) FROM message_search_index").to_i
   if indexed.zero?
-    ActiveRecord::Base.connection.execute(<<~SQL)
-      INSERT INTO message_search_index(rowid, body)
-      SELECT messages.id, coalesce(action_text_rich_texts.body, '')
+    conn = ActiveRecord::Base.connection
+    rows = conn.select_all(<<~SQL)
+      SELECT messages.id AS id, coalesce(action_text_rich_texts.body, '') AS html
       FROM messages
       LEFT JOIN action_text_rich_texts
         ON action_text_rich_texts.record_type = 'Message'
        AND action_text_rich_texts.record_id = messages.id
        AND action_text_rich_texts.name = 'body'
     SQL
+    rows.each_slice(200) do |slice|
+      values = slice.map { |r|
+        text = ActionText::Content.new(r["html"]).to_plain_text
+        "(#{r["id"].to_i}, #{conn.quote(text)})"
+      }
+      conn.execute("INSERT INTO message_search_index(rowid, body) VALUES #{values.join(',')}")
+    end
   end
 end
 

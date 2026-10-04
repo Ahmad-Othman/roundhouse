@@ -158,11 +158,11 @@
 #   --gzip            send Accept-Encoding: gzip, matching DHH's public-
 #                     server comparison (once-campfire-rust bench/loadgen
 #                     default). Off by default: wrk historically sent no
-#                     encoding header, and the emit does not gzip yet
-#                     (docs/pipeline/runtime.md — campfire's config.ru
-#                     Rack::Deflater is not applied). A gzip run against
-#                     the emit is still a valid comparison: it measures
-#                     what the lane actually serves.
+#                     encoding header, so uncompressed cells stay
+#                     comparable to older runs. On: CRuby wraps run_rack
+#                     in Rack::Deflater and Spinel tep gzips HTML; CSS/JS
+#                     stay identity. A gzip run measures what the lane
+#                     actually serves.
 #   --dhh-http        time DHH's five HTTP workloads (tweet table, 2026-10-04):
 #                     room page, messages?before=, sidebar, searches?q=coffee,
 #                     POST a message into a second room so the measured
@@ -193,9 +193,10 @@
 #
 # DHH HTTP (once-campfire-elixir bench/results/ruby-elixir-go-rust-20261004):
 # production public server, gzip, 16 concurrent clients, signed in, the
-# five routes above. This harness is the native (non-Docker) cousin of
-# that suite for the Roundhouse ruby and spinel lanes. It does not pin
-# four cores or run the Elixir/Go/Rust images.
+# five routes above. Named rust/go/elixir lanes boot the native
+# once-campfire-* binaries on this box (not their Docker images) against
+# the same sqlite file. Default lanes stay Rails vs the emit. Does not
+# pin four cores.
 #
 # WHY 16 CONNECTIONS AND NOT 64. A campfire room page is ~400 KB and
 # takes single-digit milliseconds to build; at 64 connections against one
@@ -242,19 +243,23 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [[ -x "$HOME/git/spinel/bin/spinel" ]]; then
     PATH="$HOME/git/spinel/bin:$PATH"
 fi
-# Campfire's Gemfile tracks a current 3.4; prefer the CI MRI if present.
-if [[ -x "$HOME/.local/share/mise/installs/ruby/3.4.11/bin/ruby" ]]; then
-    PATH="$HOME/.local/share/mise/installs/ruby/3.4.11/bin:$PATH"
-fi
-if [[ -x "$HOME/.local/share/mise/installs/go/1.27.1/bin/go" ]]; then
-    PATH="$HOME/.local/share/mise/installs/go/1.27.1/bin:$PATH"
-fi
-if [[ -x "$HOME/.local/share/mise/installs/erlang/28.3/bin/erl" ]]; then
-    PATH="$HOME/.local/share/mise/installs/erlang/28.3/bin:$PATH"
-fi
-if [[ -x "$HOME/.local/share/mise/installs/elixir/1.19.5-otp-28/bin/elixir" ]]; then
-    PATH="$HOME/.local/share/mise/installs/elixir/1.19.5-otp-28/bin:$PATH"
-fi
+# Newest mise install of each tool, if present. Existence-guarded so a
+# box without go/elixir is unchanged; not a pinned patch (3.4.11) so
+# the next MRI bump does not leave this script looking at a hole.
+mise_prepend_latest() {
+    local tool="$1"
+    local base="$HOME/.local/share/mise/installs/$tool"
+    local d
+    [[ -d "$base" ]] || return 0
+    d="$(find "$base" -mindepth 2 -maxdepth 2 -type d -name bin ! -path '*/latest/*' 2>/dev/null \
+        | sort -V | tail -1 || true)"
+    if [[ -n "$d" && -d "$d" ]]; then PATH="$d:$PATH"; fi
+    return 0
+}
+mise_prepend_latest ruby
+mise_prepend_latest go
+mise_prepend_latest erlang
+mise_prepend_latest elixir
 export PATH
 cd "$REPO_ROOT"
 
@@ -733,33 +738,11 @@ if wants_lane rails-truffleruby; then
     fi
 fi
 
-# THE SAME ROWS, ALWAYS. Copied on every run, not only on prepare: a
-# previous run's POSTs would otherwise leave the two databases apart, and
-# a benchmark whose lanes read different data is not one.
-step "staging the seeded DB into the emit"
-[[ -f "$ORACLE/storage/db/production.sqlite3" ]] \
-    || die "no seeded production DB at $ORACLE — run without --skip-prepare"
-mkdir -p "$EMIT/storage"
-cp "$ORACLE/storage/db/production.sqlite3" "$EMIT/storage/development.sqlite3"
-# The binary reads the same rows from its own tree. WAL and SHM go with
-# it: a stale -wal beside a freshly copied database is a different
-# database, and sqlite will happily read the pair.
-if [[ -d "$SP_EMIT" ]]; then
-    mkdir -p "$SP_EMIT/storage"
-    cp "$ORACLE/storage/db/production.sqlite3" "$SP_EMIT/storage/development.sqlite3"
-    rm -f "$SP_EMIT/storage/development.sqlite3-wal" "$SP_EMIT/storage/development.sqlite3-shm"
-fi
-rm -f "$EMIT/storage/development.sqlite3-wal" "$EMIT/storage/development.sqlite3-shm"
-if [[ -d "$JRUBY_EMIT" ]]; then
-    mkdir -p "$JRUBY_EMIT/storage"
-    cp "$ORACLE/storage/db/production.sqlite3" "$JRUBY_EMIT/storage/development.sqlite3"
-    rm -f "$JRUBY_EMIT/storage/development.sqlite3-wal" "$JRUBY_EMIT/storage/development.sqlite3-shm"
-fi
-
 # DHH's five HTTP workloads, resolved against THIS seed. Writes go to a
 # second room so the measured room page stays the same size across POST
 # cells, matching once-campfire-rust/bench/run (watercooler vs hq).
 SEED_DB="$ORACLE/storage/db/production.sqlite3"
+[[ -f "$SEED_DB" ]] || die "no seeded production DB at $ORACLE — run without --skip-prepare"
 resolve_dhh_http() {
     local db="$1"
     [[ -f "$db" ]] || die "no seed database at $db"
@@ -811,37 +794,32 @@ ep_path() {
 }
 ep_parity_name() { echo "$1" | tr '/:?=&' '______'; }
 
-# Copy the oracle seed into every emit tree. POST cells write; without a
-# restage the next lane would time a different database.
+# Copy the oracle seed into a destination tree. WAL/SHM go with it: a
+# stale -wal beside a freshly copied database is a different database.
+stage_sqlite() {
+    local dest="$1"
+    mkdir -p "$(dirname "$dest")"
+    cp "$SEED_DB" "$dest"
+    rm -f "${dest}-wal" "${dest}-shm"
+}
+
+# THE SAME ROWS, ALWAYS. Copied on every run, not only on prepare: a
+# previous run's POSTs would otherwise leave the two databases apart, and
+# a benchmark whose lanes read different data is not one.
+# Native once-campfire-* trees are overwritten only when that lane runs.
 stage_seeded_db() {
     [[ -f "$SEED_DB" ]] || die "no seeded production DB at $ORACLE"
-    mkdir -p "$EMIT/storage"
-    cp "$SEED_DB" "$EMIT/storage/development.sqlite3"
-    rm -f "$EMIT/storage/development.sqlite3-wal" "$EMIT/storage/development.sqlite3-shm"
-    if [[ -d "$SP_EMIT" ]]; then
-        mkdir -p "$SP_EMIT/storage"
-        cp "$SEED_DB" "$SP_EMIT/storage/development.sqlite3"
-        rm -f "$SP_EMIT/storage/development.sqlite3-wal" "$SP_EMIT/storage/development.sqlite3-shm"
+    stage_sqlite "$EMIT/storage/development.sqlite3"
+    if [[ -d "$SP_EMIT" ]]; then stage_sqlite "$SP_EMIT/storage/development.sqlite3"; fi
+    if [[ -d "$JRUBY_EMIT" ]]; then stage_sqlite "$JRUBY_EMIT/storage/development.sqlite3"; fi
+    if wants_lane rust && [[ -d "$RUST_ROOT" ]]; then
+        stage_sqlite "$RUST_ROOT/storage/db/production.sqlite3"
     fi
-    if [[ -d "$JRUBY_EMIT" ]]; then
-        mkdir -p "$JRUBY_EMIT/storage"
-        cp "$SEED_DB" "$JRUBY_EMIT/storage/development.sqlite3"
-        rm -f "$JRUBY_EMIT/storage/development.sqlite3-wal" "$JRUBY_EMIT/storage/development.sqlite3-shm"
+    if wants_lane go && [[ -d "$GO_ROOT" ]]; then
+        stage_sqlite "$GO_ROOT/storage/db/production.sqlite3"
     fi
-    if [[ -d "$RUST_ROOT" ]]; then
-        mkdir -p "$RUST_ROOT/storage/db"
-        cp "$SEED_DB" "$RUST_ROOT/storage/db/production.sqlite3"
-        rm -f "$RUST_ROOT/storage/db/production.sqlite3-wal" "$RUST_ROOT/storage/db/production.sqlite3-shm"
-    fi
-    if [[ -d "$GO_ROOT" ]]; then
-        mkdir -p "$GO_ROOT/storage/db"
-        cp "$SEED_DB" "$GO_ROOT/storage/db/production.sqlite3"
-        rm -f "$GO_ROOT/storage/db/production.sqlite3-wal" "$GO_ROOT/storage/db/production.sqlite3-shm"
-    fi
-    if [[ -d "$ELIXIR_ROOT" ]]; then
-        mkdir -p "$ELIXIR_ROOT/var"
-        cp "$SEED_DB" "$ELIXIR_ROOT/var/production.sqlite3"
-        rm -f "$ELIXIR_ROOT/var/production.sqlite3-wal" "$ELIXIR_ROOT/var/production.sqlite3-shm"
+    if wants_lane elixir && [[ -d "$ELIXIR_ROOT" ]]; then
+        stage_sqlite "$ELIXIR_ROOT/var/production.sqlite3"
     fi
     # Rails oracle serves production.sqlite3 in place. Snapshot it so a
     # POST lane can be rolled back before the next one boots.
@@ -868,6 +846,7 @@ print(m.group(1) if m else "")
 PY
 }
 
+step "staging the seeded DB into the emit"
 stage_seeded_db
 
 # ── per-lane lifecycle ───────────────────────────────────────────────
@@ -1040,9 +1019,7 @@ start_lane() {
             # collide with HTTP_PORT.
             echo "bin=$RUST_BIN" > "$shape"
             echo "workers=1 (one process)" >> "$shape"
-            mkdir -p "$RUST_ROOT/storage/db" "$RUST_ROOT/storage/files"
-            cp "$SEED_DB" "$RUST_ROOT/storage/db/production.sqlite3"
-            rm -f "$RUST_ROOT/storage/db/production.sqlite3-wal" "$RUST_ROOT/storage/db/production.sqlite3-shm"
+            mkdir -p "$RUST_ROOT/storage/files"
             ( cd "$RUST_ROOT" && exec env \
                 SECRET_KEY_BASE="$SPINEL_SECRET" SECRET_KEY_BASE_DUMMY=1 \
                 DISABLE_SSL=1 HTTP_PORT="$port" TARGET_PORT="$((port + 2000))" \
@@ -1053,9 +1030,7 @@ start_lane() {
         go)
             echo "bin=$GO_BIN" > "$shape"
             echo "workers=1 (one process)" >> "$shape"
-            mkdir -p "$GO_ROOT/storage/db" "$GO_ROOT/storage/files"
-            cp "$SEED_DB" "$GO_ROOT/storage/db/production.sqlite3"
-            rm -f "$GO_ROOT/storage/db/production.sqlite3-wal" "$GO_ROOT/storage/db/production.sqlite3-shm"
+            mkdir -p "$GO_ROOT/storage/files"
             ( cd "$GO_ROOT" && exec env \
                 SECRET_KEY_BASE="$SPINEL_SECRET" \
                 DISABLE_SSL=1 HTTP_PORT="$port" TARGET_PORT="$((port + 2000))" \
@@ -1066,9 +1041,6 @@ start_lane() {
         elixir)
             echo "root=$ELIXIR_ROOT" > "$shape"
             echo "workers=BEAM" >> "$shape"
-            mkdir -p "$ELIXIR_ROOT/var"
-            cp "$SEED_DB" "$ELIXIR_ROOT/var/production.sqlite3"
-            rm -f "$ELIXIR_ROOT/var/production.sqlite3-wal" "$ELIXIR_ROOT/var/production.sqlite3-shm"
             ( cd "$ELIXIR_ROOT" && exec env \
                 SECRET_KEY_BASE="$SPINEL_SECRET" \
                 DATABASE_PATH="$ELIXIR_ROOT/var/production.sqlite3" \
@@ -1111,7 +1083,8 @@ login_cookie() {
             # lane's own form, under the session cookie that holds it.
             # Elixir still renders the meta tag; rust/go do not.
             local token code
-            token="$(curl -sS -c "$jar" "http://127.0.0.1:$port/session/new" \
+            token="$(curl -sS -H 'Accept-Encoding: identity' -c "$jar" \
+                     "http://127.0.0.1:$port/session/new" \
                      | grep -o 'name="authenticity_token" value="[^"]*"' | head -1 \
                      | sed 's/.*value="//; s/"$//')"
             [[ -n "$token" ]] || { fail "$lane served no CSRF token at /session/new"; return 1; }
@@ -1304,11 +1277,16 @@ for lane in "${LANES[@]}"; do
     }
     ok "$lane up and signed in"
 
-    # CSRF for POST cells: DHH's loadgen scrapes the meta tag. Empty is
-    # fine for a GET-only run; a POST cell without a token is a 422 and
-    # is not a measurement of the write path.
+    # CSRF for POST cells: DHH's loadgen scrapes the meta tag. Identity
+    # encoding: with --gzip the overlay/tep compress HTML, and a gzip
+    # scrape would not match the token regex. Empty is fine for a
+    # GET-only run; a POST cell without a token is a 422 and is not a
+    # measurement of the write path.
+    csrf=""
+    csrf_enc=""
     csrf_html="$LOG_DIR/csrf-$lane.html"
-    curl -s -b "$LOG_DIR/jar-$lane.txt" -o "$csrf_html" "http://127.0.0.1:$port$(ep_path "${ENDPOINTS[0]}")"
+    curl -s -H 'Accept-Encoding: identity' -b "$LOG_DIR/jar-$lane.txt" \
+        -o "$csrf_html" "http://127.0.0.1:$port$(ep_path "${ENDPOINTS[0]}")"
     csrf="$(csrf_token_from "$csrf_html")"
     csrf_enc="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$csrf")"
     export BENCH_COOKIE="$cookie"
@@ -1326,7 +1304,8 @@ for lane in "${LANES[@]}"; do
         rails|rails-1p|rails-truffleruby)
             for ep in "${ENDPOINTS[@]}"; do
                 ep_is_post "$ep" && continue
-                curl -s -b "$LOG_DIR/jar-$lane.txt" -o /dev/null "http://127.0.0.1:$port$(ep_path "$ep")"
+                curl -s -H 'Accept-Encoding: identity' -b "$LOG_DIR/jar-$lane.txt" \
+                    -o /dev/null "http://127.0.0.1:$port$(ep_path "$ep")"
             done
             ;;
     esac
@@ -1339,7 +1318,8 @@ for lane in "${LANES[@]}"; do
     for ep in "${ENDPOINTS[@]}"; do
         ep_is_post "$ep" && continue
         body="$LOG_DIR/body-$lane-$(ep_parity_name "$ep").html"
-        code="$(curl -s -b "$LOG_DIR/jar-$lane.txt" -o "$body" -w '%{http_code}' \
+        code="$(curl -s -H 'Accept-Encoding: identity' -b "$LOG_DIR/jar-$lane.txt" \
+                -o "$body" -w '%{http_code}' \
                 "http://127.0.0.1:$port$(ep_path "$ep")")"
         tags="$(ruby -e 'print File.read(ARGV[0]).scan(/<([a-zA-Z][-a-zA-Z0-9]*)/).size' "$body")"
         printf '%s\t%s\tstatus=%s\ttags=%s\tbytes=%s\n' \
@@ -1366,6 +1346,15 @@ for lane in "${LANES[@]}"; do
         path="$(ep_path "$ep")"
         url="http://127.0.0.1:$port$path"
         if ep_is_post "$ep"; then
+            case "$lane" in
+                rust|go) ;;
+                *)
+                    if [[ -z "$csrf" ]]; then
+                        fail "$lane POST skipped: no CSRF token (a 422 is not a write measurement)"
+                        continue
+                    fi
+                    ;;
+            esac
             wrk_script=("$POST_LUA")
             wrote=1
         else

@@ -56,7 +56,7 @@ end)
 # Until this the overlay dropped it, so every HTML page went out
 # uncompressed (~420 KB room page vs ~20 KB behind Rails/Thruster) and
 # `scripts/campfire-http-shape` recorded 65 Content-Encoding misses.
-# After Static so CSS/JS get gzip too; the CRuby tree has real zlib.
+# HTML only: Static sits outside this lambda, so CSS/JS stay identity.
 # NOT `use Rack::Deflater` around the whole app: the hijack tuple
 # `[-1, {}, []]` has no skip in Deflater, so gzip wraps only run_rack.
 deflater = Rack::Deflater.new(lambda { |env|
