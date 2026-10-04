@@ -386,11 +386,10 @@ end
 }
 
 #[test]
-fn routes_mount_drops_as_recognized_gap() {
-    // `mount SomeEngine` is external code, never part of the
-    // transpiled app: strict ingest drops the route (the modeled
-    // truth, like `to: redirect(...)`), survey runs get a ledger
-    // line so the drop stays visible.
+fn routes_mount_fails_strict_and_recovers_as_a_survey_gap() {
+    // An engine mount cannot be represented by the host route table.
+    // Strict ingest must refuse it; survey mode records the omission
+    // while keeping the supported sibling route.
     let source = br#"Rails.application.routes.draw do
   mount Sidekiq::Web, at: "sidekiq"
   get "/posts", to: "posts#index"
@@ -400,15 +399,17 @@ end
     let (strict, _) = roundhouse::ingest::prism::scope(|| {
         roundhouse::ingest::ingest_routes(source, "config/routes.rb")
     });
-    let table = strict.expect("strict ingest tolerates mount");
-    assert_eq!(table.entries.len(), 1, "mount drops, the sibling route survives");
+    let error = strict.expect_err("strict ingest must not silently drop mount");
+    assert!(error.to_string().contains("`mount` of an external engine"), "{error}");
 
     roundhouse::ingest::survey::activate();
     let (result, _) = roundhouse::ingest::prism::scope(|| {
         roundhouse::ingest::ingest_routes(source, "config/routes.rb")
     });
     let gaps = roundhouse::ingest::survey::drain();
-    result.expect("survey ingest succeeds");
+    let table = result.expect("survey ingest succeeds");
+    assert_eq!(table.entries.len(), 1, "the supported sibling route survives");
+    assert_eq!(gaps.len(), 1, "the omitted mount is reported once: {gaps:?}");
     assert!(
         gaps.iter().any(|g| format!("{g:?}").contains("mount")),
         "the mount drop is ledgered, not silent: {gaps:?}"

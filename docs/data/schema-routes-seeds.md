@@ -150,12 +150,13 @@ The recognizer covers the verb shortcuts (`get`/`post`/…), `match`,
 `root`, `resources`/`resource` (with `only:`/`except:`/`as:`/
 `controller:`/`param:`/`path:`, symbol or string spellings alike, as Rails
 `to_sym`s them), `namespace`/`scope`,
-`member`/`collection`/`constraints` blocks, `mount`, `draw(:name)`
+`member`/`collection`/`constraints` blocks, `draw(:name)`
 split files under `config/routes/`, and options like `defaults:`,
 `on:`, and `via:` — `src/ingest/routes.rs` is the authority on the
 current surface. A `redirect(...)` target — on a verb or on `root` —
 is not modeled: the route is dropped with a `route dropped:` ledger
-line, the same contract as `mount`.
+line. Engine `mount` entries instead fail strict ingestion; in survey
+mode they record a gap and only the unsupported entry is omitted.
 
 **Downstream consumers (analyze/lower):**
 

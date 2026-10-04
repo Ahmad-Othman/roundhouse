@@ -594,20 +594,15 @@ fn ingest_route_call(
             entries: block_entries(call, file, None, draws)?,
         })),
         "draw" => ingest_draw_route(call, file, draws),
-        // `mount SomeEngine, at: "/path"` — the mounted engine is
-        // external code (mission_control, sidekiq-web, …), never part
-        // of the transpiled app. Dropping the route is the modeled
-        // truth (same contract as `to: redirect(...)` above); survey
-        // runs still get a ledger line so the drop is visible.
-        "mount" => {
-            if super::survey::is_active() {
-                super::survey::record(&IngestError::Unsupported {
-                    file: file.into(),
-                    message: "route dropped: `mount` of an external engine".into(),
-                });
-            }
-            Ok(None)
-        }
+        // Engine routes are not composed into the host table, even when
+        // a path-sourced engine's app/ was discovered. Refuse strict ingest;
+        // the caller's per-entry survey recovery records the gap and keeps
+        // sibling routes. Built-in ActiveStorage routes are supplied by the
+        // runtime separately and do not pass through this mount branch.
+        "mount" => Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "unsupported route: `mount` of an external engine".into(),
+        }),
         // `direct :fresh_user_avatar do |user, options| … end` — a
         // custom URL helper, not a route: it adds no path to the table,
         // it names a `<name>_path`/`_url` builder whose body is
@@ -1406,8 +1401,8 @@ fn ingest_root_route(
     }
     match target {
         Some(target) if !target.is_empty() => Ok(Some(RouteSpec::Root { target })),
-        // Same contract as `mount` and the explicit verbs' redirect
-        // drop: not an error, but never silent.
+        // Dynamic root targets are still dropped in strict mode; survey
+        // mode records a gap for the omitted route.
         _ => {
             super::survey::record(&IngestError::Unsupported {
                 file: file.into(),

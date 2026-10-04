@@ -62,7 +62,11 @@ their relative precedence is a deterministic approximation, not Rails'
 engine load order. Collisions between non-host roots therefore need
 manual checking.
 Roundhouse does not read an engine's own `config/routes.rb` yet.
-The host's `mount` of the engine remains a dropped route.
+The host's `mount` of the engine fails strict ingestion. With
+`check --continue` or transpile's `--survey`, it is recorded as a gap
+and omitted while supported sibling routes remain. Discovering an
+engine's application code does not imply support for its mounted routes.
+Built-in ActiveStorage routes remain supplied separately by the runtime.
 
 Routed templates without an explicit controller method participate in
 the shared callback dispatcher. The separate Rails-to-Roda converter
