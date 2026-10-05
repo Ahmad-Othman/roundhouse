@@ -68,19 +68,37 @@ module Rails
     # have to capture the accumulator, and on the AOT lane a captured
     # block dissolves into a heap poly proc (matz/spinel#4245).
     #
-    # Thin delegates, as `fetch_str` above is — `read`/`write` already
-    # hold the Mutex and already dup Strings on both sides. `read_str`
-    # narrows to String because the caller appends the answer to a
-    # string builder; a non-String under that key is a MISS rather than
-    # a TypeError at the append, and the write that follows corrects it.
+    # Thin delegates, as `fetch_str` above is — `write` still dups the
+    # String into the store. `read_str` does NOT dup on the way out:
+    # a view's `<% cache %>` only appends the hit (`io << hit`), and a
+    # campfire room page is ~40 message fragments. DupCoder's read-side
+    # copy was 40 extra 2–5 KB allocations per wrk GET that shared
+    # nothing with mutation safety, because the stored copy is already
+    # isolated by the write-side dup. A non-String under that key is a
+    # MISS rather than a TypeError at the append, and the write that
+    # follows corrects it. `read` (the untyped half) still dups, so a
+    # caller that mutates a fetched String cannot corrupt the store.
     def read_str(key)
-      value = read(key)
-      value.is_a?(String) ? value : nil
+      @mutex.synchronize do
+        entry = @data[key.to_s]
+        return nil if entry.nil?
+        if expired?(entry)
+          @data.delete(key.to_s)
+          return nil
+        end
+        encoded = entry[0]
+        encoded.is_a?(String) ? encoded : nil
+      end
     end
 
     def write_str(key, value, ttl)
-      write(key, value, ttl.to_i > 0 ? { expires_in: ttl.to_i } : {})
-      value
+      # Dup into the store, then freeze that copy. The caller's
+      # accumulator stays mutable; the stored fragment is shared
+      # across hits without a read-side dup.
+      s = (value.is_a?(String) ? value.dup : value.to_s).freeze
+      expires_at = ttl.to_i > 0 ? monotonic_now + ttl.to_i : nil
+      @mutex.synchronize { @data[key.to_s] = [s, expires_at] }
+      s
     end
 
     # The counter behind `rate_limit` (`ActionController::RateLimiter`),
