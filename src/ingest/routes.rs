@@ -4,11 +4,12 @@
 //! `draw(:name)` inclusion of `config/routes/<name>.rb` split files.
 //!
 //! Recovery discipline: in survey mode an unsupported DSL construct
-//! (`mount`, `use_doorkeeper`, `devise_for`, …) records a gap and drops
-//! that one entry — the rest of the table still flattens. In strict
-//! mode it still fails loud so the fixture that introduces a new form
-//! forces a recognizer. Not-modeled ≠ absent: a dropped entry is a
-//! ledger line, never a silently empty route table.
+//! (`mount`, `use_doorkeeper`, `devise_for`, …) or a conditional
+//! (`if`/`unless`/`case`, whose predicate is not evaluated) records a
+//! gap and drops that one entry — the rest of the table still
+//! flattens. In strict mode it still fails loud so the fixture that
+//! introduces a new form forces a recognizer. Not-modeled ≠ absent: a
+//! dropped entry is a ledger line, never a silently empty route table.
 
 use std::collections::HashMap;
 
@@ -201,7 +202,20 @@ fn ingest_route_stmts<'pr>(
 ) -> IngestResult<Vec<RouteSpec>> {
     let mut entries = Vec::new();
     for stmt in stmts {
-        let Some(call) = stmt.as_call_node() else { continue };
+        // `if Rails.env.development? … end`, `unless ENV["X"] … end`,
+        // `case … end`, and the modifier form `get "/x", to: "a#b" if
+        // flag` are not calls. This used to be a bare `continue`, so
+        // EVERY route inside the conditional vanished with no record.
+        // The predicate is not evaluated here; the statement gets the
+        // same treatment as an unknown DSL call.
+        let Some(call) = stmt.as_call_node() else {
+            let err = non_call_route_stmt(&stmt, file);
+            if super::survey::is_active() {
+                super::survey::record(&err);
+                continue;
+            }
+            return Err(err);
+        };
 
         // `Dir.glob('rest_routes/**/*.rb', base: 'config/routes').each
         // do |r| draw(r.sub(/\.rb$/, '')) end` (and `Dir[...]`) — the
@@ -288,6 +302,39 @@ fn ingest_route_stmts<'pr>(
         }
     }
     Ok(entries)
+}
+
+/// The `Unsupported` error for a route-body statement that is not a
+/// call, naming the construct and its line so the ledger entry points
+/// at the routes that went missing. The line comes from this parse's
+/// bytes first: a test or a re-ingest can register a second text under
+/// the same path, and `line_at` keeps the first.
+fn non_call_route_stmt(stmt: &Node<'_>, file: &str) -> IngestError {
+    let location = stmt.location();
+    let line = super::sources::line_at_parse(&location)
+        .or_else(|| super::sources::line_at(file, location.start_offset()))
+        .map(|line| format!(", line {line}"))
+        .unwrap_or_default();
+    let construct = match conditional_keyword(stmt) {
+        Some(keyword) => format!("conditional `{keyword}` block (predicate not statically known)"),
+        None => "non-call statement".to_string(),
+    };
+    IngestError::Unsupported {
+        file: file.into(),
+        message: format!("unsupported routes DSL: {construct}{line}"),
+    }
+}
+
+fn conditional_keyword(stmt: &Node<'_>) -> Option<&'static str> {
+    if stmt.as_if_node().is_some() {
+        Some("if")
+    } else if stmt.as_unless_node().is_some() {
+        Some("unless")
+    } else if stmt.as_case_node().is_some() || stmt.as_case_match_node().is_some() {
+        Some("case")
+    } else {
+        None
+    }
 }
 
 /// Redirect routes collected during the entry walk.
