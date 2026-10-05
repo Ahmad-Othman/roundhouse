@@ -940,7 +940,14 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // 802). This probe does not resolve self-sends or `@orders`
     // indexing; the full-context gate counts 16. What it buys: campfire
     // room pages LIMIT the last 40 in SQL, including `order(a:, b:)`.
-    const CEILING: usize = 1273;
+    // 2026-10-05 1273 -> 1280, +7, MEASURED with and without the three
+    // methods (relation.rb 802 -> 809): Relation#reorder,
+    // #skip_preloading! and #preload_associations. This probe leaves the
+    // `*parts` splat, the `records` parameter and the `@model` send as
+    // TyVars; the full-context gate in runtime_src_integration counts
+    // ONE (reorder's splat). What it buys: campfire's message paging after
+    // basecamp/once-campfire#292, and #304/#312's `reorder`.
+    const CEILING: usize = 1280;
 
     assert!(
         all_untyped.len() <= CEILING,
