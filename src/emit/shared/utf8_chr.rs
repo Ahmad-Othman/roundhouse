@@ -254,9 +254,13 @@ fn main() {{
         let rbs = std::fs::read_to_string("runtime/ruby/action_dispatch/router.rbs").unwrap();
         let names = [
             "decode_captures",
+            "capture_pairs",
+            "capture_part",
             "decode_capture",
+            "utf8_width",
             "utf8_character",
             "percent_bytes",
+            "percent_advance",
             "percent_byte",
             "capture_byte",
             "hex_digit",

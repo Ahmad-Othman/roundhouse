@@ -65,8 +65,8 @@ fn emitted_python_router_packages_argument_error() {
     assert!(router.contains("from builtins import ValueError as ArgumentError"), "{router}");
 }
 
-/// Width and scan-step state are definite Integers before entering a loop;
-/// nullable branch-local declarations break generated C# calls and counters.
+/// Pure step helpers keep each loop binding a definite Integer without
+/// branch-local nullable declarations or unused incoming recursive state.
 #[test]
 fn emitted_csharp_router_keeps_loop_steps_nonnullable() {
     let (emitted, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::CSharp);
@@ -74,8 +74,136 @@ fn emitted_csharp_router_keeps_loop_steps_nonnullable() {
     let router = std::fs::read_to_string(emitted.join("app/runtime/Router.cs")).unwrap();
     assert!(!router.contains("long? width"), "{router}");
     assert!(!router.contains("long? advance"), "{router}");
-    assert!(router.contains("var width = 1L;"), "{router}");
-    assert!(router.contains("var advance = 1L;"), "{router}");
+    assert!(router.contains("var width = Router.Utf8Width(@byte);"), "{router}");
+    assert!(router.contains("var advance = Router.PercentAdvance(@byte);"), "{router}");
+}
+
+/// Only Router's invalid-capture errors become catchable Swift errors. The
+/// packaged matcher and both request boundaries must share that exact carrier.
+#[test]
+fn emitted_swift_router_carries_errors_to_request_boundaries() {
+    let (emitted, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::Swift);
+    assert!(errors.is_empty(), "{errors:?}");
+    let router = std::fs::read_to_string(emitted.join("Sources/App/Router.swift")).unwrap();
+    assert!(router.contains("struct RoutePathEncodingError: Error"), "{router}");
+    assert!(router.contains("throw RoutePathEncodingError(\"Invalid encoding for path parameter\")"), "{router}");
+    let signature = router.lines().find(|line| line.contains("static func match(")).expect("Router.match signature");
+    assert!(signature.contains("throws -> MatchResult?"), "{signature}");
+    assert!(router.contains("try Router.decodeCapture("), "{router}");
+    assert!(!router.contains("fatalError(\"Invalid encoding for path parameter\")"), "{router}");
+    for path in ["Sources/App/runtime/Server.swift", "Tests/AppTests/RhTestSupport.swift"] {
+        let boundary = std::fs::read_to_string(emitted.join(path)).unwrap();
+        assert!(boundary.contains("try Router.match("), "{path}: {boundary}");
+        assert!(boundary.contains("catch is RoutePathEncodingError"), "{path}: {boundary}");
+    }
+}
+
+/// The same generated Echo controller serves native HTTP and XCTest probes;
+/// the 500 control uses an error class the Swift runtime already supports.
+fn swift_request_app() -> emit_and_run::Overlay {
+    app()
+        .write("app/controllers/echo_controller.rb", r#"
+class EchoController < ApplicationController
+  def show
+    render plain: params[:value].to_s
+  end
+  def empty
+    render plain: "static"
+  end
+  def explode
+    raise ActiveRecord::ValueTooLong, "controller failure control"
+  end
+end
+"#)
+        .write("config/routes.rb", r#"
+Rails.application.routes.draw do
+  get "/echo/:value", to: "echo#show"
+  get "/pair/:first/:value", to: "echo#show"
+  get "/limited/:value", to: "echo#show", constraints: { value: /\d+/ }
+  get "/edit/:value/edit", to: "echo#show"
+  get "/static", to: "echo#empty"
+  get "/explode", to: "echo#explode"
+end
+"#)
+        .write("test/controllers/echo_controller_test.rb", r#"
+class EchoControllerTest < ActionDispatch::IntegrationTest
+  def test_route_recovery
+    get "/echo/%FF"
+    assert_response :bad_request
+    get "/echo/valid%2B"
+    assert_response :success
+  end
+end
+"#)
+}
+
+/// Exercise catchable path errors in the whole generated Swift project, not
+/// a hand-built Router wrapper. Actual HTTP transport is an additional SDK check.
+#[test]
+#[ignore = "requires Swift 6+, SQLite development headers and SPM dependencies"]
+fn swift_router_rejects_bad_captures_without_poisoning_later_requests() {
+    let (emitted, errors) = swift_request_app().emit(roundhouse::project::BuildTarget::Swift);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("Tests/AppTests/RouteErrorNativeTests.swift"), r#"
+import XCTest
+@testable import App
+
+final class RouteErrorNativeTests: RoundhouseTestCase {
+    private func dispatch(_ path: String) -> DispatchResult {
+        Server.dispatch("GET", path, [:], [:], [:], RoundhouseTestSetup.routes,
+                        RoundhouseTestSetup.controllers, { body, _, _ in body })
+    }
+
+    func testProductionDispatchRecoversAndPreservesRouting() throws {
+        for path in ["/echo/%FF", "/echo/%E0%80%AF", "/echo/%ED%A0%80",
+                     "/echo/%F4%90%80%80", "/echo/%C2", "/pair/good%2B/%FF"] {
+            let bad = dispatch(path)
+            XCTAssertEqual(bad.status, 400, path)
+            XCTAssertEqual(bad.body, "Bad Request", path)
+            let good = dispatch("/echo/recovered%2B")
+            XCTAssertEqual(good.status, 200)
+            XCTAssertEqual(good.body, "recovered+")
+        }
+        for path in ["/edit/%FF/other", "/limited/%FF", "/%73tatic"] {
+            XCTAssertEqual(dispatch(path).status, 404, path)
+        }
+        for (path, expected) in [("/echo/%GG%2%", "%GG%2%"),
+                                 ("/echo/%25FF", "%FF"), ("/echo/+%2B", "++"),
+                                 ("/echo/%00", "\0"), ("/echo/%2500", "%00"),
+                                 ("/echo/caf%C3%A9", "café"), ("/static", "static")] {
+            let response = dispatch(path)
+            XCTAssertEqual(response.status, 200, path)
+            XCTAssertEqual(response.body, expected, path)
+        }
+        let pair = try XCTUnwrap(Router.match("GET", "/pair/one%2B/two%20words.json", RoundhouseTestSetup.routes))
+        XCTAssertEqual(pair.pathParams["first"], "one+")
+        XCTAssertEqual(pair.pathParams["value"], "two words")
+        XCTAssertEqual(pair.pathParams["format"], "json")
+        let failure = dispatch("/explode")
+        XCTAssertEqual(failure.status, 500)
+        XCTAssertEqual(failure.body, "Internal Server Error")
+        XCTAssertEqual(dispatch("/echo/after500").body, "after500")
+    }
+
+    func testControllerTestBoundaryRecovers() {
+        get("/echo/%FF")
+        XCTAssertEqual(__status, 400)
+        XCTAssertEqual(__body, "Bad Request")
+        get("/echo/controller%2B")
+        XCTAssertEqual(__status, 200)
+        XCTAssertEqual(__body, "controller+")
+    }
+}
+"#).unwrap();
+    let output = std::process::Command::new("swift")
+        .args(["test", "--jobs", "2", "--filter", "RouteErrorNativeTests"])
+        .current_dir(&emitted).output().expect("execute generated Swift request contract");
+    std::fs::write(emitted.join("swift-test.stdout"), &output.stdout).unwrap();
+    std::fs::write(emitted.join("swift-test.stderr"), &output.stderr).unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "Swift request contract at {}:\n{stdout}\n{stderr}", emitted.display());
+    assert!(stdout.contains("Executed 2 tests") || stderr.contains("Executed 2 tests"), "{stdout}\n{stderr}");
 }
 
 /// Raw binary Rack strings are meaningful on Ruby/Spinel, while several
@@ -118,6 +246,10 @@ fn raw_router_bytes_execute_on_spinel() {
     assert!(seeds.status.success(), "{}", String::from_utf8_lossy(&seeds.stderr));
     let seed_text = String::from_utf8_lossy(&seeds.stdout);
     assert!(seed_text.contains("cmeth capture_byte int int_array,int"), "{seed_text}");
+    assert!(seed_text.contains("cmeth capture_pairs str_array"), "{seed_text}");
+    assert!(seed_text.contains("cmeth capture_part string str_array,int"), "{seed_text}");
+    assert!(seed_text.contains("cmeth utf8_width int int"), "{seed_text}");
+    assert!(seed_text.contains("cmeth percent_advance int int"), "{seed_text}");
     let compiled = Command::new(&compiler).args(["--rbs", ".", "contract.rb", "-o", "contract"]).current_dir(&emitted).output().expect("compile seeded Router contract");
     std::fs::write(emitted.join("compile.stdout"), &compiled.stdout).unwrap();
     std::fs::write(emitted.join("compile.stderr"), &compiled.stderr).unwrap();
@@ -130,11 +262,21 @@ fn raw_router_bytes_execute_on_spinel() {
 
 /// Execute the complete generated Router, including capture-hash accumulation,
 /// binary path bytes, matching constraints, and UTF-8 error behavior.
+/// Compile first with the production warnings-as-errors policy.
 #[test]
 #[ignore = "requires Elixir"]
 fn emitted_elixir_router_executes_capture_contract() {
     let (emitted, errors) = app().emit(roundhouse::project::BuildTarget::Elixir);
     assert!(errors.is_empty(), "{errors:?}");
+    let compiled = std::process::Command::new("elixirc")
+        .args(["--warnings-as-errors", "-o"])
+        .arg(emitted.join("router_beams"))
+        .arg(emitted.join("lib/router.ex"))
+        .output()
+        .expect("compile Elixir Router with warnings as errors");
+    std::fs::write(emitted.join("elixirc.stdout"), &compiled.stdout).unwrap();
+    std::fs::write(emitted.join("elixirc.stderr"), &compiled.stderr).unwrap();
+    assert!(compiled.status.success(), "{}\n{}", String::from_utf8_lossy(&compiled.stdout), String::from_utf8_lossy(&compiled.stderr));
     let probe = emitted.join("route_probe.exs");
     std::fs::write(&probe, r#"Code.require_file(hd(System.argv()))
 alias ActionDispatch.Router

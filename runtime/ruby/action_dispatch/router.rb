@@ -298,10 +298,35 @@ module ActionDispatch
     # change segmentation and a rejected route cannot raise while decoding.
     def self.decode_captures(params)
       decoded = {}
-      params.each do |name, value|
+      # Snapshot name/value pairs before decoding. Every capture is a String,
+      # and the input is immutable, so the even-length pair array is stable.
+      # Encoding errors stay outside the nonthrowing collection callback.
+      pairs = capture_pairs(params)
+      i = 0
+      while i < pairs.length
+        name = capture_part(pairs, i)
+        value = capture_part(pairs, i + 1)
         decoded[name] = decode_capture(value)
+        i += 2
       end
       decoded
+    end
+
+    # Retain Hash iteration order as adjacent String name/value pairs. This
+    # callback only snapshots data and cannot raise an encoding error.
+    def self.capture_pairs(params)
+      pairs = []
+      params.each do |name, value|
+        pairs << name.to_s
+        pairs << value
+      end
+      pairs
+    end
+
+    # Internal String-only pair access. The caller visits an even-length
+    # snapshot two entries at a time, proving both nonnegative indexes exist.
+    def self.capture_part(pairs, index)
+      pairs[index]
     end
 
     # Decode bytes before interpreting UTF-8: one character may mix raw and
@@ -311,24 +336,24 @@ module ActionDispatch
       bytes = percent_bytes(value.bytes)
       out = +""
       i = 0
-      # Establish scalar loop state before branching; reset for each sequence.
-      width = 1
       while i < bytes.length
         byte = capture_byte(bytes, i)
-        width = 1
-        if byte >= 0xF0 && byte <= 0xF4
-          width = 4
-        elsif byte >= 0xE0 && byte <= 0xEF
-          width = 3
-        elsif byte >= 0xC2 && byte <= 0xDF
-          width = 2
-        elsif byte >= 0x80
-          raise ArgumentError, "Invalid encoding for path parameter"
-        end
-        out = out + utf8_character(bytes, i, byte, width)
+        width = utf8_width(byte)
+        character = utf8_character(bytes, i, byte, width)
+        out = out + character
         i += width
       end
       out
+    end
+
+    # Classify one lead byte without carrying branch-mutated state between
+    # sequences. Continuation bytes and invalid leads cannot start a character.
+    def self.utf8_width(byte)
+      return 4 if byte >= 0xF0 && byte <= 0xF4
+      return 3 if byte >= 0xE0 && byte <= 0xEF
+      return 2 if byte >= 0xC2 && byte <= 0xDF
+      raise ArgumentError, "Invalid encoding for path parameter" if byte >= 0x80
+      1
     end
 
     # Validate one decoded UTF-8 sequence before constructing its scalar.
@@ -368,22 +393,26 @@ module ActionDispatch
     def self.percent_bytes(bytes)
       decoded = []
       i = 0
-      # Keep the scan step an initialized Integer across every branch.
-      advance = 1
       while i < bytes.length
         byte = percent_byte(bytes, i)
-        advance = 1
+        advance = percent_advance(byte)
         if byte < 0
           decoded << capture_byte(bytes, i)
         else
           decoded << byte
-          advance = 3
         end
         # One trailing counter step also permits functional targets to lower
         # the scan into recursion without changing single-decoding semantics.
         i += advance
       end
       decoded
+    end
+
+    # The escape parser's negative sentinel consumes one literal byte;
+    # a decoded escape consumes its three original bytes exactly once.
+    def self.percent_advance(byte)
+      return 1 if byte < 0
+      3
     end
 
     # A valid %HH escape at this byte offset, or -1 to retain literal bytes.

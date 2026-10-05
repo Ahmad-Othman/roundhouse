@@ -1280,7 +1280,7 @@ const SWIFT_RUNTIME: &[RuntimeEntry] = &[
         out_path: "Sources/App/Router.swift",
         mode: Mode::Library,
         imports: NO_IMPORTS,
-        prelude: NO_PRELUDE,
+        prelude: include_str!("../runtime/swift/route_path_error.swift"),
         extra_roots: &[("Router", "match"), ("Router", "match_pattern")],
     },
     runtime_entry! {

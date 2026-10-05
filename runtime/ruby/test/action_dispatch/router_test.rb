@@ -176,7 +176,7 @@ class RouterTest < Minitest::Test
     m = ActionDispatch::Router.match("GET", "/echo/1%2Ejson", table)
     raise "expected match" if m.nil?
     assert_equal "1.json", m.path_params["value"]
-    assert_nil m.path_params["format"]
+    assert_equal false, m.path_params.key?("format")
   end
 
   # Decoding cannot turn a different static path or failed constraint into a match.
@@ -188,6 +188,20 @@ class RouterTest < Minitest::Test
   # A rejected route must not interpret bytes that belong to another candidate.
   def test_invalid_encoding_in_a_nonmatching_pattern_does_not_raise
     assert_nil ActionDispatch::Router.match_pattern("/echo/:value/edit", "/echo/%FF/other")
+  end
+
+  # A later invalid capture cannot expose a partially decoded match. A new
+  # request must still decode both captures and the independent format key.
+  def test_multiple_captures_remain_atomic_after_invalid_encoding
+    assert_raises(ArgumentError) do
+      ActionDispatch::Router.match_pattern("/pair/:first/:second", "/pair/good%2B/%FF")
+    end
+    table = [ActionDispatch::Router::Route.new("GET", "/pair/:first/:second", :echo_controller, :show)]
+    m = ActionDispatch::Router.match("GET", "/pair/one%2B/two%20words.json", table)
+    raise "expected match" if m.nil?
+    assert_equal "one+", m.path_params["first"]
+    assert_equal "two words", m.path_params["second"]
+    assert_equal "json", m.path_params["format"]
   end
 
   # Incomplete or nonhex escapes remain literal path bytes, as in Rails.
