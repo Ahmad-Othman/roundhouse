@@ -7571,6 +7571,14 @@ mod tests {
         let processor = get(&with, "runtime/active_storage_processor.rb");
         assert!(processor.contains("require \"vips\""), "{processor}");
         assert!(processor.contains("Vips::Image.thumbnail_buffer"), "{processor}");
+        assert!(
+            processor.contains("VipsExt.sp_vips_find_load"),
+            "find_load wrap must reach C through VipsExt:\n{processor}"
+        );
+        assert!(
+            !processor.contains("alias_method :"),
+            "wrapping the Ruby finder in place re-enters the wrapper on the spinel package:\n{processor}"
+        );
         let manifest = get(&with, "spin.toml");
         assert!(manifest.contains("[dependencies]\n"), "{manifest}");
         assert!(

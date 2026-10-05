@@ -70,7 +70,9 @@ require_relative "../app/models"
 # that did not exist. campfire's `vips_loader_policy_test` asks
 # `Vips.vips_foreign_find_load` for a BMP and expects nil; without this
 # line it got "VipsForeignLoadMagickFile" and nine tests read as a
-# missing feature rather than a missing require.
+# missing feature rather than a missing require. The processor also
+# wraps find_load itself: applying the policy is not enough on libvips
+# 8.14, which still names a blocked Magick/Svg loader.
 #
 # After app/models.rb, so `Rails.application`'s reopen (the lifted
 # policy) is defined before the file reads it — boot.rb's own order,

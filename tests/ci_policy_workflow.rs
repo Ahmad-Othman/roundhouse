@@ -34,11 +34,23 @@ fn unit_batches_all_targets_without_reducing_coverage() {
             step["name"].as_str()
                 == Some("Install gems used by emitted Ruby and Campfire harness tests")
         })
-        .expect("install sqlite3 and bcrypt before the unit batches");
+        .expect("install sqlite3, bcrypt and ruby-vips before the unit batches");
     let install = steps[gems]["run"].as_str().unwrap();
     assert!(
-        install.contains("gem install sqlite3") && install.contains("bcrypt"),
+        install.contains("gem install sqlite3")
+            && install.contains("bcrypt")
+            && install.contains("ruby-vips"),
         "{install}"
+    );
+    let vips = steps
+        .iter()
+        .position(|step| {
+            step["name"].as_str() == Some("System libvips for the emitted ruby-vips processor")
+        })
+        .expect("install libvips42 before ruby-vips");
+    assert!(
+        vips < gems,
+        "ruby-vips binds the system libvips; the package must be on the box first"
     );
     let tests = steps
         .iter()
