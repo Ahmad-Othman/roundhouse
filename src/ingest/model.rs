@@ -602,7 +602,7 @@ pub(super) fn ingest_model_body_item(
                 return Ok(ModelBodyItem::Scope { scope, leading_blank_line: false, leading_comments });
             }
         }
-        if let Some(callback) = parse_callback(&call, &method) {
+        if let Some(callback) = parse_callback(&call, &method, file) {
             return Ok(ModelBodyItem::Callback { callback, leading_blank_line: false, leading_comments, span });
         }
         // The same classifier sees model declarations and a concern's
@@ -1419,6 +1419,7 @@ pub(super) fn ingest_method(
 fn parse_callback(
     call: &ruby_prism::CallNode<'_>,
     method: &str,
+    file: &str,
 ) -> Option<crate::dialect::Callback> {
     use crate::dialect::{Callback, CallbackHook, CallbackOn};
 
@@ -1465,6 +1466,8 @@ fn parse_callback(
     let args = call.arguments()?;
     let mut targets: Vec<Symbol> = Vec::new();
     let mut on: Option<CallbackOn> = None;
+    let mut if_cond: Option<Expr> = None;
+    let mut unless_cond: Option<Expr> = None;
     for arg in args.arguments().iter() {
         if let Some(sym) = symbol_value(&arg) {
             targets.push(Symbol::from(sym.as_str()));
@@ -1483,11 +1486,17 @@ fn parse_callback(
                             _ => return None,
                         });
                     }
-                    // `if:` / `unless:` / `prepend:` — lowering the
-                    // callback while dropping these would run it in the
-                    // wrong circumstances, which is worse than dropping
-                    // the declaration with a warning. Reject: the item
-                    // falls through to Unknown and the ledger reports it.
+                    // `if:` / `unless:` — a zero-arity lambda/proc body
+                    // (Rails `instance_exec`s it with `self` the record)
+                    // or a Symbol naming a predicate method. Lowered to a
+                    // guard around the callback body, so the callback runs
+                    // in exactly Rails' circumstances. Dropping the
+                    // declaration instead would run it in no circumstance
+                    // at all, which is the wrong answer too.
+                    "if" => if_cond = Some(callback_condition(&assoc.value(), file)?),
+                    "unless" => unless_cond = Some(callback_condition(&assoc.value(), file)?),
+                    // `prepend:` and anything else: not modeled — reject
+                    // rather than run the callback in the wrong place.
                     _ => return None,
                 }
             }
@@ -1526,7 +1535,141 @@ fn parse_callback(
         return None;
     }
 
-    Some(Callback { hook, targets, on, condition: None })
+    let condition = match (if_cond, unless_cond) {
+        (None, None) => None,
+        (Some(c), None) => Some(c),
+        (None, Some(c)) => Some(negate_condition(c)),
+        (Some(a), Some(b)) => Some(and_condition(a, negate_condition(b))),
+    };
+
+    Some(Callback { hook, targets, on, condition })
+}
+
+/// A callback's `if:`/`unless:` value → the condition expression that
+/// guards the callback body. A zero-arity lambda/proc contributes its
+/// body (Rails `instance_exec`s it with `self` the record, which is what
+/// a spliced body sees). A Symbol is the predicate method, called on the
+/// record. Anything else (a lambda with parameters, an array of
+/// conditions) is unmodeled and declines.
+fn callback_condition(value: &ruby_prism::Node<'_>, file: &str) -> Option<Expr> {
+    if let Some(lambda) = value.as_lambda_node() {
+        let body = simple_condition_body(lambda.parameters(), lambda.body())?;
+        return ingest_expr(&body, file).ok();
+    }
+    if let Some(call) = value.as_call_node() {
+        if call.receiver().is_none() {
+            let name = constant_id_str(&call.name());
+            if name == "proc" || name == "lambda" {
+                let block = call.block()?.as_block_node()?;
+                let body = simple_condition_body(block.parameters(), block.body())?;
+                return ingest_expr(&body, file).ok();
+            }
+        }
+    }
+    let sym = symbol_value(value)?;
+    Some(Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from(sym.as_str()),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    ))
+}
+
+/// The one expression a lambda/proc callback condition may splice into the
+/// hook as its guard. The guard runs inline in the callback, with `self`
+/// as the record and no frame of its own, so only a body that is the same
+/// expression there is accepted:
+///
+/// * no parameters (`-> {}`, `->() {}`, `proc { }`, `proc { || }`) — a
+///   `->(r) { r.title… }` would splice `r` unbound (numbered params and
+///   `it` are parameters too);
+/// * exactly one statement, with no `return`/`next`/`break`/`redo`/
+///   `retry` — inside the hook a `return` exits the whole callback chain;
+/// * no local writes — they would leak into the hook's scope. That
+///   includes a local bound through a target: a multi-write
+///   `(a, b = …)`, a `=> t` match-write, a `rescue => e`; and any
+///   multi-write declines, its targets being locals or not.
+///
+/// Anything else declines (`None`), and the callback falls back to the
+/// unsupported-DSL warning, as it did before conditions were modelled.
+fn simple_condition_body<'pr>(
+    params: Option<ruby_prism::Node<'pr>>,
+    body: Option<ruby_prism::Node<'pr>>,
+) -> Option<ruby_prism::Node<'pr>> {
+    if let Some(p) = params {
+        let bp = p.as_block_parameters_node()?;
+        if bp.parameters().is_some() || bp.locals().iter().next().is_some() {
+            return None;
+        }
+    }
+    let stmts = body?.as_statements_node()?;
+    let mut it = stmts.body().iter();
+    let only = it.next()?;
+    if it.next().is_some() {
+        return None;
+    }
+
+    struct Escapes(bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Escapes {
+        fn visit_return_node(&mut self, _: &ruby_prism::ReturnNode<'pr>) { self.0 = true; }
+        fn visit_next_node(&mut self, _: &ruby_prism::NextNode<'pr>) { self.0 = true; }
+        fn visit_break_node(&mut self, _: &ruby_prism::BreakNode<'pr>) { self.0 = true; }
+        fn visit_redo_node(&mut self, _: &ruby_prism::RedoNode<'pr>) { self.0 = true; }
+        fn visit_retry_node(&mut self, _: &ruby_prism::RetryNode<'pr>) { self.0 = true; }
+        fn visit_local_variable_write_node(&mut self, _: &ruby_prism::LocalVariableWriteNode<'pr>) {
+            self.0 = true;
+        }
+        fn visit_local_variable_operator_write_node(
+            &mut self,
+            _: &ruby_prism::LocalVariableOperatorWriteNode<'pr>,
+        ) {
+            self.0 = true;
+        }
+        fn visit_local_variable_or_write_node(&mut self, _: &ruby_prism::LocalVariableOrWriteNode<'pr>) {
+            self.0 = true;
+        }
+        fn visit_local_variable_and_write_node(&mut self, _: &ruby_prism::LocalVariableAndWriteNode<'pr>) {
+            self.0 = true;
+        }
+        fn visit_local_variable_target_node(&mut self, _: &ruby_prism::LocalVariableTargetNode<'pr>) {
+            self.0 = true;
+        }
+        fn visit_multi_write_node(&mut self, _: &ruby_prism::MultiWriteNode<'pr>) {
+            self.0 = true;
+        }
+    }
+    let mut v = Escapes(false);
+    ruby_prism::Visit::visit(&mut v, &only);
+    if v.0 { None } else { Some(only) }
+}
+
+fn negate_condition(cond: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(cond),
+            method: Symbol::from("!"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    )
+}
+
+fn and_condition(left: Expr, right: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::And,
+            surface: crate::expr::BoolOpSurface::Symbol,
+            left,
+            right,
+        },
+    )
 }
 
 fn parse_scope(
