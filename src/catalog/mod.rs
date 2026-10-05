@@ -1499,19 +1499,10 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::Terminal,
         return_kind: Some(ReturnKind::Bool),
     },
-    // Rails AssociationProxy / Relation `#loaded?` — whether the
-    // collection has already been fetched. Roundhouse's has_many
-    // readers expose the same fact as `<assoc>_loaded?`; the
-    // `assoc_loaded` lowering rewrites the two-hop form onto that
-    // flat name. Catalogued here so a Relation-typed receiver that
-    // keeps the Rails spelling still types as Bool.
-    CatalogedMethod {
-        name: "loaded?",
-        receiver: ReceiverContext::Relation,
-        effect: EffectClass::Pure,
-        chain: ChainKind::Terminal,
-        return_kind: Some(ReturnKind::Bool),
-    },
+    // Rails AssociationProxy `#loaded?` is rewritten by `assoc_loaded`
+    // onto `<assoc>_loaded?`. Do NOT catalog Relation `#loaded?` as
+    // Bool: that would silence residual sites with no runtime method
+    // (invariant 6). Unrewritten `.loaded?` stays a dispatch failure.
     CatalogedMethod {
         name: "more_than?",
         receiver: ReceiverContext::Relation,
@@ -1952,7 +1943,6 @@ mod tests {
             ("find_by", ReturnKind::SelfOrNil),
             ("count", ReturnKind::Int),
             ("exists?", ReturnKind::Bool),
-            ("loaded?", ReturnKind::Bool),
             ("more_than?", ReturnKind::Bool),
             ("pluck", ReturnKind::ArrayOfUntyped),
             ("pick", ReturnKind::Untyped),

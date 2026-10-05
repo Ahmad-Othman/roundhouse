@@ -192,3 +192,46 @@ end
         unresolved
     );
 }
+
+/// Schema column AttributeReaders must keep winning over a body `def`
+/// of the same name — `push_user_methods` only replaces bare-ivar
+/// attr_* halves, never a column reader's body.
+#[test]
+fn a_schema_column_reader_is_not_replaced_by_a_body_def() {
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "cards", force: :cascade do |t|
+    t.string "title", null: false
+  end
+end
+"#,
+        ),
+        (
+            "app/models/card.rb",
+            r#"class Card < ApplicationRecord
+  def title
+    "override"
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let src = ruby::emit_lowered_models(&app)
+        .iter()
+        .find(|f| f.path.ends_with("card.rb"))
+        .expect("no card.rb emitted")
+        .content
+        .clone();
+    assert!(
+        !src.contains("\"override\""),
+        "schema column reader must win over body def title; got:\n{src}"
+    );
+    assert!(
+        src.contains("def title"),
+        "expected a title reader to remain:\n{src}"
+    );
+}

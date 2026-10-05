@@ -1119,8 +1119,9 @@ pub(crate) fn build_methods(
 ///     strict emit failed with `error[ivar_unresolved]`.
 ///   * Column / association / scope synthesizers still win over a
 ///     duplicate body name (the corpus does not redefine those). The
-///     replace predicate below only matches the bare-ivar attr_* shape,
-///     never a schema column reader's body.
+///     replace predicate matches unsigned bare-ivar attr_* halves only
+///     (`signature: None`); schema column readers stamp a signature and
+///     are never replaced.
 fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model) {
     use crate::dialect::{AccessorKind, ModelBodyItem};
     use crate::expr::{ExprNode, LValue};
@@ -1132,29 +1133,35 @@ fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model) {
         {
             let existing = &methods[idx];
             let incoming_is_real = matches!(method.kind, AccessorKind::Method);
-            // Only the attr_* synthesizer's bare `@name` / `@name = value`
-            // shape yields — schema column AttributeReaders have richer
-            // bodies and must keep winning (documented above).
-            let existing_is_attr_half = match existing.kind {
-                AccessorKind::AttributeReader => {
-                    matches!(&*existing.body.node, ExprNode::Ivar { name } if name == &existing.name)
-                }
-                AccessorKind::AttributeWriter => {
-                    let base = existing
-                        .name
-                        .as_str()
-                        .strip_suffix('=')
-                        .unwrap_or(existing.name.as_str());
-                    matches!(
-                        &*existing.body.node,
-                        ExprNode::Assign {
-                            target: LValue::Ivar { name },
-                            ..
-                        } if name.as_str() == base
-                    )
-                }
-                AccessorKind::Method => false,
-            };
+            // Only bare-ivar attr_* halves (attr_accessor/reader/writer
+            // synth, which carry no signature) yield to a later real
+            // `def`. Schema column AttributeReaders are also bare
+            // `@col` reads for scalar columns, but they stamp a
+            // signature — keep those winning (documented above).
+            let existing_is_attr_half = existing.signature.is_none()
+                && match existing.kind {
+                    AccessorKind::AttributeReader => {
+                        matches!(
+                            &*existing.body.node,
+                            ExprNode::Ivar { name } if name == &existing.name
+                        )
+                    }
+                    AccessorKind::AttributeWriter => {
+                        let base = existing
+                            .name
+                            .as_str()
+                            .strip_suffix('=')
+                            .unwrap_or(existing.name.as_str());
+                        matches!(
+                            &*existing.body.node,
+                            ExprNode::Assign {
+                                target: LValue::Ivar { name },
+                                ..
+                            } if name.as_str() == base
+                        )
+                    }
+                    AccessorKind::Method => false,
+                };
             if incoming_is_real && existing_is_attr_half {
                 methods[idx] = method.clone();
             }

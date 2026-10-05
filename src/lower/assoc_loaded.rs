@@ -37,7 +37,8 @@ fn has_many_names(app: &App) -> HashSet<Symbol> {
 }
 
 /// Rewrite every `recv.assoc.loaded?` whose `assoc` is a known has_many
-/// into `recv.assoc_loaded?`.
+/// into `recv.assoc_loaded?`. Implicit-self `boosts.loaded?` becomes
+/// `self.boosts_loaded?` (same collapse `has_json` uses).
 pub fn apply_assoc_loaded_lowering(app: &mut App) -> Vec<Diagnostic> {
     let names = has_many_names(app);
     if names.is_empty() {
@@ -66,7 +67,7 @@ fn rewrite(expr: &mut Expr, names: &HashSet<Symbol>) {
         return;
     }
     let ExprNode::Send {
-        recv: Some(owner),
+        recv: owner,
         method: assoc,
         args: assoc_args,
         ..
@@ -78,10 +79,17 @@ fn rewrite(expr: &mut Expr, names: &HashSet<Symbol>) {
         return;
     }
     let flat = Symbol::from(format!("{}_loaded?", assoc.as_str()));
+    // Explicit `message.boosts.loaded?` keeps `message` as receiver.
+    // Implicit-self `boosts.loaded?` collapses to `self.boosts_loaded?`
+    // — the same SelfRef hop `has_json` uses for `settings.foo?`.
+    let new_recv = match owner {
+        None => Some(Expr::new(inner.span, ExprNode::SelfRef)),
+        Some(base) => Some(base.clone()),
+    };
     let mut rewritten = Expr::new(
         expr.span,
         ExprNode::Send {
-            recv: Some(owner.clone()),
+            recv: new_recv,
             method: flat,
             args: vec![],
             block: None,

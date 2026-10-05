@@ -69,3 +69,55 @@ end
         "AssociationProxy .loaded? must not survive emit:\n{src}"
     );
 }
+
+#[test]
+fn assoc_loaded_rewrites_implicit_self_two_hop() {
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "messages", force: :cascade do |t|
+    t.string "body"
+  end
+  create_table "boosts", force: :cascade do |t|
+    t.integer "message_id"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+  has_many :boosts
+
+  def boosts_ready?
+    boosts.loaded?
+  end
+end
+"#,
+        ),
+        (
+            "app/models/boost.rb",
+            r#"class Boost < ApplicationRecord
+  belongs_to :message
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = ruby::emit_lowered_models(&app);
+    let src = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().contains("message.rb"))
+        .map(|f| f.content.as_str())
+        .unwrap_or("");
+    assert!(
+        src.contains("boosts_loaded?"),
+        "expected boosts.loaded? to flatten to boosts_loaded?:\n{src}"
+    );
+    assert!(
+        !src.contains(".loaded?"),
+        "implicit-self AssociationProxy .loaded? must not survive:\n{src}"
+    );
+}
