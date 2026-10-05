@@ -258,6 +258,7 @@ fn main() {{
             "utf8_character",
             "percent_bytes",
             "percent_byte",
+            "capture_byte",
             "hex_digit",
         ];
         // Module-flat parsing needs the same cross-method return registry

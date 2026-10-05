@@ -43,6 +43,91 @@ fn percent_scanner_lowers_to_elixir_recursion() {
     assert!(!router.contains("While not supported"), "{router}");
 }
 
+/// Keep the full project's Router dependency on the shared error primitive
+/// visible; the ignored Rust toolchain test compiles and executes the project.
+#[test]
+fn emitted_rust_router_packages_error_imports() {
+    let (emitted, errors) = app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    let router = std::fs::read_to_string(emitted.join("src/router.rs")).unwrap();
+    assert!(router.contains("use crate::errors_ext::raise;"), "{router}");
+    assert!(router.contains("use crate::errors_ext::ArgumentError;"), "{router}");
+    assert!(router.contains("pub fn capture_byte("), "{router}");
+}
+
+/// Python's host exception must be in scope for invalid UTF-8 and offset
+/// rejection; otherwise the decoder fails with an unrelated NameError.
+#[test]
+fn emitted_python_router_packages_argument_error() {
+    let (emitted, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::Python);
+    assert!(errors.is_empty(), "{errors:?}");
+    let router = std::fs::read_to_string(emitted.join("app/router.py")).unwrap();
+    assert!(router.contains("from builtins import ValueError as ArgumentError"), "{router}");
+}
+
+/// Width and scan-step state are definite Integers before entering a loop;
+/// nullable branch-local declarations break generated C# calls and counters.
+#[test]
+fn emitted_csharp_router_keeps_loop_steps_nonnullable() {
+    let (emitted, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::CSharp);
+    assert!(errors.is_empty(), "{errors:?}");
+    let router = std::fs::read_to_string(emitted.join("app/runtime/Router.cs")).unwrap();
+    assert!(!router.contains("long? width"), "{router}");
+    assert!(!router.contains("long? advance"), "{router}");
+    assert!(router.contains("var width = 1L;"), "{router}");
+    assert!(router.contains("var advance = 1L;"), "{router}");
+}
+
+/// Raw binary Rack strings are meaningful on Ruby/Spinel, while several
+/// other targets' String types cannot represent the intermediate byte input.
+const RAW_BYTE_CONTRACT: &str = r#"
+segments = ["%C3" + [0xA9].pack("C*"), [0xC3].pack("C*") + "%A9", "%F0%9F" + [0x8E].pack("C*") + "%89"]
+segments.each do |segment|
+  hit = ActionDispatch::Router.match_pattern("/echo/:value", ("/echo/" + segment).b)
+  expected = segment.start_with?("%F0") ? "🎉" : "é"
+  raise "raw/percent bytes changed" unless hit && hit["value"] == expected
+end
+rejected = false
+begin
+  ActionDispatch::Router.match_pattern("/echo/:value", "/echo/".b + [0xFF].pack("C*"))
+rescue ArgumentError
+  rejected = true
+end
+raise "raw invalid byte was accepted" unless rejected
+puts "Raw Router byte contract passed"
+"#;
+
+/// Preserve the mixed-byte and raw-invalid oracle on actual emitted Ruby.
+#[test]
+fn raw_router_bytes_execute_on_ruby() {
+    app().run_ruby(RAW_BYTE_CONTRACT).assert_passes();
+}
+
+/// Consume the shipped RBS while compiling the same binary-string contract.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn raw_router_bytes_execute_on_spinel() {
+    use std::process::Command;
+    let (emitted, errors) = app().emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("contract.rb"), format!("require_relative \"boot\"\n{RAW_BYTE_CONTRACT}")).unwrap();
+    let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
+    let extractor = std::path::Path::new(&compiler).with_file_name("spinel_rbs_extract");
+    let seeds = Command::new(extractor).arg(".").current_dir(&emitted).output().expect("extract Router RBS");
+    std::fs::write(emitted.join("rbs-seeds.txt"), &seeds.stdout).unwrap();
+    assert!(seeds.status.success(), "{}", String::from_utf8_lossy(&seeds.stderr));
+    let seed_text = String::from_utf8_lossy(&seeds.stdout);
+    assert!(seed_text.contains("cmeth capture_byte int int_array,int"), "{seed_text}");
+    let compiled = Command::new(&compiler).args(["--rbs", ".", "contract.rb", "-o", "contract"]).current_dir(&emitted).output().expect("compile seeded Router contract");
+    std::fs::write(emitted.join("compile.stdout"), &compiled.stdout).unwrap();
+    std::fs::write(emitted.join("compile.stderr"), &compiled.stderr).unwrap();
+    assert!(compiled.status.success(), "{}", String::from_utf8_lossy(&compiled.stderr));
+    assert!(!String::from_utf8_lossy(&compiled.stderr).contains("type seeds are unavailable"));
+    let executed = Command::new(emitted.join("contract")).current_dir(&emitted).output().expect("run native Router byte contract");
+    assert!(executed.status.success(), "{}", String::from_utf8_lossy(&executed.stderr));
+    assert_eq!(String::from_utf8_lossy(&executed.stdout).trim(), "Raw Router byte contract passed");
+}
+
 /// Execute the complete generated Router, including capture-hash accumulation,
 /// binary path bytes, matching constraints, and UTF-8 error behavior.
 #[test]

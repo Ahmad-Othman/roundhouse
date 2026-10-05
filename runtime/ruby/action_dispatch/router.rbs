@@ -94,6 +94,7 @@ module ActionDispatch
     def self.utf8_character: (Array[Integer] bytes, Integer from, Integer first, Integer width) -> String
     def self.percent_bytes: (Array[Integer] bytes) -> Array[Integer]
     def self.percent_byte: (Array[Integer] bytes, Integer at) -> Integer
+    def self.capture_byte: (Array[Integer] bytes, Integer index) -> Integer
     def self.hex_digit: (Integer byte) -> Integer
 
     # Digit-only (`Integer` matcher / `constraints: /\d+/`) param

@@ -56,6 +56,8 @@ fn generate_project(fixture_path: &Path, out: &Path) {
 // against the rust path. Until then, `real_blog_cargo_test_passes`
 // + `scripts/compare rust` carry the authoritative coverage.
 
+/// Compile the complete generated application and execute its model/runtime
+/// contracts with the actual Cargo dependency graph and packaged imports.
 #[test]
 #[ignore]
 fn real_blog_cargo_test_passes() {
@@ -106,6 +108,31 @@ fn enum_label_walks_past_the_first_label() {
 "#,
     )
     .unwrap();
+
+    // Exercise complete runtime packaging and typed byte reads through the
+    // generated Cargo project, including the real shared error implementation.
+    std::fs::write(
+        scratch.join("tests/route_path_captures.rs"),
+        r#"
+use app::router::Router;
+#[test]
+fn routed_captures_and_checked_bytes() {
+    for (input, expected) in [("abc", "abc"), ("+%2B", "++"), ("%00", "\0"), ("%2500", "%00"), ("%C3%A9", "é")] {
+        let path = format!("/echo/{input}");
+        let hit = Router::match_pattern("/echo/:value", &path, "").expect("route");
+        assert_eq!(hit["value"], expected);
+    }
+    assert_eq!(Router::capture_byte(vec![0, 255], 0), 0);
+    assert_eq!(Router::capture_byte(vec![0, 255], 1), 255);
+    for index in [-1, 1] {
+        let error = std::panic::catch_unwind(|| Router::capture_byte(vec![0], index)).expect_err("invalid offset must reject");
+        assert_eq!(error.downcast_ref::<String>().map(String::as_str), Some("FrameworkError::Argument"));
+    }
+    let error = std::panic::catch_unwind(|| Router::decode_capture("%FF")).expect_err("invalid UTF-8 must reject");
+    assert_eq!(error.downcast_ref::<String>().map(String::as_str), Some("FrameworkError::Argument"));
+}
+"#,
+    ).unwrap();
 
     let output = Command::new("cargo")
         .arg("test")

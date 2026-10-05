@@ -311,8 +311,10 @@ module ActionDispatch
       bytes = percent_bytes(value.bytes)
       out = +""
       i = 0
+      # Establish scalar loop state before branching; reset for each sequence.
+      width = 1
       while i < bytes.length
-        byte = bytes[i]
+        byte = capture_byte(bytes, i)
         width = 1
         if byte >= 0xF0 && byte <= 0xF4
           width = 4
@@ -344,7 +346,7 @@ module ActionDispatch
       end
       j = 1
       while j < width
-        byte = bytes[from + j]
+        byte = capture_byte(bytes, from + j)
         if byte < 0x80
           raise ArgumentError, "Invalid encoding for path parameter"
         end
@@ -366,11 +368,13 @@ module ActionDispatch
     def self.percent_bytes(bytes)
       decoded = []
       i = 0
+      # Keep the scan step an initialized Integer across every branch.
+      advance = 1
       while i < bytes.length
         byte = percent_byte(bytes, i)
         advance = 1
         if byte < 0
-          decoded << bytes[i]
+          decoded << capture_byte(bytes, i)
         else
           decoded << byte
           advance = 3
@@ -385,12 +389,20 @@ module ActionDispatch
     # A valid %HH escape at this byte offset, or -1 to retain literal bytes.
     def self.percent_byte(bytes, at)
       return -1 if at + 2 >= bytes.length
-      return -1 if bytes[at] != 37
-      hi = hex_digit(bytes[at + 1])
-      lo = hex_digit(bytes[at + 2])
+      return -1 if capture_byte(bytes, at) != 37
+      hi = hex_digit(capture_byte(bytes, at + 1))
+      lo = hex_digit(capture_byte(bytes, at + 2))
       return -1 if hi < 0
       return -1 if lo < 0
       hi * 16 + lo
+    end
+
+    # Check the offset before indexing an Integer-only byte array. The method
+    # contract carries the guaranteed Integer result to callers on every target.
+    def self.capture_byte(bytes, index)
+      raise ArgumentError, "Invalid encoding for path parameter" if index < 0
+      raise ArgumentError, "Invalid encoding for path parameter" if index >= bytes.length
+      bytes[index]
     end
 
     # ASCII hexadecimal classification without Unicode case folding.
