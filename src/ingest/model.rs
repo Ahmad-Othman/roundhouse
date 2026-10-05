@@ -1358,14 +1358,17 @@ pub(super) fn ingest_method(
         // caller an ArgumentError, and the forward into
         // `WebPush::Notification.new(**params, …)` a bare name.
         //
-        // Beside a positional `*rest` the flattening does not parse
-        // (`def both(*args, options = {})`), so there the slot stays a
-        // real `**kwrest`, as the library-class path keeps it.
+        // Beside a positional `*rest` or a keyword the flattening does
+        // not parse (`def both(*args, options = {})`, `def opts(name:,
+        // rest = {})`), so there the slot stays a real `**kwrest`. This
+        // path keeps EVERY keyword as a keyword, so any `name:` or
+        // `name: default` rules the flattening out, the case the
+        // library-class path gates on `keeps_keywords`.
         if let Some(krest) = pn.keyword_rest() {
             if let Some(krp) = krest.as_keyword_rest_parameter_node() {
                 if let Some(loc) = krp.name() {
                     let name = Symbol::from(constant_id_str(&loc));
-                    let mut p = if params.iter().any(|p| p.rest) {
+                    let mut p = if params.iter().any(|p| p.rest || p.keyword) {
                         let mut p = crate::dialect::Param::keyword(name, None);
                         p.rest = true;
                         p
