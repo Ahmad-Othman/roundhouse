@@ -109,3 +109,69 @@ end
         "super(records) must become @elements = records:\n{src}"
     );
 }
+
+#[test]
+fn bare_super_in_initialize_forwards_first_positional() {
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "messages", force: :cascade do |t|
+    t.string "body"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+end
+"#,
+        ),
+        (
+            "app/models/message/pagination.rb",
+            r#"module Message::Pagination
+  class Page < Array
+    def initialize(records, relation)
+      super
+      @relation = relation
+    end
+
+    def first
+      super
+    end
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = ruby::emit_library(&app);
+    let src = files
+        .iter()
+        .find(|f| f.content.contains("@elements") && f.content.contains("def initialize"))
+        .map(|f| f.content.as_str())
+        .unwrap_or("");
+    assert!(
+        !src.is_empty(),
+        "expected emitted Page with @elements"
+    );
+    assert!(
+        src.contains("@elements = records"),
+        "bare super in initialize must forward first positional:\n{src}"
+    );
+    // `first`'s bare super must NOT become an @elements assignment —
+    // the synthesized `first` forward owns that name, or the user
+    // method stays and still says `super` (either is fine; an
+    // `@elements =` inside `def first` is not).
+    let first_body = src
+        .split("def first")
+        .nth(1)
+        .and_then(|s| s.split("\ndef ").next())
+        .unwrap_or("");
+    assert!(
+        !first_body.contains("@elements ="),
+        "super outside initialize must not rewrite to @elements:\n{first_body}"
+    );
+}

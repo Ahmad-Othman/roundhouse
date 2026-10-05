@@ -711,8 +711,13 @@ fn is_array_parent(parent: &ClassId) -> bool {
 /// `any?`, bot paging `first`/`last`, search `count`). User methods
 /// of the same name win — the synthesizer skips names already present.
 fn wrap_array_subclass(owner: &ClassId, mut methods: Vec<MethodDef>) -> Vec<MethodDef> {
+    // Only `initialize`'s `super` maps onto `@elements = …`. A `super`
+    // in `first` / `each` / … is Array's method, not construction — leave
+    // those alone (they become the synthesized forwards below).
     for method in &mut methods {
-        rewrite_array_super_to_elements(&mut method.body);
+        if method.name.as_str() == "initialize" {
+            rewrite_array_super_to_elements(&mut method.body, &method.params);
+        }
     }
     let existing: HashSet<String> = methods
         .iter()
@@ -726,36 +731,63 @@ fn wrap_array_subclass(owner: &ClassId, mut methods: Vec<MethodDef>) -> Vec<Meth
 }
 
 /// `super(records)` / `super(records, …)` → `@elements = records`.
-/// Bare `super` / `super()` → `@elements = []`. Deeper args are
+/// Bare `super` (args `None`) forwards `initialize`'s first positional
+/// — Ruby's zsuper — so `def initialize(records, …); super; end` keeps
+/// the page non-empty. Explicit `super()` (empty arg list) is the
+/// no-arg form → `@elements = []`. Deeper args past the first are
 /// dropped: Array#initialize takes one collection (or a size), and
-/// every corpus subclass only forwards the records.
-fn rewrite_array_super_to_elements(expr: &mut Expr) {
+/// every corpus subclass only forwards the records. A bare `super`
+/// with no positional to forward is left alone (visible gap).
+fn rewrite_array_super_to_elements(expr: &mut Expr, params: &[Param]) {
     expr.node
-        .for_each_child_mut(&mut rewrite_array_super_to_elements);
+        .for_each_child_mut(&mut |c| rewrite_array_super_to_elements(c, params));
     let elements = Symbol::from("elements");
-    let replacement = match &*expr.node {
-        ExprNode::Super { args: Some(args) } if !args.is_empty() => Some(Expr::new(
-            expr.span,
+    let assign = |value: Expr, span: crate::span::Span| {
+        Expr::new(
+            span,
             ExprNode::Assign {
                 target: LValue::Ivar {
                     name: elements.clone(),
                 },
-                value: args[0].clone(),
+                value,
             },
-        )),
-        ExprNode::Super { .. } => Some(Expr::new(
-            expr.span,
-            ExprNode::Assign {
-                target: LValue::Ivar { name: elements },
-                value: Expr::new(
+        )
+    };
+    let empty = |span: crate::span::Span| {
+        Expr::new(
+            span,
+            ExprNode::Array {
+                elements: vec![],
+                style: crate::expr::ArrayStyle::default(),
+            },
+        )
+    };
+    let replacement = match &*expr.node {
+        ExprNode::Super { args: Some(args) } if !args.is_empty() => {
+            Some(assign(args[0].clone(), expr.span))
+        }
+        // Explicit `super()` — no args on purpose.
+        ExprNode::Super { args: Some(_) } => Some(assign(empty(expr.span), expr.span)),
+        // Bare `super` — forward initialize's first positional.
+        ExprNode::Super { args: None } => {
+            let first = params.iter().find(|p| {
+                !p.keyword && !p.rest && !p.from_keyword && p.name.as_str() != "self"
+            });
+            match first {
+                Some(p) => Some(assign(
+                    Expr::new(
+                        expr.span,
+                        ExprNode::Var {
+                            id: crate::ident::VarId(0),
+                            name: p.name.clone(),
+                        },
+                    ),
                     expr.span,
-                    ExprNode::Array {
-                        elements: vec![],
-                        style: crate::expr::ArrayStyle::default(),
-                    },
-                ),
-            },
-        )),
+                )),
+                // No positional to forward — leave `super` visible.
+                None => None,
+            }
+        }
         _ => None,
     };
     if let Some(next) = replacement {

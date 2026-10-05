@@ -1476,20 +1476,27 @@ pub(super) fn ingest_method(
                 if let Some(loc) = krp.name() {
                     let name = Symbol::from(constant_id_str(&loc));
                     let has_keywords = params.iter().any(|p| p.keyword || p.from_keyword);
-                    let mut p = if params.iter().any(|p| p.rest) || has_keywords {
+                    // Match `library_class`: `from_kwrest` marks the
+                    // *flattened* `params = {}` form only. A real
+                    // keyword-rest kept beside keywords / `*rest` must
+                    // not carry the marker — forwarding analysis treats
+                    // `from_kwrest` as "flattened keyword ABI" and would
+                    // reject valid `**` / full-arg forwards into it.
+                    let p = if params.iter().any(|p| p.rest) || has_keywords {
                         let mut p = crate::dialect::Param::keyword(name, None);
                         p.rest = true;
                         p
                     } else {
-                        crate::dialect::Param::with_default(
+                        let mut p = crate::dialect::Param::with_default(
                             name,
                             Expr::new(
                                 Span::synthetic(),
                                 ExprNode::Hash { entries: vec![], kwargs: false },
                             ),
-                        )
+                        );
+                        p.from_kwrest = true;
+                        p
                     };
-                    p.from_kwrest = true;
                     params.push(p);
                 }
             }

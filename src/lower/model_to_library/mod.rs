@@ -1180,6 +1180,7 @@ pub(crate) fn push_scope_methods(
 ) {
     use crate::dialect::{AccessorKind, ModelBodyItem, Param};
     use crate::expr::{Expr, ExprNode, LValue};
+    use crate::ty::Ty;
     let rel_param = Symbol::from("__rel");
     for item in &model.body {
         let ModelBodyItem::Scope { scope, .. } = item else { continue };
@@ -1211,6 +1212,29 @@ pub(crate) fn push_scope_methods(
         // `rel.visible.with_ordered_room`. Our chain methods mutate in
         // place, so the scope method itself takes a copy first.
         let span = body.span;
+        let rel_ty = Ty::Relation {
+            of: model.name.clone(),
+        };
+        let mut rel_var = Expr::new(
+            span,
+            ExprNode::Var {
+                id: crate::ident::VarId(0),
+                name: rel_param.clone(),
+            },
+        );
+        rel_var.ty = Some(rel_ty.clone());
+        let mut spawn_send = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(rel_var),
+                method: Symbol::from("spawn"),
+                args: vec![],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        // `Relation#spawn` returns a Relation of the same model.
+        spawn_send.ty = Some(rel_ty);
         let spawn_assign = Expr::new(
             span,
             ExprNode::Assign {
@@ -1218,22 +1242,7 @@ pub(crate) fn push_scope_methods(
                     id: crate::ident::VarId(0),
                     name: rel_param.clone(),
                 },
-                value: Expr::new(
-                    span,
-                    ExprNode::Send {
-                        recv: Some(Expr::new(
-                            span,
-                            ExprNode::Var {
-                                id: crate::ident::VarId(0),
-                                name: rel_param.clone(),
-                            },
-                        )),
-                        method: Symbol::from("spawn"),
-                        args: vec![],
-                        block: None,
-                        parenthesized: true,
-                    },
-                ),
+                value: spawn_send,
             },
         );
         body = Expr::new(

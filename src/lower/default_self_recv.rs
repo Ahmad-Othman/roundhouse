@@ -11,28 +11,36 @@
 //! Emitting an explicit `self.user` keeps the resolution on the
 //! enclosing class. Only bare sends inside defaults are rewritten;
 //! method bodies, already-qualified calls, constants, and locals (Var
-//! nodes) are left alone.
+//! nodes) are left alone. The inserted `SelfRef` is stamped with the
+//! enclosing class type so receiver-type dispatch in typed emitters
+//! still sees a class (post-analyze inserts would otherwise leave
+//! `ty: None`).
 
 use crate::app::App;
 use crate::diagnostic::Diagnostic;
 use crate::dialect::{Association, ModelBodyItem};
 use crate::expr::{Expr, ExprNode};
+use crate::ty::Ty;
 
 pub fn apply_default_self_recv(app: &mut App) -> Vec<Diagnostic> {
     for model in &mut app.models {
+        let self_ty = Ty::Class {
+            id: model.name.clone(),
+            args: vec![],
+        };
         for item in &mut model.body {
             match item {
                 ModelBodyItem::Method { method, .. } => {
                     for p in &mut method.params {
                         if let Some(default) = &mut p.default {
-                            rewrite(default);
+                            rewrite(default, &self_ty);
                         }
                     }
                 }
                 ModelBodyItem::Scope { scope, .. } => {
                     for p in &mut scope.params {
                         if let Some(default) = &mut p.default {
-                            rewrite(default);
+                            rewrite(default, &self_ty);
                         }
                     }
                 }
@@ -43,7 +51,7 @@ pub fn apply_default_self_recv(app: &mut App) -> Vec<Diagnostic> {
                     for m in extension.iter_mut() {
                         for p in &mut m.params {
                             if let Some(default) = &mut p.default {
-                                rewrite(default);
+                                rewrite(default, &self_ty);
                             }
                         }
                     }
@@ -57,10 +65,14 @@ pub fn apply_default_self_recv(app: &mut App) -> Vec<Diagnostic> {
         .iter_mut()
         .chain(app.rails_application.iter_mut())
     {
+        let self_ty = Ty::Class {
+            id: lc.name.clone(),
+            args: vec![],
+        };
         for method in &mut lc.methods {
             for p in &mut method.params {
                 if let Some(default) = &mut p.default {
-                    rewrite(default);
+                    rewrite(default, &self_ty);
                 }
             }
         }
@@ -68,13 +80,16 @@ pub fn apply_default_self_recv(app: &mut App) -> Vec<Diagnostic> {
     Vec::new()
 }
 
-fn rewrite(expr: &mut Expr) {
-    expr.node.for_each_child_mut(&mut rewrite);
+fn rewrite(expr: &mut Expr, self_ty: &Ty) {
+    expr.node
+        .for_each_child_mut(&mut |c| rewrite(c, self_ty));
     let ExprNode::Send { recv, .. } = &mut *expr.node else {
         return;
     };
     if recv.is_some() {
         return;
     }
-    *recv = Some(Expr::new(expr.span, ExprNode::SelfRef));
+    let mut s = Expr::new(expr.span, ExprNode::SelfRef);
+    s.ty = Some(self_ty.clone());
+    *recv = Some(s);
 }
