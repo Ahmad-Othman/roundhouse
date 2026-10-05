@@ -800,6 +800,77 @@ end
 class TestSkipped < Exception
 end
 
+# ---- Query assertions ------------------------------------------------
+#
+# Rails' `ActiveSupport::Notifications.subscribed(callback,
+# "sql.active_record") { … }` and the `ActiveRecord::Assertions::
+# QueryAssertions` built on it, over `Db.capture_sql`, which records
+# every statement a prepare/exec issues and skips a query-cache replay,
+# as Rails' counter skips CACHE events. The callback gets Rails' five
+# arguments; the payload carries `:sql` and `:name` ("SQL", since the
+# runtime does not name its queries). Called after the block rather than
+# during it, which no test can tell: they collect, then inspect.
+module ActiveSupport
+  module Notifications
+    def self.subscribed(callback, name, &block)
+      return block.call unless name == "sql.active_record"
+      result = nil
+      statements = Db.capture_sql { result = block.call }
+      statements.each { |sql| callback.call(name, nil, nil, nil, { sql: sql, name: "SQL" }) }
+      result
+    end
+  end
+end
+
+module ActiveRecord
+  module Assertions
+    module QueryAssertions
+      # Statements the block issued. Schema introspection is left out,
+      # as Rails leaves out SCHEMA-named queries, unless asked for.
+      def capture_queries(include_schema, &block)
+        result = nil
+        statements = Db.capture_sql { result = block.call }
+        unless include_schema
+          statements = statements.reject { |sql| sql.start_with?("PRAGMA") || sql.include?("sqlite_master") || sql.include?("sqlite_schema") }
+        end
+        [result, statements]
+      end
+
+      def assert_queries_count(count = nil, include_schema: false, &block)
+        result, statements = capture_queries(include_schema, &block)
+        if count.nil?
+          raise "expected at least one query, got none" if statements.empty?
+        elsif statements.length != count
+          raise "expected #{count} queries, got #{statements.length}:\n#{statements.join("\n")}"
+        end
+        result
+      end
+
+      def assert_no_queries(include_schema: false, &block)
+        assert_queries_count(0, include_schema: include_schema, &block)
+      end
+
+      def assert_queries_match(match, count: nil, include_schema: false, &block)
+        result, statements = capture_queries(include_schema, &block)
+        matched = statements.select { |sql| match === sql }
+        if count.nil?
+          raise "expected a query matching #{match.inspect}, got:\n#{statements.join("\n")}" if matched.empty?
+        elsif matched.length != count
+          raise "expected #{count} queries matching #{match.inspect}, got #{matched.length}"
+        end
+        result
+      end
+
+      def assert_no_queries_match(match, include_schema: false, &block)
+        result, statements = capture_queries(include_schema, &block)
+        matched = statements.select { |sql| match === sql }
+        raise "expected no query matching #{match.inspect}, got:\n#{matched.join("\n")}" unless matched.empty?
+        result
+      end
+    end
+  end
+end
+
 class TestBase
   # Rails puts both of these on `ActiveSupport::TestCase` itself, so a
   # test that never writes `include ActiveJob::TestHelper` still has
@@ -808,6 +879,8 @@ class TestBase
   # a module twice is inert.
   include ActiveJob::TestHelper
   include ActionCable::TestHelper
+  # Rails 7.2 puts the query assertions on every ActiveSupport::TestCase.
+  include ActiveRecord::Assertions::QueryAssertions
   include ActionDispatch::TestProcess
 
   # Zero-arg initializer; the shim does `__t = XTest.new` per test

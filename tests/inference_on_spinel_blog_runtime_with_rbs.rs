@@ -957,7 +957,11 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // named binds in `where`/`having`, without which campfire's direct-
     // room lookup (basecamp/once-campfire#310) read NULL and created a
     // room on every Ping.
-    const CEILING: usize = 1336;
+    // 2026-10-05 1336 -> 1341, +5, MEASURED (connection.rb 210 -> 215):
+    // Connection#select_rows, a block over the adapter's untyped rows.
+    // What it buys: campfire's tests reading an EXPLAIN QUERY PLAN with
+    // `select_rows(…).map(&:last)`.
+    const CEILING: usize = 1341;
 
     assert!(
         all_untyped.len() <= CEILING,

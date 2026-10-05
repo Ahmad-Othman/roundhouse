@@ -470,6 +470,44 @@ fn named_binds_reach_the_query_on_spinel() {
     named_binds_app().run_spinel(&script).assert_passes();
 }
 
+/// Rails 7.2's query assertions and the notification they are built on,
+/// over the runtime's statement capture, with `connection.select_rows`
+/// answering Arrays: campfire's tests count queries, assert none match a
+/// pattern, and read an `EXPLAIN QUERY PLAN` through a `->(*, payload)`
+/// callback (basecamp/once-campfire#295, #304, #310, #312).
+#[test]
+fn query_assertions_and_sql_notifications_run() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/article_queries_test.rb",
+            r#"require "test_helper"
+
+class ArticleQueriesTest < ActiveSupport::TestCase
+  test "query assertions count, match and explain" do
+    article = Article.create!(title: "Counted", body: "Body text here")
+
+    found = assert_queries_count(1) { Article.find(article.id) }
+    assert_equal "Counted", found.title
+    assert_no_queries { found.title }
+    assert_no_queries_match(/comments/) { Article.find(article.id) }
+    assert_queries_match(/articles/) { Article.where(title: "Counted").to_a }
+
+    statements = []
+    callback = ->(*, payload) { statements << payload[:sql] }
+    ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+      Article.where(title: "Counted").to_a
+    end
+    assert_equal 1, statements.size
+    plan = Article.connection.select_rows("EXPLAIN QUERY PLAN #{statements.first}").map(&:last).join(" | ")
+    assert_match(/articles/, plan)
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_queries_test.rb")
+        .assert_passes();
+}
+
 #[test]
 fn the_unedited_blog_runs() {
     emit_and_run::real_blog()
