@@ -4633,3 +4633,6 @@ end
         )
         .assert_passes();
 }
+
+#[path = "emit_and_run/string_bytes.rs"]
+mod string_bytes;

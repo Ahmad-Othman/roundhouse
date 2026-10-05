@@ -1144,6 +1144,9 @@ fn children(e: &Expr) -> Vec<&Expr> {
 }
 
 pub fn emit_expr(e: &Expr) -> String {
+    if let Some(s) = crate::emit::shared::string_bytes::emit(e, crate::emit::shared::string_bytes::Target::Swift, emit_expr) {
+        return s;
+    }
     if let Some(s) = try_string_builder(e) {
         return s;
     }

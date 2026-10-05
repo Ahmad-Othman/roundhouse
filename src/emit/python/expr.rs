@@ -801,6 +801,9 @@ fn emit_block_body(e: &Expr, void: bool) -> String {
 }
 
 pub(super) fn emit_expr(e: &Expr) -> String {
+    if let Some(s) = crate::emit::shared::string_bytes::emit(e, crate::emit::shared::string_bytes::Target::Python, emit_expr) {
+        return s;
+    }
     // Analyze may have annotated this expression as a user error
     // (e.g., Incompatible `+`). If so, emit the target raise-
     // equivalent instead of the normal rendering — matches Ruby's
