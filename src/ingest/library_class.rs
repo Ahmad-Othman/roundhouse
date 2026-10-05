@@ -1562,8 +1562,27 @@ fn walk_decl_body_with_visibility<'pr>(
             if force_class_receiver || module_function_active || extend_self_active {
                 m.receiver = MethodReceiver::Class;
             }
-            direct_def_positions.push(out.methods.len());
-            out.methods.push(m);
+            // Last definition wins: a real `def` replaces a synthesized
+            // `attr_reader`/`attr_accessor` half of the same name (and
+            // replaces an earlier `def`). Without this, ingesting
+            // `attr_accessor :x` then `def x; … end` kept both and emit
+            // often retained the bare ivar reader — the memo body never
+            // ran and analyze reported `ivar_unresolved` on `@x`.
+            if let Some(idx) = out
+                .methods
+                .iter()
+                .position(|e| e.name == m.name && e.receiver == m.receiver)
+            {
+                out.methods[idx] = m;
+                // Replacing a synthesized attr half with a real `def`
+                // still counts as a direct def for `module_function :name`.
+                if !direct_def_positions.iter().any(|p| *p == idx) {
+                    direct_def_positions.push(idx);
+                }
+            } else {
+                direct_def_positions.push(out.methods.len());
+                out.methods.push(m);
+            }
             continue;
         }
         // `class << self ... end` — singleton class block. Body
@@ -1723,12 +1742,23 @@ fn walk_decl_body_with_visibility<'pr>(
                             if want_reader {
                                 let mut method = synth_attr_reader(owner, name, recv);
                                 visibility.apply(&statement, &mut method);
-                                out.methods.push(method);
+                                // Skip when a `def` of this name already
+                                // walked (unusual order); a later `def`
+                                // replaces via the push path above.
+                                if !out.methods.iter().any(|e| {
+                                    e.name == method.name && e.receiver == method.receiver
+                                }) {
+                                    out.methods.push(method);
+                                }
                             }
                             if want_writer {
                                 let mut method = synth_attr_writer(owner, name, recv);
                                 visibility.apply(&statement, &mut method);
-                                out.methods.push(method);
+                                if !out.methods.iter().any(|e| {
+                                    e.name == method.name && e.receiver == method.receiver
+                                }) {
+                                    out.methods.push(method);
+                                }
                             }
                         }
                     }

@@ -1107,18 +1107,39 @@ pub(crate) fn build_methods(
 /// `def as_json`, …). These were dropped — `build_methods` synthesized
 /// schema/association/scope methods but never carried the model's own
 /// method bodies through. Emit them now; their bodies ride the same
-/// arel-rewrite + body-typer the synthesized methods do. Skips a name a
-/// synthesized method already defined (column/association/scope accessors
-/// win — the corpus doesn't redefine those, and this avoids duplicate
-/// definitions).
+/// arel-rewrite + body-typer the synthesized methods do.
+///
+/// Name collisions:
+///   * A synthesized **attribute** reader/writer (`attr_accessor` /
+///     ingest-time expansion of the same) yields to a later real `def`
+///     of that name — Ruby's last-definition-wins. Campfire's
+///     `Opengraph::Location` declares `attr_accessor :parsed_url` and
+///     then memoizes `def parsed_url; … URI.parse …; end`; keeping the
+///     bare `@parsed_url` reader left the ivar untyped/unread and
+///     Spinel's strict emit failed with `error[ivar_unresolved]`.
+///   * Column / association / scope synthesizers still win over a
+///     duplicate body name (the corpus does not redefine those).
 fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model) {
-    use crate::dialect::ModelBodyItem;
+    use crate::dialect::{AccessorKind, ModelBodyItem};
     for item in &model.body {
         let ModelBodyItem::Method { method, .. } = item else { continue };
-        if methods
+        if let Some(idx) = methods
             .iter()
-            .any(|m| m.name == method.name && m.receiver == method.receiver)
+            .position(|m| m.name == method.name && m.receiver == method.receiver)
         {
+            let existing_kind = methods[idx].kind;
+            let incoming_is_real = matches!(method.kind, AccessorKind::Method);
+            let existing_is_attr = matches!(
+                existing_kind,
+                AccessorKind::AttributeReader | AccessorKind::AttributeWriter
+            );
+            // Real `def` replaces a synthesized attr_* half. An attr_*
+            // Method item already in `methods` (ingest expanded
+            // `attr_accessor` into the body before this pass) is also
+            // replaced when a later body `def` of the same name arrives.
+            if incoming_is_real && existing_is_attr {
+                methods[idx] = method.clone();
+            }
             continue;
         }
         methods.push(method.clone());

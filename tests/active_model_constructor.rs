@@ -105,6 +105,11 @@ end
 /// instance. That failed `validate_url` on every URL and made `valid?`
 /// false throughout the subsystem: 9 of its own tests, none of which
 /// named a missing method.
+///
+/// The same hole also surfaced as Spinel `error[ivar_unresolved]:
+/// @parsed_url has no known type` — the bare reader reads an ivar no
+/// typed write ever seeded. Keep the memo body, and keep analyze quiet
+/// on that ivar for this pattern.
 #[test]
 fn a_def_replaces_the_accessor_it_shadows() {
     let src = emitted(
@@ -134,4 +139,56 @@ end
     // And an accessor nothing shadows keeps both halves.
     assert!(src.contains("def url\n"), "{src}");
     assert!(src.contains("def url=(value)"), "{src}");
+    // defined?-memo lowering must still rewrite the surviving body.
+    assert!(
+        src.contains("@parsed_url_defined") || src.contains("defined?"),
+        "expected defined?-memo flag or guard in emitted body:\n{src}"
+    );
+}
+
+#[test]
+fn attr_then_defined_ivar_memo_has_no_ivar_unresolved() {
+    use roundhouse::analyze::{diagnose, DiagnosticKind};
+    use roundhouse::diagnostic::Severity;
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"body\", null: false\n  end\nend\n",
+        ),
+        (
+            "app/models/card.rb",
+            r#"class Card
+  include ActiveModel::Validations
+
+  attr_accessor :url, :parsed_url
+
+  def initialize(url)
+    @url = url
+  end
+
+  private
+    def parsed_url
+      return @parsed_url if defined? @parsed_url
+      @parsed_url = URI.parse(url) rescue nil
+    end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let unresolved: Vec<_> = diagnose(&app)
+        .into_iter()
+        .filter(|d| {
+            matches!(
+                d.kind,
+                DiagnosticKind::IvarUnresolved { ref name } if name.as_str() == "parsed_url"
+            ) && d.severity == Severity::Error
+        })
+        .collect();
+    assert!(
+        unresolved.is_empty(),
+        "expected no error[ivar_unresolved] on @parsed_url, got:\n{:#?}",
+        unresolved
+    );
 }
