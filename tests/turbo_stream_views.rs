@@ -164,18 +164,36 @@ fn a_bare_accept_any_renders_the_template_the_action_has() {
 }
 
 #[test]
-fn the_option_form_is_left_alone_rather_than_half_lowered() {
-    // `partial:`/`collection:`/`locals:` needs the partial machinery a
-    // `render` call site gets. Declining keeps the source shape (and
-    // files a residue line at emit); half-lowering would look like it
-    // worked.
+fn the_option_form_with_an_unknown_key_is_left_alone() {
+    // A key this pass does not read (`layout:`) stays source-shaped.
+    // Half-lowering would look like it worked and drop the unread option.
     let app = app_with_template(
-        "<%= turbo_stream.replace :box, partial: \"things/thing\", collection: @things %>\n",
+        "<%= turbo_stream.replace :box, partial: \"things/thing\", layout: \"box\" %>\n",
     );
     let body = method_body(&app, "create_turbo_stream");
     assert!(
         !body.contains("turbo_stream_fragment"),
         "unsupported spelling must not be lowered: {body}"
+    );
+}
+
+/// `collection:` is Rails' once-per-element render. campfire's
+/// `accounts/users/index.turbo_stream.erb` writes
+/// `turbo_stream.replace :next_page_container, partial: "…/user",
+/// collection: @page.records, as: :user`. Treating that as a single
+/// render would keep only the first element.
+#[test]
+fn the_collection_option_form_renders_each_element() {
+    let app = app_with_template(
+        "<%= turbo_stream.replace :box, partial: \"things/thing\", collection: @things, as: :thing %>\n",
+    );
+    let body = method_body(&app, "create_turbo_stream");
+    assert!(body.contains("turbo_stream_fragment"), "got {body}");
+    assert!(body.contains("each"), "the collection must iterate: {body}");
+    assert!(body.contains("_ts_cap"), "concatenated into the fragment: {body}");
+    assert!(
+        body.contains("Views::Things") && body.contains("thing"),
+        "the named partial supplies each element: {body}"
     );
 }
 

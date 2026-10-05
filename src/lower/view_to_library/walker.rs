@@ -2,7 +2,7 @@
 //! spinel-shape statement list. Dispatches output-position expressions
 //! to the helper / partial / form-with / form-builder sub-modules.
 
-use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
+use crate::expr::{BlockStyle, Expr, ExprNode, InterpPart, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 
@@ -25,7 +25,7 @@ use super::turbo_drive::emit_turbo_drive_directive;
 use super::predicates::rewrite_predicates;
 use super::{
     accumulator_append_call, accumulator_result_ref, assign_accumulator_string_new, lit_sym,
-    nil_lit, seq, noop_io_append, send, todo_io_append, view_helpers_call, ViewCtx,
+    nil_lit, seq, noop_io_append, send, todo_io_append, var_ref, view_helpers_call, ViewCtx,
 };
 
 /// Walk a compiled-ERB body (`Seq` of `_buf = …` statements + control-
@@ -903,22 +903,25 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 ));
                 return out;
             }
-            // OPTION form: `partial:` (+ optional `locals:`) names the
-            // template. Same resolution a `render partial:` call site
+            // OPTION form: `partial:` (+ optional `locals:` / `collection:`
+            // / `as:`). Same resolution a `render partial:` call site
             // gets, through the same `named_partial_call` — a second
             // partial resolver here would be a second set of rules to
             // keep in step.
             if let (2, None) = (sa.len(), block.as_ref()) {
                 if let ExprNode::Hash { entries, .. } = &*sa[1].node {
-                    // ONLY `partial:` (+ `locals:`). `collection:` means
-                    // render the partial once per element, and lowering
-                    // it as a single render would drop every element but
-                    // the first — silently wrong, where declining is
-                    // merely unsupported. Any other option is unread for
-                    // the same reason.
+                    // `partial:` alone renders once. `collection:` is
+                    // Rails' "once per element" — campfire's
+                    // `accounts/users/index.turbo_stream.erb` writes
+                    // `turbo_stream.replace :next_page_container,
+                    // partial: "…/user", collection: @page.records,
+                    // as: :user`. Treating that as a single render
+                    // would keep only the first element, so the
+                    // collection walks into a capture accumulator and
+                    // the captured String is the fragment.
                     let understood = entries.iter().all(|(k, _)| {
                         matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
-                            if matches!(value.as_str(), "partial" | "locals"))
+                            if matches!(value.as_str(), "partial" | "locals" | "collection" | "as"))
                     });
                     let opt = |name: &str| {
                         entries.iter().find_map(|(k, v)| match &*k.node {
@@ -944,21 +947,43 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                             ),
                             _ => None,
                         });
+                    let collection = opt("collection").map(|c| rewrite_helpers_in_expr(c, ctx));
+                    let as_name = opt("as").and_then(|a| match &*a.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => {
+                            Some(value.as_str().to_string())
+                        }
+                        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+                        _ => None,
+                    });
                     if let (true, Some(partial)) = (understood, partial) {
-                        if let Some(html) = super::partial::named_partial_call(
-                            &partial,
-                            None,
-                            locals.as_deref(),
-                            ctx,
-                        ) {
-                            return vec![accumulator_append_call(
-                                super::helpers::turbo_stream_fragment_call(
-                                    method.as_str(),
-                                    super::helpers::turbo_stream_target(&sa[0], ctx),
-                                    html,
-                                ),
+                        if let Some(coll) = collection {
+                            if let Some(out) = turbo_stream_collection_fragment(
+                                method.as_str(),
+                                &sa[0],
+                                &partial,
+                                coll,
+                                as_name.as_deref(),
+                                locals.as_deref(),
                                 ctx,
-                            )];
+                            ) {
+                                return out;
+                            }
+                        } else if as_name.is_none() {
+                            if let Some(html) = super::partial::named_partial_call(
+                                &partial,
+                                None,
+                                locals.as_deref(),
+                                ctx,
+                            ) {
+                                return vec![accumulator_append_call(
+                                    super::helpers::turbo_stream_fragment_call(
+                                        method.as_str(),
+                                        super::helpers::turbo_stream_target(&sa[0], ctx),
+                                        html,
+                                    ),
+                                    ctx,
+                                )];
+                            }
                         }
                     }
                 }
@@ -974,8 +999,9 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 inner.span,
                 "only the positional `target[, record]` spelling is lowered",
                 format!(
-                    "`turbo_stream.{}` left in source shape — the option form \
-                     (partial:/collection:/locals:) and the block form need the \
+                    "`turbo_stream.{}` left in source shape — an option form \
+                     this pass does not yet lower (unknown keys, a non-literal \
+                     partial, or a collection it could not resolve) needs the \
                      partial machinery a `render` call site gets, so this \
                      template will not render",
                     method.as_str()
@@ -1228,6 +1254,72 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     }
     let escaped = view_helpers_call("html_escape", vec![coerce_to_s(rewritten)]);
     vec![accumulator_append_call(escaped, ctx)]
+}
+
+/// `turbo_stream.replace target, partial: "…", collection: xs, as: :x`.
+///
+/// Rails renders the named partial once per element and concatenates
+/// the markup into the fragment. The same `named_partial_call` a
+/// `render partial:, collection:` site uses supplies each element's
+/// HTML; the capture accumulator is the block-form's `_ts_cap`, so a
+/// nested block-form helper would still collide — no corpus view nests
+/// one inside a collection fragment.
+fn turbo_stream_collection_fragment(
+    action: &str,
+    target: &Expr,
+    partial: &str,
+    collection: Expr,
+    as_name: Option<&str>,
+    locals: Option<&[(Expr, Expr)]>,
+    ctx: &ViewCtx,
+) -> Option<Vec<Expr>> {
+    let base = match partial.rsplit_once('/') {
+        Some((_, name)) => name,
+        None => partial,
+    };
+    let var = Symbol::from(crate::naming::safe_local(
+        as_name.unwrap_or_else(|| base.trim_start_matches('_')),
+    ));
+    let html = super::partial::named_partial_call_with_record(
+        partial,
+        None,
+        locals,
+        Some(var_ref(var.clone())),
+        ctx,
+    )?;
+    let cap = "_ts_cap";
+    let cap_ctx = ViewCtx {
+        accumulator: cap.to_string(),
+        ..ctx.clone()
+    };
+    let each = send(
+        Some(collection),
+        "each",
+        Vec::new(),
+        Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::Lambda {
+                rest_param: None,
+                params: vec![var],
+                block_param: None,
+                body: accumulator_append_call(html, &cap_ctx),
+                block_style: BlockStyle::Brace,
+            },
+        )),
+        false,
+    );
+    Some(vec![
+        assign_accumulator_string_new(cap),
+        each,
+        accumulator_append_call(
+            super::helpers::turbo_stream_fragment_call(
+                action,
+                super::helpers::turbo_stream_target(target, ctx),
+                accumulator_result_ref(cap),
+            ),
+            ctx,
+        ),
+    ])
 }
 
 /// `turbo_frame_tag <ids…>[, opts][ do … end]` → the `<turbo-frame …>`
