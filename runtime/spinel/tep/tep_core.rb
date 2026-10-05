@@ -97,6 +97,142 @@ module Tep
     @max_body_bytes
   end
 
+  # gzip / x-gzip with q>0. `include?("gzip")` would honour gzip;q=0
+  # (RFC 9110 §12.5.3: q=0 means not acceptable) and would match
+  # `gzipfoo`. wrk sends `gzip` or `identity`; this is the protocol.
+  def self.accepts_gzip?(accept)
+    s = accept.downcase
+    n = s.bytesize
+    i = 0
+    while i < n
+      while i < n
+        b = s.getbyte(i)
+        break unless b == 32 || b == 44
+        i += 1
+      end
+      break if i >= n
+      name_end = i
+      while name_end < n
+        b = s.getbyte(name_end)
+        break if b == 32 || b == 44 || b == 59
+        name_end += 1
+      end
+      namelen = name_end - i
+      gzip = (namelen == 4 && s[i, 4] == "gzip") || (namelen == 6 && s[i, 6] == "x-gzip")
+      j = name_end
+      while j < n && s.getbyte(j) != 44
+        j += 1
+      end
+      if gzip
+        q = Tep.encoding_q(s, name_end, j)
+        return true if q > 0
+      end
+      i = j + 1
+    end
+    false
+  end
+
+  # Quality value of one coding, from the ';' after its name to the
+  # comma (or end). Missing q is 1. q=0 / q=0.0 is 0; q=0.8 is 8 tenths
+  # so the caller can treat it as > 0 without Float.
+  def self.encoding_q(s, from, to)
+    j = from
+    while j < to
+      if s.getbyte(j) == 59
+        j += 1
+        while j < to && s.getbyte(j) == 32
+          j += 1
+        end
+        if j + 1 < to && s.getbyte(j) == 113 && s.getbyte(j + 1) == 61
+          j += 2
+          return 0 if Tep.q_is_zero?(s, j, to)
+          return 1
+        end
+      else
+        j += 1
+      end
+    end
+    1
+  end
+
+  def self.q_is_zero?(s, from, to)
+    j = from
+    return true if j >= to
+    while j < to
+      b = s.getbyte(j)
+      break if b == 32 || b == 59
+      if b == 46
+        j += 1
+        next
+      end
+      return false if b < 48 || b > 57
+      return false if b != 48
+      j += 1
+    end
+    true
+  end
+
+  # Gzip of an identity body, keyed by the identity bytes. A campfire
+  # room page is the same HTML for every wrk GET that shares a session;
+  # without this, Zlib.gzip runs on every request and is the measured
+  # cliff (1984 → 694 req/s). Cap is a COUNT so a bound does not need
+  # an LRU touch on the read path. The lock is the fragment-cache one:
+  # a green thread can be descheduled inside Hash#[]=.
+  GZIP_CACHE_MAX = 64
+  GZIP_LOCK = Mutex.new
+  @gzip_bodies = Hash.new("")
+
+  def self.gzip_cached(raw)
+    gz = ""
+    GZIP_LOCK.synchronize do
+      hit = @gzip_bodies[raw]
+      if hit.length > 0
+        gz = hit
+      else
+        if @gzip_bodies.size >= GZIP_CACHE_MAX
+          @gzip_bodies = Hash.new("")
+        end
+        gz = Zlib.gzip(raw)
+        @gzip_bodies[raw] = gz
+      end
+    end
+    gz
+  end
+
+  # Honour Accept-Encoding: gzip the way campfire's `use Rack::Deflater`
+  # does on CRuby. Inline bodies only — sendfile/streaming/websocket stay
+  # as they are. Mutates res.body and stamps Content-Encoding + Vary.
+  def self.maybe_gzip!(req, res)
+    return if res.streaming || res.upgrading_ws
+    return if res.file_path.length > 0
+    # Rack::Deflater skips 1xx / 204 / 304 (no entity body) and HEAD
+    # (Content-Length must match the GET identity body).
+    return if res.status < 200 || res.status == 204 || res.status == 304
+    return if req.verb == "HEAD"
+    return if res.body.bytesize < 64
+    return if res.headers["Content-Encoding"].length > 0
+    accept = req.req_headers["accept-encoding"]
+    return unless Tep.accepts_gzip?(accept)
+    ct = res.headers["Content-Type"]
+    return if ct.start_with?("image/") || ct.start_with?("audio/") ||
+              ct.start_with?("video/") || ct.start_with?("font/") ||
+              ct.start_with?("application/octet-stream") ||
+              ct.start_with?("application/zip") ||
+              ct.start_with?("application/gzip") ||
+              ct.start_with?("application/wasm")
+    # DEFAULT_COMPRESSION matches Rack::Deflater. The cache is what
+    # recovers the uncompressed cliff: gzip itself is the cost, not
+    # Huffman tables (level 1 was measured, same ~700 req/s uncached).
+    res.body = Tep.gzip_cached(res.body)
+    res.headers["Content-Encoding"] = "gzip"
+    vary = res.headers["Vary"]
+    if vary.length == 0
+      res.headers["Vary"] = "Accept-Encoding"
+    elsif !vary.downcase.include?("accept-encoding")
+      res.headers["Vary"] = vary + ", Accept-Encoding"
+    end
+  end
+
   # Holder for a Fiber so the cooperative scheduler (Tep::Scheduler, the
   # TEP_SERVER=fiber measurement lane) can keep them in a typed array.
   # Spinel's `[Fiber.new { ... }]` array literal infers IntArray (Fiber is

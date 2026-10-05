@@ -854,6 +854,62 @@ puts "ok"
         .assert_passes();
 }
 
+/// `Relation#last_n` is Rails' SQL tail (`ORDER BY … DESC LIMIT n`, then
+/// reverse), not `to_a.last(n)` over the whole history. Campfire's
+/// `ordered.last(PAGE_SIZE)` is every room page.
+#[test]
+fn relation_last_n_limits_in_sql() {
+    emit_and_run::real_blog()
+        .run_ruby(
+            r##"
+seen = []
+orig = Db.method(:prepare)
+Db.define_singleton_method(:prepare) do |sql|
+  seen << sql
+  orig.call(sql)
+end
+
+Article.create!(title: "tail-a", body: "long enough body")
+Article.create!(title: "tail-b", body: "long enough body")
+Article.create!(title: "tail-c", body: "long enough body")
+Article.create!(title: "tail-d", body: "long enough body")
+Article.create!(title: "tail-e", body: "long enough body")
+
+rel = ActiveRecord::Relation.new(Article).where("title LIKE 'tail-%'").order(:title)
+prior = rel.to_sql
+seen.clear
+titles = rel.last_n(2).map(&:title)
+raise "tail in relation order: #{titles.inspect}" unless titles == ["tail-d", "tail-e"]
+raise "last_n poisoned the chain: #{rel.to_sql}" unless rel.to_sql == prior
+sql = seen.find { |s| s.include?("FROM articles") && s.include?("LIMIT") }
+raise "last_n did not LIMIT in SQL: #{seen.inspect}" if sql.nil?
+raise "reversed order missing: #{sql}" unless sql.upcase.include?("TITLE DESC")
+raise "LIMIT 2 missing: #{sql}" unless sql.include?("LIMIT 2")
+raise "count poisoned" unless rel.count == 5
+
+raise "bare last" unless rel.last.title == "tail-e"
+raise "last poisoned the chain" unless rel.to_sql == prior
+
+rel.to_a
+seen.clear
+loaded = rel.last_n(2).map(&:title)
+raise "loaded tail: #{loaded.inspect}" unless loaded == ["tail-d", "tail-e"]
+raise "loaded last_n re-queried: #{seen.inspect}" if seen.any? { |s| s.include?("FROM articles") && s.include?("LIMIT") }
+
+off = ActiveRecord::Relation.new(Article).where("title LIKE 'tail-%'").order(:title).offset(1)
+raise "offset tail" unless off.last_n(2).map(&:title) == ["tail-d", "tail-e"]
+
+rel = ActiveRecord::Relation.new(Article)
+raise "one col" unless rel.reverse_order_term("title DESC") == "title ASC"
+raise "hash join" unless rel.reverse_order_term("a ASC, b DESC") == "a DESC, b ASC"
+raise "raw pair" unless rel.reverse_order_term("created_at DESC, id DESC") == "created_at ASC, id ASC"
+raise "bare" unless rel.reverse_order_term("title") == "title DESC"
+puts "ok"
+"##,
+        )
+        .assert_passes();
+}
+
 /// The runtime defines this exception in `active_support_ext.rb`.
 #[test]
 fn framework_exception_resolves_from_real_runtime_source() {
