@@ -121,3 +121,51 @@ end
         "implicit-self AssociationProxy .loaded? must not survive:\n{src}"
     );
 }
+
+#[test]
+fn association_target_collapses_to_reader() {
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "messages", force: :cascade do |t|
+    t.string "body"
+  end
+  create_table "action_text_rich_texts", force: :cascade do |t|
+    t.string "name"
+    t.text "body"
+    t.string "record_type"
+    t.integer "record_id"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+  has_rich_text :body
+
+  def indexed_text_changed?
+    association(:rich_text_body).target&.saved_change_to_body?
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = ruby::emit_lowered_models(&app);
+    let src = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("message.rb"))
+        .map(|f| f.content.as_str())
+        .unwrap_or("");
+    assert!(
+        !src.contains("association(:rich_text_body)"),
+        "association(:rich_text_body).target must not survive emit:\n{src}"
+    );
+    assert!(
+        src.contains("rich_text_body"),
+        "expected collapse onto rich_text_body reader:\n{src}"
+    );
+}

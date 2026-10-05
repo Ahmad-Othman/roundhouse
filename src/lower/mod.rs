@@ -57,6 +57,7 @@ pub mod duration;
 pub mod and_return;
 pub mod case_lambda;
 pub mod first_or_create;
+pub mod default_self_recv;
 mod attr_or_assign;
 mod system_exception;
 mod case_class_narrow;
@@ -475,7 +476,13 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // flatten as has_json: the AssociationProxy Rails returns between
     // those hops does not exist here (has_many readers answer Arrays),
     // and the synthesizer already exposes the flat Bool predicate.
+    // Also `association(:name).target` → `name` (rich_text / reflection).
     ("assoc_loaded", &[]),
+    // Bare sends in parameter defaults → `self.<method>`. Spinel AOT
+    // can otherwise resolve `user` in `badge: user.memberships…` to a
+    // foreign `user` and refuse the C build. No ordering constraint:
+    // touches only default exprs, leaves bodies alone.
+    ("default_self_recv", &[]),
     // Read-only ledger: a `self.update(k: …)` whose `k` no writer backs.
     // Rewrites nothing, so it has no ordering constraint of its own —
     // it just has to see the final tree.
@@ -883,6 +890,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("has_json");
     diags.extend(assoc_loaded::apply_assoc_loaded_lowering(app));
     ran!("assoc_loaded");
+    default_self_recv::apply_default_self_recv(app);
+    ran!("default_self_recv");
     // Read-only ledger, no rewrite — but it must run AFTER
     // `enum_symbols` so a label that pass already translated isn't
     // mistaken for anything, and after every pass that could introduce
