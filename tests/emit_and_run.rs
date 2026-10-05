@@ -362,9 +362,10 @@ end
 /// joined with `&`, and the query goes ahead of a fragment. The last two
 /// diverge from Rails on purpose, since Rails builds `/articles?sort=new?page=2`
 /// and `/articles#top?page=2` (see `synthesize_redirect_controller`).
-/// A `%{id}` holding an encoded `#` or `?` stays in the path, in both
-/// redirect forms: the same location Rails builds by decoding the capture
-/// and re-escaping it.
+/// A `%{id}` is decoded by the router and path-escaped again, in both
+/// redirect forms, as Rails does: an encoded `#` or `?` stays in the
+/// path, `%25` survives, and a non-ASCII or control sequence the router
+/// leaves encoded is not escaped twice. Each expectation is Rails 8.1.4's.
 /// Jumpstart Pro routes its Devise-era `/users/sign_in` this way.
 #[test]
 fn a_path_option_redirect_keeps_the_request_query() {
@@ -398,11 +399,62 @@ class PathRedirectsControllerTest < ActionDispatch::IntegrationTest
     assert_redirected_to "/articles/a%23top?page=2"
     get "/legacy/a%20b%3Fc"
     assert_redirected_to "/articles/a%20b%3Fc"
+    get "/old/jos%C3%A9"
+    assert_redirected_to "/articles/jos%C3%A9"
+    get "/old/100%25"
+    assert_redirected_to "/articles/100%25"
+    get "/legacy/a%2Fb%7e"
+    assert_redirected_to "/articles/a/b~"
+    get "/old/x%0Ay"
+    assert_redirected_to "/articles/x%0Ay"
   end
 end
 "#,
         )
         .run_test("test/controllers/path_redirects_controller_test.rb")
+        .assert_passes();
+}
+
+/// A path parameter is percent-decoded the way Rails' router decodes it
+/// (`CGI.unescapeURIComponent`): `%20` is a space, `%2F`/`%2f` a slash
+/// inside the one segment, `%25` a percent, and a `+` stays a `+`. A
+/// glob capture is decoded too. Every expectation is what Rails 8.1.4
+/// answers for the same request.
+#[test]
+fn a_path_parameter_is_percent_decoded() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/echo/:id\", to: \"echoes#show\"\n  get \"/files/*rest\", to: \"echoes#glob\"\n",
+        )
+        .write(
+            "app/controllers/echoes_controller.rb",
+            "class EchoesController < ApplicationController\n  def show\n    render plain: params[:id]\n  end\n\n  def glob\n    render plain: params[:rest]\n  end\nend\n",
+        )
+        .write(
+            "test/controllers/echoes_controller_test.rb",
+            r#"require "test_helper"
+
+class EchoesControllerTest < ActionDispatch::IntegrationTest
+  test "path parameters are percent-decoded" do
+    get "/echo/a%20b+c"
+    assert_equal "a b+c", response.body
+    get "/echo/a%2Fb"
+    assert_equal "a/b", response.body
+    get "/echo/a%2fb%3F%23"
+    assert_equal "a/b?#", response.body
+    get "/echo/100%25"
+    assert_equal "100%", response.body
+    get "/echo/plain"
+    assert_equal "plain", response.body
+    get "/files/a%20b/c%2Fd"
+    assert_equal "a b/c/d", response.body
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/echoes_controller_test.rb")
         .assert_passes();
 }
 

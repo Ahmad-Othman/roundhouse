@@ -264,7 +264,7 @@ module ActionDispatch
         pp = pattern_parts[i]
         ap = path_parts[i]
         if pp.start_with?("*")
-          params[pp[1..]] = glob_rest(path_parts, i)
+          params[pp[1..]] = decode_segment(glob_rest(path_parts, i))
         elsif pp.start_with?(":")
           name = pp[1..]
           # `seg = ap.to_s` (not `digits_only(ap)` directly): some strict
@@ -275,7 +275,7 @@ module ActionDispatch
           if int_constrained(int_params, name) && !digits_only(seg)
             return nil
           end
-          params[name] = ap
+          params[name] = decode_segment(seg)
         elsif pp != ap
           # A literal PREFIX before the `:name` in the same segment —
           # lobsters' `/~:username` and `/@:username`. Rails binds the
@@ -286,11 +286,125 @@ module ActionDispatch
           plen = param_prefix_length(pp)
           return nil if plen <= 0 || ap.length <= plen
           return nil unless ap.start_with?(pp[0, plen].to_s)
-          params[pp[plen + 1, pp.length].to_s] = ap[plen, ap.length].to_s
+          params[pp[plen + 1, pp.length].to_s] = decode_segment(ap[plen, ap.length].to_s)
         end
         i += 1
       end
       params
+    end
+
+    # A captured segment, percent-decoded the way Rails' Journey router
+    # decodes path parameters (`CGI.unescapeURIComponent` when the value
+    # holds a `%`): `/articles/a%20b` is `params[:id] == "a b"`, and a
+    # `+` stays a `+` (form decoding is the query string's, not the
+    # path's). A request path reaches the router still encoded on every
+    # target, so this is the one decode.
+    #
+    # Printable ASCII only (`%20`..`%7E`), through the `printable` lookup
+    # string rather than a byte-to-String conversion, which no strict
+    # target lowers alike. A control byte or a non-ASCII sequence
+    # (`%C3%A9`) stays encoded, as is a `%` not followed by two hex
+    # digits. Its own method, one `while`, for the Elixir lowering.
+    def self.decode_segment(s)
+      return s unless s.include?("%")
+      out = ""
+      i = 0
+      while i < s.length
+        code = escaped_byte(s, i)
+        if printable_byte(code)
+          out = out + printable[code - 32, 1].to_s
+          i += 3
+        else
+          out = out + s[i, 1].to_s
+          i += 1
+        end
+      end
+      out
+    end
+
+    # A decoded capture path-escaped again, for a routing redirect's
+    # `%{name}`: Rails fills it with `Journey::Router::Utils.escape_path`
+    # of the decoded value, so a `#` or `?` in it stays part of the path.
+    # A path keeps its `/`, `:`, `@` and the sub-delims; `path_escape`
+    # escapes the rest. The one `%` left alone opens a sequence
+    # `decode_segment` did not decode (a non-ASCII byte or a control
+    # byte): Rails decoded that and escapes it back to the same `%XX`,
+    # so `/u/jos%C3%A9` still answers `/~jos%C3%A9`, where escaping it
+    # would answer `%25C3%25A9`. Every other `%` is a decoded one, `%25`.
+    # The one place that guess is wrong: a request that encoded such a
+    # sequence on purpose (`%25C3`) decodes to `%C3`, which is left alone
+    # here where Rails writes `%25C3`. That is far rarer than a non-ASCII
+    # name, which escaping every `%` would break.
+    def self.escape_path(s)
+      out = ""
+      i = 0
+      while i < s.length
+        c = s[i, 1].to_s
+        code = escaped_byte(s, i)
+        if code >= 0 && !printable_byte(code)
+          out = out + c
+        else
+          out = out + path_escape(c)
+        end
+        i += 1
+      end
+      out
+    end
+
+    # One character as `escape_path` writes it: Rails' PATH set over
+    # printable ASCII (unreserved, sub-delims, `:`, `@`, `/` pass).
+    def self.path_escape(c)
+      return "%20" if c == " "
+      return "%22" if c == "\""
+      return "%23" if c == "#"
+      return "%25" if c == "%"
+      return "%3C" if c == "<"
+      return "%3E" if c == ">"
+      return "%3F" if c == "?"
+      return "%5B" if c == "["
+      return "%5C" if c == "\\"
+      return "%5D" if c == "]"
+      return "%5E" if c == "^"
+      return "%60" if c == "`"
+      return "%7B" if c == "{"
+      return "%7C" if c == "|"
+      return "%7D" if c == "}"
+      c
+    end
+
+    # Printable ASCII, 0x20 to 0x7E in order: the character for byte
+    # `code` is `printable[code - 32, 1]`.
+    def self.printable
+      " !\"\#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    end
+
+    # The byte a `%XX` at `i` spells, or -1 when there is none there.
+    def self.escaped_byte(s, i)
+      return -1 unless s[i, 1].to_s == "%" && i + 2 < s.length
+      hi = hex_value(s[i + 1, 1].to_s)
+      lo = hex_value(s[i + 2, 1].to_s)
+      return -1 if hi < 0 || lo < 0
+      hi * 16 + lo
+    end
+
+    # Whether `decode_segment` decodes byte `code`: printable ASCII.
+    def self.printable_byte(code)
+      code >= 32 && code < 127
+    end
+
+    # One hex digit's value, either case, or -1. A fan-out of `==`
+    # rather than an index into a literal, for the reason `digits_only`
+    # gives.
+    def self.hex_value(c)
+      return c.to_i if digits_only(c)
+      d = c.downcase
+      return 10 if d == "a"
+      return 11 if d == "b"
+      return 12 if d == "c"
+      return 13 if d == "d"
+      return 14 if d == "e"
+      return 15 if d == "f"
+      -1
     end
 
     # The path from segment `from` on, slash-joined: a `*glob`'s value.

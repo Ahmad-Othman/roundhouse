@@ -215,7 +215,10 @@ fn a_path_placeholder_is_filled_from_the_matched_params() {
     let emitted = redirect_controller(&app);
     assert!(!emitted.contains("%{username}"), "got:\n{emitted}");
     assert!(
-        emitted.contains("redirect_to(\"/~#{@params[\"username\"]}\", status: :moved_permanently)"),
+        // Path-escaped as Rails does: the router decodes the capture.
+        emitted.contains(
+            "redirect_to(\"/~#{ActionDispatch::Router.escape_path(@params[\"username\"].to_s)}\", status: :moved_permanently)"
+        ),
         "got:\n{emitted}"
     );
 }

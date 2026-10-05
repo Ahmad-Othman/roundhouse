@@ -98,5 +98,18 @@ module ActionDispatch
     ) -> bool
 
     def self.digits_only: (String s) -> bool
+
+    # A captured segment, percent-decoded over printable ASCII the way
+    # Rails decodes path parameters; see the .rb.
+    def self.decode_segment: (String s) -> String
+    def self.printable: () -> String
+    def self.escaped_byte: (String s, Integer i) -> Integer
+    def self.printable_byte: (Integer code) -> bool
+    def self.hex_value: (String c) -> Integer
+
+    # A decoded capture path-escaped again, as Rails fills a routing
+    # redirect's `%{name}`; see the .rb.
+    def self.escape_path: (String s) -> String
+    def self.path_escape: (String c) -> String
   end
 end

@@ -136,8 +136,10 @@ async def _dispatch_request(request: web.Request) -> web.StreamResponse:
     method = request.method.upper()
     # The raw path, extension included — the transpiled Router.match
     # handles Rails' `(.:format)` suffix itself and reports the
-    # format on its MatchResult.
-    path = request.rel_url.path
+    # format on its MatchResult. `raw_path`, still percent-encoded:
+    # the router decodes each capture (`Router.decode_segment`), as
+    # Rails' does, and `request.path` in Rails is the encoded form too.
+    path = request.rel_url.raw_path
 
     body_text, body_params = await _read_form_body(request)
 

@@ -54,7 +54,12 @@ public static class Server
         ViewHelpers.ResetSlotsBang();
 
         var reqMethod = ctx.Request.Method;
-        var path = ctx.Request.Path.Value ?? "/";
+        // The raw request target, still percent-encoded, minus its query:
+        // the shared router decodes each capture (`Router.decode_segment`),
+        // as Rails' does. `Request.Path` is ASP.NET's decoded form (all but
+        // `%2F`), which the router would decode a second time.
+        var rawTarget = ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpRequestFeature>()?.RawTarget;
+        var path = string.IsNullOrEmpty(rawTarget) ? (ctx.Request.Path.Value ?? "/") : rawTarget.Split('?')[0];
 
         // Action Cable WebSocket — upgrade /cable and hand the socket to the
         // Cable handler, negotiating the actioncable-v1-json subprotocol Turbo
