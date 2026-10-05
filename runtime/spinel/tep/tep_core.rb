@@ -103,6 +103,10 @@ module Tep
   def self.maybe_gzip!(req, res)
     return if res.streaming || res.upgrading_ws
     return if res.file_path.length > 0
+    # Rack::Deflater skips 1xx / 204 / 304 (no entity body) and HEAD
+    # (Content-Length must match the GET identity body).
+    return if res.status < 200 || res.status == 204 || res.status == 304
+    return if req.verb == "HEAD"
     return if res.body.bytesize < 64
     return if res.headers["Content-Encoding"].length > 0
     accept = req.req_headers["accept-encoding"]

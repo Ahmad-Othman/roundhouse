@@ -36,7 +36,10 @@ init = function(_args)
   end
   -- wrk gives each thread its own Lua state; mix time with the table
   -- pointer so two threads starting in the same second do not collide.
-  seed = (os.time() % 100000) * 1000 + (tonumber(tostring({}):sub(8), 16) or 0) % 1000
+  -- Strip `0x` before tonumber(..., 16): LuaJIT rejects the prefix and
+  -- every thread would then share seed 0 in that second.
+  local addr = tostring({}):match("0x(%x+)") or tostring({}):match("(%x+)$") or "0"
+  seed = (os.time() % 100000) * 1000 + (tonumber(addr, 16) or 0) % 1000
   math.randomseed(seed)
 end
 
