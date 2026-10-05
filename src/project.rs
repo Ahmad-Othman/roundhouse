@@ -5617,6 +5617,46 @@ fn with_bundled_requires(mut files: Vec<(String, String)>) -> Vec<(String, Strin
     files
 }
 
+/// The libraries in `BUNDLED` that are bundled gems, not default gems,
+/// as of Ruby 3.4. Under bundler a bundled gem is not on the load path
+/// unless the Gemfile names it.
+const BUNDLED_GEMS: [&str; 3] = ["base64", "bigdecimal", "csv"];
+
+/// Names in the Gemfile each bundled gem that the tree requires.
+/// Without the line, `bundle exec` stops at the require with "cannot
+/// load such file -- csv". The scaffold Gemfile names the gems that the
+/// runtime requires, so in practice only an app that names `CSV` gets
+/// a line.
+///
+/// The last step of `write_bundled_requires`: the emit drops the app's
+/// own requires, and that pass writes them back from `BUNDLED`, so the
+/// requires are final only there. Every file, not only app/: a test
+/// that names `CSV` runs under the same bundle.
+fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
+    let Some(gemfile_at) = files.iter().position(|(p, _)| p == "Gemfile") else {
+        return;
+    };
+    let missing: Vec<&str> = BUNDLED_GEMS
+        .into_iter()
+        .filter(|gem| !files[gemfile_at].1.contains(&format!("gem {gem:?}")))
+        .filter(|gem| {
+            let require_line = format!("require {gem:?}");
+            files.iter().any(|(p, c)| p.ends_with(".rb") && requires_feature(c, &require_line))
+        })
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let gemfile = &mut files[gemfile_at].1;
+    gemfile.push_str(
+        "\n# Bundled gems that the tree requires. Declared by\n\
+         # `project.rs::apply_bundled_gem_wiring`.\n",
+    );
+    for gem in missing {
+        gemfile.push_str(&format!("gem {gem:?}\n"));
+    }
+}
+
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
@@ -5750,6 +5790,7 @@ fn write_bundled_requires(files: &mut [(String, String)]) {
     for (i, require_line) in bundled_require_gaps(files) {
         files[i].1.insert_str(0, &format!("{require_line}\n"));
     }
+    apply_bundled_gem_wiring(files);
 }
 
 /// The emitted call every declared variant lowers to (`lower::attached
