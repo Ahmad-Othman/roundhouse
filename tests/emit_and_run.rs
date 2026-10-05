@@ -4457,3 +4457,6 @@ end
         .run_test("test/models/article_password_writer_test.rb")
         .assert_passes();
 }
+
+#[path = "emit_and_run/relation_finders.rs"]
+mod relation_finders;
