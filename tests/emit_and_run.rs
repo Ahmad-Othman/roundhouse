@@ -5365,3 +5365,48 @@ end
         )
         .assert_passes();
 }
+
+/// A Slim view is ingested rather than skipped, so `check` going quiet on
+/// it is a claim the emitted page renders. Swap the blog's index for a
+/// Slim twin that exercises the grammar (shortcuts merging with a
+/// `class=`, Ruby and boolean attributes, `tag: child` nesting, output
+/// and code lines with a block, `|` text, comments) and assert on the
+/// rendered markup, not just the status.
+#[test]
+fn a_slim_view_renders() {
+    let slim = r#"= turbo_stream_from "articles"
+- content_for :title, "Articles"
+- turbo_exempts_page_from_cache
+
+/ never rendered
+.w-full
+  - if notice.present?
+    p.py-2#notice = notice
+  .flex.justify-between
+    h1.font-bold.text-4xl Articles
+    = link_to "New article", new_article_path, class: "rounded-md"
+  #articles.min-w-full class="space-y-5" data-count=@articles.size
+    - if @articles.any?
+      = render @articles
+    - else
+      p.text-center No articles found.
+  ul.slim-list(data-kind="list" hidden)
+    - @articles.each do |article|
+      li: a href=article_path(article) = article.title
+  p.slim-text
+    | plain text
+"#;
+    emit_and_run::real_blog()
+        .remove("app/views/articles/index.html.erb")
+        .write("app/views/articles/index.html.slim", slim)
+        .edit(
+            "test/controllers/articles_controller_test.rb",
+            "    assert_select \"h1\", \"Articles\"\n",
+            "    assert_select \"h1.font-bold\", \"Articles\"\n    \
+             assert_select \"#articles.min-w-full.space-y-5[data-count]\"\n    \
+             assert_select \"ul.slim-list[data-kind=list][hidden] li a\", minimum: 1\n    \
+             assert_select \"p.slim-text\", \"plain text\"\n",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}

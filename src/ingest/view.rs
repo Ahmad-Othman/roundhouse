@@ -45,6 +45,7 @@ pub type CompileFn = fn(&str) -> (String, Vec<TemplateSegment>);
 pub enum ViewEngine {
     Erb,
     Haml,
+    Slim,
     /// `.builder` — Ruby `xml.*` markup (`crate::builder`).
     Builder,
     /// Rails' `Raw` handler: the file's bytes, verbatim. It is the
@@ -62,6 +63,7 @@ impl ViewEngine {
         match ext {
             "erb" => Some(ViewEngine::Erb),
             "haml" => Some(ViewEngine::Haml),
+            "slim" => Some(ViewEngine::Slim),
             "builder" => Some(ViewEngine::Builder),
             "raw" => Some(ViewEngine::Raw),
             _ => None,
@@ -73,6 +75,7 @@ impl ViewEngine {
         match self {
             ViewEngine::Erb => erb::compile_erb_mapped,
             ViewEngine::Haml => haml::compile_haml_mapped,
+            ViewEngine::Slim => crate::slim::compile_slim_mapped,
             ViewEngine::Builder => crate::builder::compile_builder_mapped,
             ViewEngine::Raw => erb::compile_raw_mapped,
         }

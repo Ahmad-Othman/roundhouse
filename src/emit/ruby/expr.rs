@@ -1160,9 +1160,13 @@ pub(super) fn emit_send_base(
             // Equality/comparison operators are non-associative in Ruby:
             // `a <=> b == 0` does not parse, so an equal-precedence left
             // operand needs parens too.
-            let lhs = if binop_of(r).is_some_and(|o| {
-                binop_prec(o) < prec || (prec == 30 && binop_prec(o) == 30)
-            }) {
+            // A trailing-modifier operand (`(x rescue nil) == true`) would
+            // swallow the operator.
+            let lhs = if renders_as_trailing_modifier(r)
+                || binop_of(r).is_some_and(|o| {
+                    binop_prec(o) < prec || (prec == 30 && binop_prec(o) == 30)
+                })
+            {
                 format!("({})", emit_expr(r))
             } else {
                 emit_expr(r)
@@ -1184,7 +1188,7 @@ pub(super) fn emit_send_base(
         (None, _) => {
             if args_s.is_empty() {
                 method.to_string()
-            } else if parenthesized {
+            } else if parenthesized || first_arg_opens_block(&args_s) {
                 format!("{method}({})", args_s.join(", "))
             } else {
                 format!("{method} {}", args_s.join(", "))
@@ -1195,13 +1199,21 @@ pub(super) fn emit_send_base(
             let recv_s = if recv_needs_parens(r) { format!("({recv_s})") } else { recv_s };
             if args_s.is_empty() {
                 format!("{recv_s}.{method}")
-            } else if parenthesized {
+            } else if parenthesized || first_arg_opens_block(&args_s) {
                 format!("{recv_s}.{method}({})", args_s.join(", "))
             } else {
                 format!("{recv_s}.{method} {}", args_s.join(", "))
             }
         }
     }
+}
+
+/// A leading `if`/`case`/… argument must be parenthesized: paren-less,
+/// `j if c … end` reads `if` as a statement modifier of the call.
+fn first_arg_opens_block(args_s: &[String]) -> bool {
+    args_s.first().is_some_and(|a| {
+        ["if ", "unless ", "case ", "while ", "until ", "begin"].iter().any(|k| a.starts_with(k))
+    })
 }
 
 /// A read of the local `name`. A reserved-word local (a keyword param
@@ -1659,6 +1671,41 @@ mod tests {
 
     fn lit_str(s: &str) -> Expr {
         Expr::new(Span::default(), ExprNode::Lit { value: Literal::Str { value: s.to_string() } })
+    }
+
+    #[test]
+    fn a_rescue_modifier_operand_keeps_its_parens() {
+        let rescued = Expr::new(
+            Span::default(),
+            ExprNode::RescueModifier {
+                expr: send(None, "a", vec![]),
+                fallback: lit_sym("n"),
+            },
+        );
+        let eq = send(Some(rescued.clone()), "==", vec![lit_sym("n")]);
+        assert_eq!(emit_expr(&eq), "(a rescue :n) == :n");
+        let eq = send(Some(lit_sym("n")), "==", vec![rescued]);
+        assert_eq!(emit_expr(&eq), ":n == (a rescue :n)");
+    }
+
+    #[test]
+    fn a_command_call_with_an_if_argument_is_parenthesized() {
+        let cond = send(None, "c", vec![]);
+        let branch = Expr::new(
+            Span::default(),
+            ExprNode::If { cond, then_branch: lit_str("m"), else_branch: lit_str("f") },
+        );
+        let call = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("j"),
+                args: vec![branch],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        assert!(emit_expr(&call).starts_with("j(if "), "got {}", emit_expr(&call));
     }
 
     fn self_ref() -> Expr {
