@@ -508,6 +508,43 @@ end
         .assert_passes();
 }
 
+/// `offset(n).exists?` asks for a row past the first n (campfire's
+/// `paged?`, basecamp/once-campfire#297) where a COUNT ignored the offset;
+/// and the caching knobs campfire's messages caching test turns
+/// (`Rails.cache =`, `ActiveSupport::Cache::MemoryStore.new`,
+/// `ActionView::PartialRenderer.collection_cache`, a controller's
+/// `cache_store` and `perform_caching`).
+#[test]
+fn offset_exists_and_caching_knobs_run() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/article_paging_test.rb",
+            r#"require "test_helper"
+
+class ArticlePagingTest < ActiveSupport::TestCase
+  test "a row past the offset, and the caching knobs" do
+    Article.delete_all
+    2.times { |i| Article.create!(title: "Paged #{i}", body: "Body text here") }
+    assert Article.offset(1).exists?
+    assert_not Article.offset(2).exists?
+
+    store = ActiveSupport::Cache::MemoryStore.new
+    Rails.cache = store
+    ActionView::PartialRenderer.collection_cache = Rails.cache
+    ArticlesController.cache_store = Rails.cache
+    ArticlesController.perform_caching = true
+    assert_same store, Rails.cache
+    assert_same store, ActionView::PartialRenderer.collection_cache
+    assert_same store, ArticlesController.cache_store
+    assert ArticlesController.perform_caching
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_paging_test.rb")
+        .assert_passes();
+}
+
 #[test]
 fn the_unedited_blog_runs() {
     emit_and_run::real_blog()

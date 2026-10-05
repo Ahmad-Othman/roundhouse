@@ -961,7 +961,12 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // Connection#select_rows, a block over the adapter's untyped rows.
     // What it buys: campfire's tests reading an EXPLAIN QUERY PLAN with
     // `select_rows(…).map(&:last)`.
-    const CEILING: usize = 1341;
+    // 2026-10-05 1341 -> 1350, +9, MEASURED (relation.rb 865 -> 874):
+    // Relation#offset_row_exists?, which this probe sees through the same
+    // unresolved self-sends and `@limit` reads every terminal pays. What
+    // it buys: `offset(n).exists?` asks for a row past n, campfire's
+    // `paged?` (basecamp/once-campfire#297), where a COUNT ignored it.
+    const CEILING: usize = 1350;
 
     assert!(
         all_untyped.len() <= CEILING,

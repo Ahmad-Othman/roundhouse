@@ -800,6 +800,62 @@ end
 class TestSkipped < Exception
 end
 
+# ---- Caching knobs a test turns ---------------------------------------
+#
+# campfire's messages caching test (basecamp/once-campfire#292) swaps in
+# a memory store and turns caching on around one block, through Rails'
+# four knobs, then asserts a cached page runs no presentation queries.
+# The runtime fragment-caches message partials in its own store; these
+# give the test the settings it reads and restores. `MemoryStore` is the
+# store class `Rails.cache` already answers with on this tree.
+module Rails
+  def self.cache=(store)
+    @cache_store = store
+  end
+end
+
+module ActiveSupport
+  module Cache
+    class MemoryStore
+      def self.new
+        Rails.cache.class.new
+      end
+    end
+  end
+end
+
+module ActionView
+  class PartialRenderer
+    def self.collection_cache
+      @collection_cache
+    end
+
+    def self.collection_cache=(store)
+      @collection_cache = store
+    end
+  end
+end
+
+module ActionController
+  class Base
+    def self.cache_store
+      @cache_store
+    end
+
+    def self.cache_store=(store)
+      @cache_store = store
+    end
+
+    def self.perform_caching
+      @perform_caching
+    end
+
+    def self.perform_caching=(value)
+      @perform_caching = value
+    end
+  end
+end
+
 # ---- Query assertions ------------------------------------------------
 #
 # Rails' `ActiveSupport::Notifications.subscribed(callback,

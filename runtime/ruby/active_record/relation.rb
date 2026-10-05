@@ -1224,6 +1224,7 @@ module ActiveRecord
     # An `Integer?` param narrows by early return, not by a guard —
     # rust2 does not narrow an `Option` across `unless x.nil?`.
     def exists?(id = nil)
+      return offset_row_exists? if id.nil? && !@offset.nil?
       return count > 0 if id.nil?
       # Popped for the same reason `find` and `find_by` pop: a terminal
       # that answered a question must not narrow the relation it was
@@ -1232,6 +1233,18 @@ module ActiveRecord
       found = count > 0
       @wheres.pop
       found
+    end
+
+    # `offset(n).exists?` — whether a row lies past the first n, which
+    # is campfire's `paged?` (basecamp/once-campfire#297). A COUNT ignores
+    # the offset and answered whether the room had any messages at all;
+    # Rails asks for one row past it, `SELECT 1 … LIMIT 1 OFFSET n`.
+    def offset_row_exists?
+      prior = @limit
+      @limit = 1
+      sql = select_sql_with("1 AS one")
+      @limit = prior
+      ActiveRecord.adapter.select_rows(sql).length > 0
     end
 
     def length
