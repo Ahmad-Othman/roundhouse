@@ -966,7 +966,28 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // unresolved self-sends and `@limit` reads every terminal pays. What
     // it buys: `offset(n).exists?` asks for a row past n, campfire's
     // `paged?` (basecamp/once-campfire#297), where a COUNT ignored it.
-    const CEILING: usize = 1350;
+    // 2026-10-05 1350 -> 1380, +30, MEASURED (relation.rb 874 -> 904):
+    // `exists_sql` / `probe_existence` (cardinality without COUNT),
+    // `nil_primary_key_lookup?` (find_by id: nil short-circuit), the
+    // size / one? / many? / last_page? paths that share them, and
+    // `find_each`'s duplicated zero-copy loop. Same unresolved
+    // self-send / `@limit` residual every terminal pays.
+    // 2026-10-05 1380 -> 1386, +6, MEASURED (relation.rb 904 -> 910):
+    // limited `size` counts a `SELECT 1` subquery (orders cleared for
+    // the inner select), and `exists_sql` projects `DISTINCT pk` so
+    // `distinct.many?`/`one?` see separate rows. The find_by(id: nil)
+    // short-circuit that this ceiling once paid for is gone; the net
+    // still rises by six unresolved self-send / `@orders` sites.
+    // 2026-10-05 1386 -> 1395, +9, MEASURED (relation.rb / base.rb):
+    // Relation#more_than? (COUNT>n as LIMIT 1 OFFSET n), loaded_records
+    // shared by each/find_each, Base.any?/none? via exists?. Dropped
+    // offset_row_exists?. Residual is the same unresolved self-send /
+    // `@joins` / `@wheres` every SQL composer pays.
+    // 2026-10-05 1395 -> 1400, +5, MEASURED: Base.any?/none? restored
+    // to COUNT for strict targets; Relation.exists? forms moved to
+    // connection.rb reopen. last_page? requires non-empty short page.
+    // This probe sees the connection reopen's new self-sends.
+    const CEILING: usize = 1400;
 
     assert!(
         all_untyped.len() <= CEILING,

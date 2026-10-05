@@ -1345,6 +1345,41 @@ puts "ok"
         .assert_passes();
 }
 
+/// `rel.more_than?(n)` is `SELECT 1 LIMIT 1 OFFSET n` with the same
+/// FROM/JOIN/WHERE as COUNT, and the relation is not mutated. Campfire's
+/// `Message.paged?` is `count > PAGE_SIZE` rewritten to this method.
+#[test]
+fn relation_more_than_probes_offset_without_count() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/article_more_than_test.rb",
+            r#"require "test_helper"
+
+class ArticleMoreThanTest < ActiveSupport::TestCase
+  test "more_than? offsets without COUNT or mutating the relation" do
+    Article.delete_all
+    3.times { |i| Article.create!(title: "more-#{i}", body: "Body text here") }
+    rel = Article.where("title LIKE 'more-%'")
+    prior = rel.to_sql
+    statements = []
+    callback = ->(*, payload) { statements << payload[:sql] }
+    ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+      assert rel.more_than?(2)
+      assert_not rel.more_than?(3)
+    end
+    assert_equal prior, rel.to_sql
+    sql = statements.find { |s| s.include?("OFFSET 2") }
+    assert sql, statements.inspect
+    assert_no_match(/COUNT/i, sql)
+    assert_match(/LIMIT 1/, sql)
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_more_than_test.rb")
+        .assert_passes();
+}
+
 /// The runtime defines this exception in `active_support_ext.rb`.
 #[test]
 fn framework_exception_resolves_from_real_runtime_source() {

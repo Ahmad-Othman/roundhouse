@@ -1566,9 +1566,63 @@ fn every_runtime_method_body_concretely_typed() {
     // unread notice, encoded once and broadcast `coder: nil`
     // (basecamp/once-campfire#292), and #296's tests, which post first
     // and perform the held fanout job after.
-    const CEILING: usize = 543;
+    //
+    // 543 -> 571, +28 MEASURED (relation.rb): `exists_sql` /
+    // `probe_existence` / `nil_primary_key_lookup?`, plus `size` /
+    // `one?` / `many?` / `empty?` / `any?` / `last_page?` routing through
+    // them, and `find_each`'s duplicated zero-copy loop (same residual
+    // as `each`). What it bought: room-page cardinality without
+    // COUNT(*) scans, and find_messages' nil message_id probe without
+    // `WHERE id IS NULL LIMIT 1`.
+    //
+    // 571 -> 560, -11 MEASURED (relation.rb / base.rb): more_than?,
+    // loaded_records, Base.any? via exists?; offset_row_exists? gone.
+    // Net drop because each/find_each share one load helper.
+    //
+    // 560 -> 562, +2 MEASURED: Base.any?/none? stay on COUNT (strict
+    // targets have no Relation); the SELECT-1 forms live only in the
+    // ruby-family connection.rb reopen. last_page? short-circuit
+    // requires a non-empty short page. Earlier claim of 521 was a
+    // mis-measure — the reopen still pays Relation.new typing sites
+    // this probe counts, so the residual landed at 562.
+    const CEILING: usize = 562;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
+    );
+}
+
+#[test]
+fn empty_html_opts_emits_string_keyed_maps_on_csharp_and_kotlin() {
+    let src = include_str!("../runtime/ruby/action_view/view_helpers.rb");
+    let consts = roundhouse::runtime_src::parse_module_constant_exprs(src).unwrap();
+    let empty = consts
+        .iter()
+        .find(|(n, _)| n.as_str() == "EMPTY_HTML_OPTS")
+        .expect("EMPTY_HTML_OPTS");
+    let cs = roundhouse::emit::csharp::emit_module_constant(empty.0.as_str(), &empty.1);
+    assert!(
+        cs.contains("Dictionary<string, object?> EMPTY_HTML_OPTS"),
+        "empty frozen opts constant must not degrade to object?: {cs}"
+    );
+    let kt = roundhouse::emit::kotlin::emit_constant_for_runtime(&empty.1);
+    assert_eq!(kt, "mutableMapOf<String, Any?>()");
+
+    // Explicit `{}` typed Hash[untyped, untyped] must stay String-keyed.
+    use roundhouse::expr::{Expr, ExprNode};
+    use roundhouse::span::Span;
+    use roundhouse::ty::Ty;
+    let mut arg = Expr::new(
+        Span::synthetic(),
+        ExprNode::Hash { entries: vec![], kwargs: false },
+    );
+    arg.ty = Some(Ty::Hash {
+        key: Box::new(Ty::Untyped),
+        value: Box::new(Ty::Untyped),
+    });
+    let emitted = roundhouse::emit::kotlin::emit_expr_for_runtime(&arg);
+    assert_eq!(
+        emitted, "mutableMapOf<String, Any?>()",
+        "empty untyped hash arg must pin String keys for Kotlin invariance"
     );
 }
