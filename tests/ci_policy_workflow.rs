@@ -5,14 +5,17 @@ fn unit_batches_all_targets_without_reducing_coverage() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let unit = &ci["jobs"]["unit"];
-    assert!(unit.get("if").is_none());
+    assert_eq!(
+        unit["if"].as_str(),
+        Some("${{ contains(fromJSON(needs.plan.outputs.jobs), 'unit') && needs.generate-fixture.result == 'success' }}")
+    );
     assert!(unit.get("continue-on-error").is_none());
     assert_eq!(unit["runs-on"].as_str(), Some("ubuntu-latest"));
     assert_eq!(unit["strategy"]["fail-fast"].as_bool(), Some(false));
-    assert_eq!(unit["strategy"]["max-parallel"].as_u64(), Some(3));
+    assert_eq!(unit["strategy"]["max-parallel"].as_u64(), Some(4));
     assert_eq!(
         unit["strategy"]["matrix"]["shard"],
-        serde_yaml_ng::from_str::<serde_yaml_ng::Value>("[0, 1, 2]").unwrap()
+        serde_yaml_ng::from_str::<serde_yaml_ng::Value>("[0, 1, 2, 3]").unwrap()
     );
     assert!(
         unit.get("outputs").is_none(),
@@ -112,7 +115,18 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
     let jobs = &ci["jobs"];
-    assert_eq!(jobs["unit"]["needs"].as_str(), Some("generate-fixture"));
+    assert_eq!(
+        jobs["unit"]["needs"],
+        serde_yaml_ng::from_str::<serde_yaml_ng::Value>("[generate-fixture, plan]").unwrap()
+    );
+    assert_eq!(
+        jobs["generate-fixture"]["if"].as_str(),
+        Some("${{ contains(fromJSON(needs.plan.outputs.jobs), 'generate-fixture') }}")
+    );
+    assert_eq!(
+        jobs["unit"]["if"].as_str(),
+        Some("${{ contains(fromJSON(needs.plan.outputs.jobs), 'unit') && needs.generate-fixture.result == 'success' }}")
+    );
     for name in [
         "build-roundhouse",
         "build-wasm",
@@ -169,7 +183,12 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
                 "{name}: {required}"
             );
         }
-        assert_eq!(jobs[name]["if"].as_str(), Some("always()"));
+        // Do not use bare always(): cancel-in-progress would still schedule
+        // these gates, leaving them QUEUED and blocking the PR concurrency group.
+        assert_eq!(
+            jobs[name]["if"].as_str(),
+            Some("${{ always() && !cancelled() }}")
+        );
     }
 }
 
@@ -458,7 +477,10 @@ fn compact_and_extra_compare_share_commands_but_not_results() {
         Some("${{ jobs.ci-summary.outputs.complete }}")
     );
     for name in ["compact-required", "ci-summary"] {
-        assert_eq!(jobs[name]["if"].as_str(), Some("always()"));
+        assert_eq!(
+            jobs[name]["if"].as_str(),
+            Some("${{ always() && !cancelled() }}")
+        );
     }
     let gate = jobs["ci-summary"]["needs"].as_sequence().unwrap();
     for name in jobs.as_mapping().unwrap().keys().filter_map(|v| v.as_str()) {
