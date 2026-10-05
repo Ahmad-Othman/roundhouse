@@ -239,6 +239,7 @@ module Tep
       if res.body.length > 0 && !res.headers.key?("Content-Type")
         res.headers["Content-Type"] = "text/html; charset=utf-8"
       end
+      Tep.maybe_gzip!(req, res)
       # BYTES, both times — `length` counts characters and `write_str`
       # stops at the first NUL. See the twin comment in
       # server_scheduled.rb#write_response for the failure this caused.

@@ -317,6 +317,7 @@ module Tep
         if res.file_path.length == 0 && res.body.length > 0 && !res.headers.key?("Content-Type")
           res.headers["Content-Type"] = "text/html; charset=utf-8"
         end
+        Tep.maybe_gzip!(req, res)
         reason = Tep.reason(res.status)
         head = req.http_version + " " + res.status.to_s + " " + reason + "\r\n"
         res.headers.each do |k, v|
