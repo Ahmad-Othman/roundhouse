@@ -287,7 +287,8 @@ class Routing(unittest.TestCase):
         for path in ["runtime/spinel/db.rb", "runtime/spinel/sqlite_adapter.rb"]:
             with self.subTest(path=path):
                 self.assertEqual(
-                    ci.select([path])["spinel_tests"], ["spinel_db_lease", "param_binds"]
+                    ci.select([path])["spinel_tests"],
+                    ["spinel_db_lease", "param_binds", "spinel_stmt_cache_lru"],
                 )
         for path in [
             "README.md",
@@ -340,6 +341,16 @@ class Routing(unittest.TestCase):
                 "rails_compat_vectors_spinel",
             ],
             "tests/spinel_db_lease.rb": ["spinel_db_lease"],
+            "tests/spinel_stmt_cache_lru.rb": ["spinel_stmt_cache_lru"],
+            "runtime/spinel/db.rb": [
+                "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru"
+            ],
+            "runtime/spinel/sqlite_adapter.rb": [
+                "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru"
+            ],
+            "runtime/spinel/active_support_time_parsing.rb": [
+                "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru"
+            ],
             "tests/params_vectors/canon.rb": ["spinel_param_builder"],
             "tests/rails_compat_vectors.rb": ["rails_compat_vectors_spinel"],
         }
@@ -368,7 +379,13 @@ class Routing(unittest.TestCase):
             ["runtime/spinel/web_push_crypto.rb", "runtime/spinel/sqlite_adapter.rb"]
         )
         self.assertEqual(
-            plan["spinel_tests"], ["spinel_web_push_crypto", "spinel_db_lease", "param_binds"]
+            plan["spinel_tests"],
+            [
+                "spinel_web_push_crypto",
+                "spinel_db_lease",
+                "param_binds",
+                "spinel_stmt_cache_lru",
+            ],
         )
 
     def test_wasm_changes_have_no_archive_or_spinel_fanout(self):
