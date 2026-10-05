@@ -16,11 +16,11 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use roundhouse::App;
 use roundhouse::analyze::Analyzer;
 use roundhouse::emit::ruby::{emit_library, emit_spinel};
 use roundhouse::ingest::{ingest_app_from_tree, ingest_library_classes};
 use roundhouse::lower::param_rebind::apply_param_rebind_lowering;
-use roundhouse::App;
 
 fn emit_classes(source: &str) -> String {
     let classes = ingest_library_classes(source.as_bytes(), "test.rb").expect("ingest");
@@ -313,10 +313,9 @@ end
     );
 }
 
-/// An `if` whose body is more than the assign cannot become a join:
-/// later reads would not know which name is live. The inner write still
-/// splits (that line is the AOT clash); the trailing `user` stays the
-/// parameter because the rebind did not dominate the whole method.
+/// An `if` whose body is more than the assign cannot become a join, and
+/// cannot split onto a branch-local either: Ruby's write is visible
+/// after the `unless`, so the whole parameter stays as written.
 #[test]
 fn an_if_with_extra_statements_does_not_become_a_join() {
     let out = emit_classes(
@@ -333,17 +332,66 @@ end
 "#,
     );
     assert!(
-        out.contains("log(__rh_user)")
-            || out.contains("log(__rh_user,")
-            || out.contains("log(__rh_user)"),
-        "the inner write still splits, and reads in that branch follow it:\n{out}"
+        !out.contains("__rh_user"),
+        "a non-dominating write must not invent a fresh local:\n{out}"
     );
-    // A join would be `__rh_user = if …; user; else; users(user); end`
-    // with no `log` beside the assign. The extra statement keeps the
-    // `unless`/`if` as control flow.
     assert!(
         out.contains("unless") || (out.contains("if ") && out.contains("log")),
         "must not flatten a multi-statement unless into a join:\n{out}"
+    );
+}
+
+/// A write inside a loop, rescue, or block is visible afterwards in
+/// Ruby. Same rule as the multi-statement `if`: leave the parameter.
+#[test]
+fn a_write_inside_a_loop_or_rescue_is_left_alone() {
+    let looped = emit_classes(
+        r#"
+class Ids
+  def take(id)
+    while id.is_a?(String)
+      id = id.to_i
+    end
+    id
+  end
+end
+"#,
+    );
+    assert!(
+        !looped.contains("__rh_id"),
+        "a while-body write must not split:\n{looped}"
+    );
+    let rescued = emit_classes(
+        r#"
+class Ids
+  def take(id)
+    begin
+      id = id.to_i
+    rescue
+      id = 0
+    end
+    id
+  end
+end
+"#,
+    );
+    assert!(
+        !rescued.contains("__rh_id"),
+        "a rescue-body write must not split:\n{rescued}"
+    );
+    let blocked = emit_classes(
+        r#"
+class Ids
+  def take(id)
+    [1].each { |n| id = n }
+    id
+  end
+end
+"#,
+    );
+    assert!(
+        !blocked.contains("__rh_id"),
+        "a block-body write must not split:\n{blocked}"
     );
 }
 
@@ -534,7 +582,10 @@ end
             "test/controllers/welcome_controller_test.rb",
             "class WelcomeControllerTest < ActionDispatch::IntegrationTest\n  setup do\n    sign_in :david\n  end\n  test \"ok\" do\n    get \"/\"\n  end\nend\n",
         ),
-        ("test/fixtures/users.yml", "david:\n  email_address: d@example.com\n"),
+        (
+            "test/fixtures/users.yml",
+            "david:\n  email_address: d@example.com\n",
+        ),
     ]);
     assert!(
         out.contains("__rh_user"),

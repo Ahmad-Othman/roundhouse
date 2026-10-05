@@ -364,6 +364,14 @@ fn restore_kwrest_splat(args: &mut Vec<Expr>, params: &[Param]) {
     {
         return;
     }
+    // `def f(*items, **opts); f(payload)` is a valid positional call:
+    // `*items` absorbs the Hash. The same count as `f(**payload)` into
+    // a bare `**opts`, so a rewrite here would move the argument from
+    // `items` onto `opts`. Leave the call when that distinction is
+    // unavailable.
+    if params.iter().any(|p| p.rest && !p.keyword && !p.from_kwrest) {
+        return;
+    }
     let positional = params
         .iter()
         .filter(|p| !p.keyword && !p.rest && !p.from_kwrest)

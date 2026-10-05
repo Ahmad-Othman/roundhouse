@@ -293,6 +293,17 @@ fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
             }
         }
         Ty::Union { variants } => {
+            // `String | Content` used to fall through to Runtime, and
+            // `compact_blank` then rejected through `ActiveSupport.blank?`,
+            // which does not call `Content#blank?`. Any arm that owns the
+            // predicate keeps the dynamic path, including a nilable
+            // `Content | Nil`.
+            if variants.iter().any(|v| {
+                !matches!(v, Ty::Nil)
+                    && matches!(classify(Some(v), defs), OwnDispatch | Skip(_))
+            }) {
+                return Skip("union includes a class with its own predicate");
+            }
             let has_nil = variants.iter().any(|v| matches!(v, Ty::Nil));
             let non_nil: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
             if !has_nil || non_nil.len() != 1 {
@@ -306,11 +317,8 @@ fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
                 // stay correct.
                 BoolLike => BoolLike,
                 AlwaysNil => AlwaysNil,
-                // The app's own predicate must keep winning; the
-                // runtime helper knows nothing about it.
-                OwnDispatch => Skip("nilable receiver of a class with its own predicate"),
                 Runtime => Runtime,
-                other @ Skip(_) => other,
+                OwnDispatch | Skip(_) => unreachable!("own-predicate unions returned above"),
             }
         }
         Ty::Untyped | Ty::Var { .. } => Runtime,

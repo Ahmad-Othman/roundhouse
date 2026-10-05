@@ -2,7 +2,7 @@
 //! spinel-shape statement list. Dispatches output-position expressions
 //! to the helper / partial / form-with / form-builder sub-modules.
 
-use crate::expr::{BlockStyle, Expr, ExprNode, InterpPart, LValue, Literal};
+use crate::expr::{BlockStyle, BoolOpKind, BoolOpSurface, Expr, ExprNode, InterpPart, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 
@@ -937,25 +937,38 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                         ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
                         _ => None,
                     });
-                    let locals: Option<Vec<(Expr, Expr)>> =
-                        opt("locals").and_then(|l| match &*l.node {
-                            ExprNode::Hash { entries, .. } => Some(
+                    // Absent `locals:`/`as:` is fine. A supplied value
+                    // that is not a hash / name literal cannot be
+                    // lowered — dropping it would render the partial
+                    // under the wrong local. Decline the whole call.
+                    let locals = match opt("locals") {
+                        None => Some(None),
+                        Some(l) => match &*l.node {
+                            ExprNode::Hash { entries, .. } => Some(Some(
                                 entries
                                     .iter()
                                     .map(|(k, v)| (k.clone(), rewrite_helpers_in_expr(v, ctx)))
-                                    .collect(),
-                            ),
+                                    .collect::<Vec<_>>(),
+                            )),
                             _ => None,
-                        });
+                        },
+                    };
                     let collection = opt("collection").map(|c| rewrite_helpers_in_expr(c, ctx));
-                    let as_name = opt("as").and_then(|a| match &*a.node {
-                        ExprNode::Lit { value: Literal::Sym { value } } => {
-                            Some(value.as_str().to_string())
-                        }
-                        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
-                        _ => None,
-                    });
-                    if let (true, Some(partial)) = (understood, partial) {
+                    let as_name = match opt("as") {
+                        None => Some(None),
+                        Some(a) => match &*a.node {
+                            ExprNode::Lit { value: Literal::Sym { value } } => {
+                                Some(Some(value.as_str().to_string()))
+                            }
+                            ExprNode::Lit { value: Literal::Str { value } } => {
+                                Some(Some(value.clone()))
+                            }
+                            _ => None,
+                        },
+                    };
+                    if let (true, Some(partial), Some(locals), Some(as_name)) =
+                        (understood, partial, locals, as_name)
+                    {
                         if let Some(coll) = collection {
                             if let Some(out) = turbo_stream_collection_fragment(
                                 method.as_str(),
@@ -999,9 +1012,8 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 inner.span,
                 "only the positional `target[, record]` spelling is lowered",
                 format!(
-                    "`turbo_stream.{}` left in source shape — an option form \
-                     this pass does not yet lower (unknown keys, a non-literal \
-                     partial, or a collection it could not resolve) needs the \
+                    "`turbo_stream.{}` left in source shape — the option form \
+                     (partial:/collection:/locals:) and the block form need the \
                      partial machinery a `render` call site gets, so this \
                      template will not render",
                     method.as_str()
@@ -1280,10 +1292,31 @@ fn turbo_stream_collection_fragment(
     let var = Symbol::from(crate::naming::safe_local(
         as_name.unwrap_or_else(|| base.trim_start_matches('_')),
     ));
+    let mut prelude = Vec::new();
+    let bound_locals: Option<Vec<(Expr, Expr)>> = locals.map(|entries| {
+        entries
+            .iter()
+            .enumerate()
+            .map(|(i, (k, v))| {
+                let name = Symbol::from(format!("_ts_local_{i}"));
+                prelude.push(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Assign {
+                        target: LValue::Var {
+                            id: VarId(0),
+                            name: name.clone(),
+                        },
+                        value: v.clone(),
+                    },
+                ));
+                (k.clone(), var_ref(name))
+            })
+            .collect()
+    });
     let html = super::partial::named_partial_call_with_record(
         partial,
         None,
-        locals,
+        bound_locals.as_deref(),
         Some(var_ref(var.clone())),
         ctx,
     )?;
@@ -1292,8 +1325,24 @@ fn turbo_stream_collection_fragment(
         accumulator: cap.to_string(),
         ..ctx.clone()
     };
+    // Rails treats a nil collection as empty, not as `nil.each`.
+    let each_recv = Expr::new(
+        Span::synthetic(),
+        ExprNode::BoolOp {
+            op: BoolOpKind::Or,
+            surface: BoolOpSurface::Symbol,
+            left: collection,
+            right: Expr::new(
+                Span::synthetic(),
+                ExprNode::Array {
+                    elements: vec![],
+                    style: Default::default(),
+                },
+            ),
+        },
+    );
     let each = send(
-        Some(collection),
+        Some(each_recv),
         "each",
         Vec::new(),
         Some(Expr::new(
@@ -1308,18 +1357,18 @@ fn turbo_stream_collection_fragment(
         )),
         false,
     );
-    Some(vec![
-        assign_accumulator_string_new(cap),
-        each,
-        accumulator_append_call(
-            super::helpers::turbo_stream_fragment_call(
-                action,
-                super::helpers::turbo_stream_target(target, ctx),
-                accumulator_result_ref(cap),
-            ),
-            ctx,
+    let mut out = prelude;
+    out.push(assign_accumulator_string_new(cap));
+    out.push(each);
+    out.push(accumulator_append_call(
+        super::helpers::turbo_stream_fragment_call(
+            action,
+            super::helpers::turbo_stream_target(target, ctx),
+            accumulator_result_ref(cap),
         ),
-    ])
+        ctx,
+    ));
+    Some(out)
 }
 
 /// `turbo_frame_tag <ids…>[, opts][ do … end]` → the `<turbo-frame …>`

@@ -14,12 +14,12 @@
 //! positional argument than the callee has positional parameters, into a
 //! callee with keywords, can only have been written `**`.
 
+use roundhouse::App;
 use roundhouse::analyze::Analyzer;
 use roundhouse::diagnostic::Diagnostic;
 use roundhouse::emit::ruby::emit_library;
 use roundhouse::ingest::ingest_library_classes;
 use roundhouse::lower::kwsplat::apply_kwsplat_expansion;
-use roundhouse::App;
 
 /// Ingest → analyze → the splat expansion → ruby render. Returns the
 /// emitted source plus the pass's residue ledger.
@@ -64,7 +64,10 @@ end
         out.contains("Image.new(name: image[:name], width: image[:width], height: image[:height])"),
         "expected the splat expanded to keywords:\n{out}"
     );
-    assert!(diags.is_empty(), "clean expansion should not ledger: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "clean expansion should not ledger: {diags:?}"
+    );
 }
 
 #[test]
@@ -91,7 +94,64 @@ end
         out.contains("notification(payload)"),
         "**rest callee must keep the positional hash:\n{out}"
     );
-    assert!(diags.is_empty(), "a correct call must not ledger: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "a correct call must not ledger: {diags:?}"
+    );
+}
+
+/// `def f(*items, **opts); f(payload)` is a valid positional call.
+/// Restoring `**payload` would move the Hash from `items` onto `opts`.
+#[test]
+fn a_positional_rest_beside_keyword_rest_is_not_an_erased_splat() {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(
+        PathBuf::from("db/schema.rb"),
+        b"ActiveRecord::Schema.define(version: 1) do\n  create_table :rooms do |t|\n    t.string :name\n  end\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("app/models/room.rb"),
+        b"class Room < ApplicationRecord\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("config/routes.rb"),
+        b"Rails.application.routes.draw do\n  resources :rooms\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("test/models/room_test.rb"),
+        br#"require "test_helper"
+
+class RoomTest < ActiveSupport::TestCase
+  test "forwards" do
+    consume(payload)
+  end
+
+  private
+    def consume(*items, **opts)
+      items
+    end
+end
+"#
+        .to_vec(),
+    );
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let src = roundhouse::emit::ruby::emit_spinel(&app)
+        .into_iter()
+        .filter(|f| f.path.to_string_lossy().contains("room_test"))
+        .map(|f| f.content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        src.contains("consume(payload)") || src.contains("consume(payload,"),
+        "a *items,**opts callee must keep the positional Hash:\n{src}"
+    );
+    assert!(
+        !src.contains("consume(**payload)"),
+        "must not restore a splat that *items already accepted:\n{src}"
+    );
 }
 
 #[test]
@@ -118,7 +178,10 @@ end
         out.contains("Tag.new(name: opts[:name], size: opts.fetch(:size, 48))"),
         "expected the optional keyword read with its default:\n{out}"
     );
-    assert!(diags.is_empty(), "clean expansion should not ledger: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "clean expansion should not ledger: {diags:?}"
+    );
 }
 
 #[test]
@@ -201,7 +264,10 @@ end
         out.contains(r#"Image.new(name: "a", width: 1)"#),
         "literal kwargs must survive verbatim:\n{out}"
     );
-    assert!(diags.is_empty(), "a correct call must not ledger: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "a correct call must not ledger: {diags:?}"
+    );
 }
 
 #[test]
@@ -252,7 +318,10 @@ end
         out.contains("Logger.new(opts)"),
         "a *rest callee must be left alone:\n{out}"
     );
-    assert!(diags.is_empty(), "no evidence means no ledger line either: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "no evidence means no ledger line either: {diags:?}"
+    );
 }
 
 #[test]
@@ -281,7 +350,10 @@ end
         out.contains("Notification.new(title: params[:title], body: params[:body], badge: unread, endpoint: endpoint)"),
         "expected the literal's keywords kept and the rest indexed off the bundle:\n{out}"
     );
-    assert!(diags.is_empty(), "clean expansion should not ledger: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "clean expansion should not ledger: {diags:?}"
+    );
 }
 
 #[test]
@@ -303,10 +375,15 @@ end
 "##,
     );
     assert!(
-        out.contains(r#"render_code(size: opts.fetch(:size, 2), color: opts.fetch(:color, "black"))"#),
+        out.contains(
+            r#"render_code(size: opts.fetch(:size, 2), color: opts.fetch(:color, "black"))"#
+        ),
         "expected the literal read as the bundle's default:\n{out}"
     );
-    assert!(diags.is_empty(), "clean expansion should not ledger: {diags:?}");
+    assert!(
+        diags.is_empty(),
+        "clean expansion should not ledger: {diags:?}"
+    );
 }
 
 #[test]
@@ -455,7 +532,7 @@ fn a_splat_into_keyword_rest_is_restored() {
 
 class RoomTest < ActiveSupport::TestCase
   test "forwards" do
-    assert_equal "a", embed_from(href: "a", url: "b")
+    assert_equal({ href: "a", url: "b" }, embeds_from(href: "a", url: "b"))
   end
 
   private

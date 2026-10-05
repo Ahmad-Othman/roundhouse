@@ -44,8 +44,10 @@
 //!   slot; this pass is about the binder the caller filled.
 //! - `||=` / `+=` / multi-assign. Those need their own lowering; a
 //!   wrong expansion here would change when the RHS runs.
-//! - An `if` whose body is more than the assign. Both branches would
-//!   have to agree, and a later read cannot see two different names.
+//! - An `if` whose body is more than the assign, a loop, a rescue, a
+//!   case arm, or a block. A write there is visible after the scope in
+//!   Ruby; a fresh local thrown away with the branch map would not be.
+//!   The whole parameter stays on the dynamic path.
 //! - A parameter that is never written. There is nothing to split.
 //!
 //! Silent: a method with no parameters, or no rebind, is a no-op.
@@ -131,10 +133,145 @@ fn rewrite_method(body: &mut Expr, params: Vec<Symbol>) {
         return;
     }
     let param_set: HashSet<Symbol> = params.into_iter().collect();
+    let mut unsafe_params = HashSet::new();
+    collect_unsafe_writes(body, &param_set, &mut unsafe_params, false);
+    let safe: HashSet<Symbol> = param_set.difference(&unsafe_params).cloned().collect();
+    if safe.is_empty() {
+        return;
+    }
     let mut used = HashSet::new();
     collect_names(body, &mut used);
     let mut rebound = HashMap::new();
-    rewrite(body, &param_set, &mut rebound, &used);
+    rewrite(body, &safe, &mut rebound, &used);
+}
+
+/// A write inside an `If`/`Case`/`CaseMatch` arm, a `While` body, a
+/// `BeginRescue` body or rescue, or a `Lambda` does not dominate later
+/// reads. Splitting that parameter onto a branch-local `__rh_*` would
+/// leave those reads on the original binder. The supported modifier-`if`
+/// join is the exception: both arms write the same fresh local.
+fn collect_unsafe_writes(
+    expr: &Expr,
+    params: &HashSet<Symbol>,
+    out: &mut HashSet<Symbol>,
+    in_unsafe_scope: bool,
+) {
+    if is_join_if(expr, params) {
+        let ExprNode::If {
+            cond,
+            then_branch,
+            else_branch,
+        } = &*expr.node
+        else {
+            return;
+        };
+        collect_unsafe_writes(cond, params, out, in_unsafe_scope);
+        let branch = if is_empty(else_branch) {
+            then_branch
+        } else {
+            else_branch
+        };
+        if let Some((_, value)) = param_assign(branch, params) {
+            collect_unsafe_writes(&value, params, out, in_unsafe_scope);
+        }
+        return;
+    }
+    match &*expr.node {
+        ExprNode::Assign {
+            target: LValue::Var { name, .. },
+            value,
+        } => {
+            if in_unsafe_scope && params.contains(name) {
+                out.insert(name.clone());
+            }
+            collect_unsafe_writes(value, params, out, in_unsafe_scope);
+        }
+        ExprNode::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_unsafe_writes(cond, params, out, in_unsafe_scope);
+            collect_unsafe_writes(then_branch, params, out, true);
+            collect_unsafe_writes(else_branch, params, out, true);
+        }
+        ExprNode::While { cond, body, .. } => {
+            collect_unsafe_writes(cond, params, out, in_unsafe_scope);
+            collect_unsafe_writes(body, params, out, true);
+        }
+        ExprNode::Lambda { body, .. } => {
+            collect_unsafe_writes(body, params, out, true);
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            collect_unsafe_writes(scrutinee, params, out, in_unsafe_scope);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    collect_unsafe_writes(g, params, out, true);
+                }
+                collect_unsafe_writes(&arm.body, params, out, true);
+            }
+        }
+        ExprNode::BeginRescue {
+            body,
+            rescues,
+            else_branch,
+            ensure,
+            ..
+        } => {
+            collect_unsafe_writes(body, params, out, true);
+            for clause in rescues {
+                collect_unsafe_writes(&clause.body, params, out, true);
+            }
+            if let Some(eb) = else_branch {
+                collect_unsafe_writes(eb, params, out, true);
+            }
+            if let Some(en) = ensure {
+                collect_unsafe_writes(en, params, out, in_unsafe_scope);
+            }
+        }
+        ExprNode::CaseMatch {
+            scrutinee,
+            arms,
+            else_body,
+        } => {
+            collect_unsafe_writes(scrutinee, params, out, in_unsafe_scope);
+            for arm in arms {
+                if let Some((_, g)) = &arm.guard {
+                    collect_unsafe_writes(g, params, out, true);
+                }
+                collect_unsafe_writes(&arm.body, params, out, true);
+            }
+            if let Some(eb) = else_body {
+                collect_unsafe_writes(eb, params, out, true);
+            }
+        }
+        ExprNode::RescueModifier { expr, fallback } => {
+            collect_unsafe_writes(expr, params, out, in_unsafe_scope);
+            collect_unsafe_writes(fallback, params, out, true);
+        }
+        _ => {
+            expr.node
+                .for_each_child(&mut |c| collect_unsafe_writes(c, params, out, in_unsafe_scope));
+        }
+    }
+}
+
+fn is_join_if(expr: &Expr, params: &HashSet<Symbol>) -> bool {
+    let ExprNode::If {
+        then_branch,
+        else_branch,
+        ..
+    } = &*expr.node
+    else {
+        return false;
+    };
+    let then_empty = is_empty(then_branch);
+    let else_empty = is_empty(else_branch);
+    if then_empty == else_empty {
+        return false;
+    }
+    let branch = if else_empty { then_branch } else { else_branch };
+    param_assign(branch, params).is_some()
 }
 
 fn rewrite(
