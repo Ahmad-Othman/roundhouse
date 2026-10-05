@@ -159,6 +159,18 @@ other = store.read("k")
 raise "untyped read must still dup" if other.equal?(hit)
 other << "x"
 raise "store corrupted" unless store.read_str("k") == frag
+# write (untyped) also freezes, so a later read_str cannot mutate
+# the shared entry — CodeRabbit on #432.
+store.write("k2", "plain")
+hit2 = store.read_str("k2")
+raise "write miss" if hit2.nil?
+raise "write not frozen" unless hit2.frozen?
+begin
+  hit2 << "x"
+  raise "write-path fragment was mutable"
+rescue FrozenError
+end
+raise "write store corrupted" unless store.read_str("k2") == "plain"
 puts "ALL OK"
 "#;
     let out = Command::new("ruby")

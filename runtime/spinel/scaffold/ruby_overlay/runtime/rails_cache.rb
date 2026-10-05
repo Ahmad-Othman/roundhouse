@@ -113,10 +113,10 @@ module Rails
         entry = @data[k]
         if entry && !expired?(entry) && entry[0].is_a?(String)
           n = entry[0].to_i + 1
-          @data[k] = [n.to_s, entry[1]]
+          @data[k] = [n.to_s.freeze, entry[1]]
           n
         else
-          @data[k] = ["1", ttl.to_i > 0 ? monotonic_now + ttl.to_i : nil]
+          @data[k] = ["1".freeze, ttl.to_i > 0 ? monotonic_now + ttl.to_i : nil]
           1
         end
       end
@@ -138,7 +138,11 @@ module Rails
       expires_at = nil
       ttl = opts[:expires_in]
       expires_at = monotonic_now + ttl.to_i if ttl
-      encoded = value.is_a?(String) ? value.dup : [Marshal.dump(value)]
+      # Freeze the stored String so `read_str` can hand it back without
+      # a copy. `read` still dups (decode), so an untyped caller that
+      # mutates what it fetched cannot corrupt the store — the same
+      # contract `write_str` already keeps.
+      encoded = value.is_a?(String) ? value.dup.freeze : [Marshal.dump(value)]
       @mutex.synchronize { @data[key.to_s] = [encoded, expires_at] }
       value
     end
