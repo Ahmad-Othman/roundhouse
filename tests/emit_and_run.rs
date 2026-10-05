@@ -356,6 +356,49 @@ end
         .assert_passes();
 }
 
+/// `redirect(path: ...)` is Rails' options form, and unlike the
+/// positional `redirect("/x")` it keeps the request's query string: an
+/// empty query leaves the path alone, a path that already has a `?` is
+/// joined with `&`, and the query goes ahead of a fragment. The last two
+/// diverge from Rails on purpose, since Rails builds `/articles?sort=new?page=2`
+/// and `/articles#top?page=2` (see `synthesize_redirect_controller`).
+/// Jumpstart Pro routes its Devise-era `/users/sign_in` this way.
+#[test]
+fn a_path_option_redirect_keeps_the_request_query() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/posts\", to: redirect(path: \"/articles\")\n  get \"/filtered\", to: redirect(path: \"/articles?sort=new\")\n  get \"/step\", to: redirect(path: \"/articles#top\")\n  get \"/old/:id\", to: redirect(path: \"/articles/%{id}\", status: 302)\n",
+        )
+        .write(
+            "test/controllers/path_redirects_controller_test.rb",
+            r#"require "test_helper"
+
+class PathRedirectsControllerTest < ActionDispatch::IntegrationTest
+  test "the options form keeps the query" do
+    get "/posts"
+    assert_response 301
+    assert_redirected_to "/articles"
+    get "/posts?page=2"
+    assert_redirected_to "/articles?page=2"
+    get "/filtered?page=2"
+    assert_redirected_to "/articles?sort=new&page=2"
+    get "/step?page=2"
+    assert_redirected_to "/articles?page=2#top"
+    get "/filtered"
+    assert_redirected_to "/articles?sort=new"
+    get "/old/7?page=2"
+    assert_response 302
+    assert_redirected_to "/articles/7?page=2"
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/path_redirects_controller_test.rb")
+        .assert_passes();
+}
+
 /// A job `perform_later` enqueues under the test adapter is held, not
 /// dropped, and a blockless `perform_enqueued_jobs only:` runs it
 /// (basecamp/once-campfire#296's tests). Its broadcast is JSON encoded

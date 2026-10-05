@@ -235,7 +235,7 @@ fn a_path_option_redirect_is_the_same_location_as_a_positional_string() {
         "a path-only options redirect is served; got:\n{emitted}"
     );
     assert!(
-        emitted.contains("Current.request.query_string"),
+        emitted.contains("q = request.query_string"),
         "a path option keeps the request query; a positional redirect does not; got:\n{emitted}"
     );
     assert!(
@@ -264,8 +264,11 @@ fn a_path_option_replaces_a_positional_location() {
         "  get \"/reports\", to: \"reports#index\"\n  get \"/legacy\", to: redirect(\"/old\", path: \"/new\")\n  get \"/step\", to: redirect(path: \"/login#step\")\n",
     );
     let emitted = redirect_controller(&app);
+    // The query goes ahead of a fragment, split off at compile time:
+    // `/login#step` plus `x=1` is `/login?x=1#step`.
     assert!(
-        emitted.contains("split(\"#\", 2)") && emitted.contains("parts.length == 1"),
+        emitted.contains("q = request.query_string")
+            && emitted.contains("\"/login?\" + q + \"#step\""),
         "the options form keeps the query and puts it before a fragment; got:\n{emitted}"
     );
     assert!(
@@ -278,7 +281,7 @@ fn a_path_option_replaces_a_positional_location() {
     );
     assert!(
         emitted.contains("\"/login#step\""),
-        "a fragment stays in the location so the split can move the query ahead of it; got:\n{emitted}"
+        "an empty query leaves the location, fragment and all; got:\n{emitted}"
     );
 }
 
