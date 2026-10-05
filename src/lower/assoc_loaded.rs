@@ -36,8 +36,8 @@ fn has_many_names(app: &App) -> HashSet<Symbol> {
     out
 }
 
-/// Rewrite every `recv.assoc.loaded?` whose `assoc` is a known has_many /
-/// has_one into `recv.assoc_loaded?`.
+/// Rewrite every `recv.assoc.loaded?` whose `assoc` is a known has_many
+/// into `recv.assoc_loaded?`.
 pub fn apply_assoc_loaded_lowering(app: &mut App) -> Vec<Diagnostic> {
     let names = has_many_names(app);
     if names.is_empty() {
@@ -47,17 +47,7 @@ pub fn apply_assoc_loaded_lowering(app: &mut App) -> Vec<Diagnostic> {
     for view in &mut app.views {
         rewrite(&mut view.body, &names);
     }
-    for tm in &mut app.test_modules {
-        if let Some(setup) = &mut tm.setup {
-            rewrite(setup, &names);
-        }
-        for t in &mut tm.tests {
-            rewrite(&mut t.body, &names);
-        }
-        for m in &mut tm.helpers {
-            rewrite(&mut m.body, &names);
-        }
-    }
+    super::for_each_test_body(app, &mut |e| rewrite(e, &names));
     Vec::new()
 }
 

@@ -1952,6 +1952,7 @@ mod tests {
             ("find_by", ReturnKind::SelfOrNil),
             ("count", ReturnKind::Int),
             ("exists?", ReturnKind::Bool),
+            ("loaded?", ReturnKind::Bool),
             ("more_than?", ReturnKind::Bool),
             ("pluck", ReturnKind::ArrayOfUntyped),
             ("pick", ReturnKind::Untyped),

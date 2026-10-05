@@ -1110,34 +1110,52 @@ pub(crate) fn build_methods(
 /// arel-rewrite + body-typer the synthesized methods do.
 ///
 /// Name collisions:
-///   * A synthesized **attribute** reader/writer (`attr_accessor` /
-///     ingest-time expansion of the same) yields to a later real `def`
-///     of that name — Ruby's last-definition-wins. Campfire's
-///     `Opengraph::Location` declares `attr_accessor :parsed_url` and
-///     then memoizes `def parsed_url; … URI.parse …; end`; keeping the
-///     bare `@parsed_url` reader left the ivar untyped/unread and
-///     Spinel's strict emit failed with `error[ivar_unresolved]`.
+///   * A synthesized **attr_accessor / attr_reader / attr_writer**
+///     half yields to a later real `def` of that name — Ruby's
+///     last-definition-wins. Campfire's `Opengraph::Location` declares
+///     `attr_accessor :parsed_url` and then memoizes
+///     `def parsed_url; … URI.parse …; end`; keeping the bare
+///     `@parsed_url` reader left the ivar untyped/unread and Spinel's
+///     strict emit failed with `error[ivar_unresolved]`.
 ///   * Column / association / scope synthesizers still win over a
-///     duplicate body name (the corpus does not redefine those).
+///     duplicate body name (the corpus does not redefine those). The
+///     replace predicate below only matches the bare-ivar attr_* shape,
+///     never a schema column reader's body.
 fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model) {
     use crate::dialect::{AccessorKind, ModelBodyItem};
+    use crate::expr::{ExprNode, LValue};
     for item in &model.body {
         let ModelBodyItem::Method { method, .. } = item else { continue };
         if let Some(idx) = methods
             .iter()
             .position(|m| m.name == method.name && m.receiver == method.receiver)
         {
-            let existing_kind = methods[idx].kind;
+            let existing = &methods[idx];
             let incoming_is_real = matches!(method.kind, AccessorKind::Method);
-            let existing_is_attr = matches!(
-                existing_kind,
-                AccessorKind::AttributeReader | AccessorKind::AttributeWriter
-            );
-            // Real `def` replaces a synthesized attr_* half. An attr_*
-            // Method item already in `methods` (ingest expanded
-            // `attr_accessor` into the body before this pass) is also
-            // replaced when a later body `def` of the same name arrives.
-            if incoming_is_real && existing_is_attr {
+            // Only the attr_* synthesizer's bare `@name` / `@name = value`
+            // shape yields — schema column AttributeReaders have richer
+            // bodies and must keep winning (documented above).
+            let existing_is_attr_half = match existing.kind {
+                AccessorKind::AttributeReader => {
+                    matches!(&*existing.body.node, ExprNode::Ivar { name } if name == &existing.name)
+                }
+                AccessorKind::AttributeWriter => {
+                    let base = existing
+                        .name
+                        .as_str()
+                        .strip_suffix('=')
+                        .unwrap_or(existing.name.as_str());
+                    matches!(
+                        &*existing.body.node,
+                        ExprNode::Assign {
+                            target: LValue::Ivar { name },
+                            ..
+                        } if name.as_str() == base
+                    )
+                }
+                AccessorKind::Method => false,
+            };
+            if incoming_is_real && existing_is_attr_half {
                 methods[idx] = method.clone();
             }
             continue;
