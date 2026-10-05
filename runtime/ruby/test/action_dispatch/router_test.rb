@@ -144,8 +144,10 @@ class RouterTest < Minitest::Test
 
   # Bounds rejection cannot mistake the valid zero byte for a missing value.
   def test_checked_byte_access_preserves_zero_and_rejects_missing_offsets
-    assert_equal 0, ActionDispatch::Router.capture_byte([0, 255], 0)
-    assert_equal 255, ActionDispatch::Router.capture_byte([0, 255], 1)
+    zero_byte = ActionDispatch::Router.capture_byte([0, 255], 0)
+    maximum_byte = ActionDispatch::Router.capture_byte([0, 255], 1)
+    assert_equal 0, zero_byte
+    assert_equal 255, maximum_byte
     assert_raises(ArgumentError) { ActionDispatch::Router.capture_byte([0], -1) }
     assert_raises(ArgumentError) { ActionDispatch::Router.capture_byte([0], 1) }
   end
