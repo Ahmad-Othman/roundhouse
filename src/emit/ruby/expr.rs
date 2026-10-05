@@ -337,7 +337,9 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Redo => "redo".to_string(),
         ExprNode::Splat { value } => format!("*{}", emit_expr(value)),
         ExprNode::ForwardArgs => "...".to_string(),
-        ExprNode::KeywordSplat { value } => emit_keyword_splat(value),
+        ExprNode::ForwardKeywords => "**".to_string(),
+        ExprNode::Defined { operand } => format!("defined?({})", emit_expr(operand)),
+        ExprNode::KeywordSplat { value } => format!("**{}", paren_multiline(emit_arg(value))),
         ExprNode::MultiAssign { targets, value } => {
             let lhs: Vec<String> = targets.iter().map(emit_lvalue).collect();
             format!("{} = {}", lhs.join(", "), emit_expr(value))
@@ -1037,7 +1039,7 @@ pub(super) fn emit_send_base(
     // `...` is a send argument packet, never an index or infix operand.
     // Preserve explicit call syntax even for operator/setter method names
     // and `self`, before any surface-syntax prettification below.
-    if args.iter().any(|a| matches!(&*a.node, ExprNode::ForwardArgs | ExprNode::KeywordSplat { .. })) {
+    if args.iter().any(|a| matches!(&*a.node, ExprNode::ForwardArgs | ExprNode::ForwardKeywords | ExprNode::KeywordSplat { .. })) {
         return match recv {
             Some(r) => {
                 let receiver = emit_expr(r);
@@ -1423,14 +1425,6 @@ pub(crate) fn ruby_sym_literal(value: &str) -> String {
         format!(":{value}")
     } else {
         format!(":{}", ruby_str_literal(value))
-    }
-}
-
-fn emit_keyword_splat(value: &Expr) -> String {
-    if matches!(&*value.node, ExprNode::Var { name, .. } if name.as_str().is_empty()) {
-        "**".to_string()
-    } else {
-        format!("**{}", paren_multiline(emit_arg(value)))
     }
 }
 

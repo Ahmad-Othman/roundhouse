@@ -699,7 +699,15 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
     }
 }
 
-/// `def self._columns_sql; "<table>.<col> AS <col>, …"; end`
+/// An identifier quoted the way Rails' SQLite adapter always quotes one
+/// (`"messages"."id"`). Apps' tests pick statements out by that text:
+/// campfire's query-plan tests filter on `start_with?(%(SELECT
+/// "messages"))` (basecamp/once-campfire#312).
+fn rails_quoted(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// `def self._columns_sql; "\"<table>\".\"<col>\" AS <col>, …"; end`
 ///
 /// The schema columns, table-qualified, in the order `from_stmt` reads
 /// them. `Relation#to_a` projects this instead of `<table>.*` so a
@@ -716,7 +724,14 @@ fn synth_columns_sql(owner: &ClassId, table: &Table) -> MethodDef {
     let cols_csv: String = table
         .columns
         .iter()
-        .map(|c| format!("{t}.{c} AS {c}", t = crate::naming::sql_ident(table.name.as_str()), c = crate::naming::sql_ident(c.name.as_str())))
+        .map(|c| {
+            format!(
+                "{t}.{q} AS {alias}",
+                t = rails_quoted(table.name.as_str()),
+                q = rails_quoted(c.name.as_str()),
+                alias = crate::naming::sql_ident(c.name.as_str())
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ");
     MethodDef {

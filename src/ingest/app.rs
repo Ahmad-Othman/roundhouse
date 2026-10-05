@@ -230,6 +230,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         return super::roda_app::ingest_roda_app_with_vfs(vfs, dir);
     }
     super::sources::reset();
+    let _source_root = super::sources::set_root(dir);
     let path_gems = path_gem_dirs(vfs, dir);
     let source_vfs = PathGemVfs { inner: vfs, root: dir, dirs: &path_gems };
     let vfs = &source_vfs;
@@ -843,12 +844,14 @@ end
         }
         // `Vips.block_untrusted(true)` / `Vips.block("<op>", true)` —
         // an initializer setting libvips' loader policy before any
-        // upload is decoded (campfire refuses every unfuzzed loader,
-        // and openslide by name). The image processor applies it at
-        // load (runtime/spinel/facades/active_storage_processor_vips
-        // .rb). Synthesized as `vips_block_untrusted` /
-        // `vips_blocked_operations` on the reopen, over the framework
-        // defaults (false / []) in runtime/ruby/rails.rb.
+        // upload is decoded (any app that stores user uploads; campfire
+        // refuses every unfuzzed loader, and openslide by name). The
+        // image processor applies it at load and wraps find_load so a
+        // blocked loader is not selected (runtime/spinel/facades/
+        // active_storage_processor_vips.rb). Synthesized as
+        // `vips_block_untrusted` / `vips_blocked_operations` on the
+        // reopen, over the framework defaults (false / []) in
+        // runtime/ruby/rails.rb.
         {
             let init_dir = dir.join("config/initializers");
             let mut untrusted = false;
@@ -5683,6 +5686,8 @@ fn extract_variable_content_type_exclusions(source: &[u8]) -> Vec<String> {
 /// "<name>", true))` from an initializer. Line-shaped like the
 /// content-type trim above: the two calls are one statement each, and
 /// only the `true` arms are policy (`false` is libvips' default).
+/// Parens are optional (`Vips.block_untrusted true`); a `#` comment
+/// does not count. Named blocks accept double or single quotes.
 fn extract_vips_loader_policy(source: &[u8]) -> (bool, Vec<String>) {
     let source = String::from_utf8_lossy(source);
     let mut untrusted = false;
