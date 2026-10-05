@@ -2723,6 +2723,9 @@ impl Analyzer {
                 constants: Default::default(), annotate_self_dispatch: false, in_view: false,
             };
 
+            for initializer in &mut lc.class_ivar_initializers {
+                self.body_typer().analyze_expr(initializer, &class_ctx);
+            }
             for (_, value) in &mut lc.constants {
                 if self.data_factories.contains_key(&value.span) {
                     self.body_typer().analyze_expr(value, &class_ctx);
@@ -4671,6 +4674,8 @@ impl Analyzer {
             | ExprNode::Retry
             | ExprNode::Redo
             | ExprNode::ForwardArgs
+            | ExprNode::ForwardKeywords
+            | ExprNode::Defined { .. }
             | ExprNode::SelfRef => {}
         }
     }

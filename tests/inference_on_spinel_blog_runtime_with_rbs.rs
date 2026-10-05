@@ -51,6 +51,8 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
         | ExprNode::Retry
         | ExprNode::Redo
         | ExprNode::ForwardArgs
+        | ExprNode::ForwardKeywords
+        | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_untyped(cond, &format!("{path}/if.cond"), out);
@@ -1026,13 +1028,39 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // 802). This probe does not resolve self-sends or `@orders`
     // indexing; the full-context gate counts 16. What it buys: campfire
     // room pages LIMIT the last 40 in SQL, including `order(a:, b:)`.
+    // Historical upstream measurements below used the old short-name lookup.
+    // 2026-10-05 1273 -> 1280, +7, MEASURED with and without the three
+    // methods (relation.rb 802 -> 809): Relation#reorder,
+    // #skip_preloading! and #preload_associations. This probe leaves the
+    // `*parts` splat, the `records` parameter and the `@model` send as
+    // TyVars; the full-context gate in runtime_src_integration counts
+    // ONE (reorder's splat). What it buys: campfire's message paging after
+    // basecamp/once-campfire#292, and #304/#312's `reorder`.
+    // 2026-10-05 1280 -> 1336, +56, MEASURED (relation.rb 809 -> 865):
+    // Relation#substitute_named_binds and its two character tests, plus
+    // #to_set. This probe resolves neither self-sends nor `sql[i, 1]`
+    // slices, which a character scan is made of; the full-context gate
+    // in runtime_src_integration counts ZERO new sites. What it buys:
+    // named binds in `where`/`having`, without which campfire's direct-
+    // room lookup (basecamp/once-campfire#310) read NULL and created a
+    // room on every Ping.
+    // 2026-10-05 1336 -> 1341, +5, MEASURED (connection.rb 210 -> 215):
+    // Connection#select_rows, a block over the adapter's untyped rows.
+    // What it buys: campfire's tests reading an EXPLAIN QUERY PLAN with
+    // `select_rows(…).map(&:last)`.
+    // 2026-10-05 1341 -> 1350, +9, MEASURED (relation.rb 865 -> 874):
+    // Relation#offset_row_exists?, which this probe sees through the same
+    // unresolved self-sends and `@limit` reads every terminal pays. What
+    // it buys: `offset(n).exists?` asks for a row past n, campfire's
+    // `paged?` (basecamp/once-campfire#297), where a COUNT ignored it.
     // 2026-10-05: 1273 -> 45 after correcting this probe's canonical
     // class-ID lookup. Previously it stripped RBS names to short aliases,
     // then looked up parameter seeds with fully-qualified runtime names.
     // With canonical entries plus unique short aliases, unchanged 2b2deff
     // runtime sources measure 45 sites instead of 1273. No nodes or
     // diagnostics are excluded: parameter and dispatch seeds now reach the
-    // classes they describe. Keep the ratchet at that corrected baseline.
+    // classes they describe. Keep that corrected ceiling as a merge guard;
+    // upstream runtime additions must pass it under the canonical lookup.
     // Finder additions also contribute zero per method, asserted above;
     // the exact 45-site baseline remains unchanged.
     const CEILING: usize = 45;

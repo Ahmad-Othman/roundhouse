@@ -113,6 +113,441 @@ fn finite_concern_class_configuration_runs_without_replaying_rails() {
 
 /// The harness itself: the unedited blog emits and its controller
 /// suite, which renders every page, passes.
+/// `reorder`, `skip_preloading!` and `preload_associations`, the three
+/// Relation methods campfire's message paging (basecamp/once-campfire#292)
+/// leans on. Preloading is observed by deleting the parts after loading:
+/// only a widget whose parts were preloaded still sees them.
+fn relation_paging_hooks_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "parts", force: :cascade do |t|
+    t.integer "widget_id"
+    t.string "label"
+  end
+end
+"#)
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  has_many :parts\nend\n")
+        .write("app/models/part.rb", "class Part < ApplicationRecord\n  belongs_to :widget\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/widgets\", to: \"widgets#index\"\nend\n")
+        .write("app/controllers/widgets_controller.rb", r##"class WidgetsController < ApplicationController
+  def index
+    reordered = Widget.order(:name).reorder(name: :desc).map { |w| w.name }.join(",")
+
+    relation = Widget.includes(:parts).order(:name)
+    widgets = relation.skip_preloading!.to_a
+    relation.preload_associations(widgets.first(1))
+    Part.delete_all
+    counts = widgets.map { |w| w.parts.size }.join(",")
+
+    render plain: "#{reordered}|#{counts}"
+  end
+end
+"##)
+}
+
+fn relation_paging_hooks_assertions() -> &'static str {
+    r##"
+require_relative "app/controllers/widgets_controller"
+alpha = Widget.create!(name: "alpha")
+beta = Widget.create!(name: "beta")
+Part.create!(widget: alpha, label: "a1")
+Part.create!(widget: beta, label: "b1")
+controller = WidgetsController.new
+controller.process_action(:index)
+raise "paging hooks: #{controller.body}" unless controller.body == "beta,alpha|1,0"
+puts "relation paging hooks passed"
+"##
+}
+
+#[test]
+fn relation_reorder_and_deferred_preloading_run() {
+    relation_paging_hooks_app()
+        .run_ruby(relation_paging_hooks_assertions())
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn relation_reorder_and_deferred_preloading_run_on_spinel() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{}",
+        relation_paging_hooks_assertions()
+    );
+    relation_paging_hooks_app().run_spinel(&script).assert_passes();
+}
+
+/// A class method runs against the relation it is reached from: called at
+/// implicit self inside a scope body (basecamp/once-campfire#292's
+/// `scope :last_page, -> { last_page_of(PAGE_SIZE) }`), and called on a
+/// relation no syntactic channel recognizes, here a through-association
+/// (campfire's `Current.user.reachable_messages.search(q)
+/// .last_page_of_matches(n)`). `a0` sorts first in the whole table but
+/// belongs to the other widget and the other shop, so an unscoped page
+/// answers it.
+fn class_method_relation_scope_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "shops", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "widgets", force: :cascade do |t|
+    t.integer "shop_id"
+    t.string "name"
+  end
+  create_table "parts", force: :cascade do |t|
+    t.integer "widget_id"
+    t.string "label"
+  end
+end
+"#)
+        .write("app/models/shop.rb", "class Shop < ApplicationRecord\n  has_many :widgets\n  has_many :shop_parts, through: :widgets, source: :parts\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  belongs_to :shop\n  has_many :parts\nend\n")
+        .write("app/models/part.rb", r#"class Part < ApplicationRecord
+  belongs_to :widget
+
+  scope :by_label, -> { order(:label) }
+  scope :first_label, -> { labels_page(1) }
+
+  def self.labels_page(size)
+    by_label.limit(size).pluck(:label)
+  end
+end
+"#)
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/parts\", to: \"parts#index\"\nend\n")
+        .write("app/controllers/parts_controller.rb", r##"class PartsController < ApplicationController
+  def index
+    widget = Widget.find_by(name: "alpha")
+    shop = Shop.find_by(name: "north")
+    render plain: "#{widget.parts.first_label.join(",")}|#{shop.shop_parts.where.not(label: nil).labels_page(1).join(",")}"
+  end
+end
+"##)
+}
+
+fn class_method_relation_scope_assertions() -> &'static str {
+    r##"
+require_relative "app/controllers/parts_controller"
+north = Shop.create!(name: "north")
+south = Shop.create!(name: "south")
+alpha = Widget.create!(name: "alpha", shop: north)
+beta = Widget.create!(name: "beta", shop: south)
+Part.create!(widget: alpha, label: "a2")
+Part.create!(widget: alpha, label: "a1")
+Part.create!(widget: beta, label: "a0")
+controller = PartsController.new
+controller.process_action(:index)
+raise "class method lost its relation: #{controller.body}" unless controller.body == "a1|a1"
+puts "class method relation scope passed"
+"##
+}
+
+#[test]
+fn class_methods_run_against_the_relation_they_are_reached_from() {
+    class_method_relation_scope_app()
+        .run_ruby(class_method_relation_scope_assertions())
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn class_methods_run_against_the_relation_they_are_reached_from_on_spinel() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{}",
+        class_method_relation_scope_assertions()
+    );
+    class_method_relation_scope_app().run_spinel(&script).assert_passes();
+}
+
+/// `relation.public_send(direction, size)` where `direction` is a
+/// parameter every caller passes as a Symbol literal — campfire's
+/// `Page.load(relation, :first | :last, size)` after
+/// basecamp/once-campfire#292. The literals are the name set, so the
+/// send grounds into a static dispatch, and the counted `last(n)` lands
+/// on the runtime's `last_n` because the receiver is a typed Relation.
+fn param_selector_dispatch_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#)
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write("app/models/pager.rb", r#"class Pager
+  def self.load(relation, direction, size)
+    relation.public_send(direction, size).map { |widget| widget.name }
+  end
+end
+"#)
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/widgets\", to: \"widgets#index\"\nend\n")
+        .write("app/controllers/widgets_controller.rb", r##"class WidgetsController < ApplicationController
+  def index
+    oldest = Pager.load(Widget.order(:name), :first, 2).join(",")
+    newest = Pager.load(Widget.order(:name), :last, 1).join(",")
+    render plain: "#{oldest}|#{newest}"
+  end
+end
+"##)
+}
+
+fn param_selector_dispatch_assertions() -> &'static str {
+    r##"
+require_relative "app/controllers/widgets_controller"
+%w[ beta alpha gamma ].each { |name| Widget.create!(name: name) }
+controller = WidgetsController.new
+controller.process_action(:index)
+raise "selector dispatch: #{controller.body}" unless controller.body == "alpha,beta|gamma"
+puts "param selector dispatch passed"
+"##
+}
+
+#[test]
+fn a_send_whose_selector_every_caller_names_dispatches_statically() {
+    param_selector_dispatch_app()
+        .run_ruby(param_selector_dispatch_assertions())
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_send_whose_selector_every_caller_names_dispatches_statically_on_spinel() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{}",
+        param_selector_dispatch_assertions()
+    );
+    param_selector_dispatch_app().run_spinel(&script).assert_passes();
+}
+
+/// assert_select attribute operators (`$=`, `^=`, `*=`) and `:not([…])`,
+/// and assert_response's failure message. Rails 8.2-era tests write all
+/// of them: basecamp/once-campfire#301 checks `img[src*='install-edge']`,
+/// #303 checks `input[type=checkbox]:not([checked])` and passes a message
+/// to assert_response.
+#[test]
+fn assert_select_attribute_operators_and_negation_run() {
+    emit_and_run::real_blog()
+        .write(
+            "test/controllers/article_selectors_controller_test.rb",
+            r#"require "test_helper"
+
+class ArticleSelectorsControllerTest < ActionDispatch::IntegrationTest
+  test "attribute operators, negation and a response message" do
+    article = Article.create!(title: "Selectors", body: "Body text here")
+    get article_url(article)
+    assert_response :success, "the article page"
+    assert_select "a[href$='/edit']"
+    assert_select "a[href^='/articles/']"
+    assert_select "a[href*='articles']"
+    assert_select "h1[class]:not([hidden])"
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/article_selectors_controller_test.rb")
+        .assert_passes();
+}
+
+/// A job `perform_later` enqueues under the test adapter is held, not
+/// dropped, and a blockless `perform_enqueued_jobs only:` runs it
+/// (basecamp/once-campfire#296's tests). Its broadcast is JSON encoded
+/// once with `ActiveSupport::JSON.encode` and sent `coder: nil`
+/// (#292), so the test pubsub hands it back decoded exactly once.
+#[test]
+fn held_jobs_run_on_demand_and_pre_encoded_broadcasts_arrive_once() {
+    emit_and_run::real_blog()
+        .write(
+            "app/jobs/notice_job.rb",
+            r#"class NoticeJob < ApplicationJob
+  def perform(article)
+    ActionCable.server.broadcast "notices", ActiveSupport::JSON.encode(articleId: article.id, title: article.title), coder: nil
+  end
+end
+"#,
+        )
+        .write(
+            "test/models/notice_job_test.rb",
+            r#"require "test_helper"
+
+class NoticeJobTest < ActiveSupport::TestCase
+  include ActiveJob::TestHelper
+
+  test "a held job runs when performed, and broadcasts pre-encoded JSON" do
+    article = Article.create!(title: "Held", body: "Body text here")
+    NoticeJob.perform_later(article)
+    assert_enqueued_with job: NoticeJob
+    assert_equal 0, ActionCable.server.pubsub.broadcasts("notices").size
+
+    perform_enqueued_jobs only: NoticeJob
+
+    notices = ActionCable.server.pubsub.broadcasts("notices").map { |broadcast| JSON.parse(broadcast) }
+    assert_equal [ { "articleId" => article.id, "title" => "Held" } ], notices
+  end
+end
+"#,
+        )
+        .run_test("test/models/notice_job_test.rb")
+        .assert_passes();
+}
+
+/// Named binds in `where` and `having` — `:size` used twice and an Array
+/// bound into `IN (:labels)` — in the shape of campfire's direct-room
+/// lookup (basecamp/once-campfire#310). Unbound, the placeholders reached
+/// SQLite as NULL and the lookup found nothing; campfire then created a
+/// second room on every Ping. Plus `relation.to_set`.
+fn named_binds_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "parts", force: :cascade do |t|
+    t.integer "widget_id"
+    t.string "label"
+  end
+end
+"#)
+        .write("app/models/widget.rb", r#"class Widget < ApplicationRecord
+  has_many :parts
+
+  def self.with_exactly(labels)
+    joins(:parts).group(:id)
+      .having("COUNT(*) = :size AND COUNT(CASE WHEN parts.label IN (:labels) THEN 1 END) = :size", size: labels.size, labels: labels)
+      .first
+  end
+end
+"#)
+        .write("app/models/part.rb", "class Part < ApplicationRecord\n  belongs_to :widget\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/widgets\", to: \"widgets#index\"\nend\n")
+        .write("app/controllers/widgets_controller.rb", r##"class WidgetsController < ApplicationController
+  def index
+    exact = Widget.with_exactly(%w[ a1 a2 ])
+    named = Widget.where("name = :name", name: "beta").first
+    set = Widget.where(name: %w[ alpha beta ]).to_set
+    render plain: "#{exact&.name}|#{named&.name}|#{set.size}|#{set.include?(named)}"
+  end
+end
+"##)
+}
+
+fn named_binds_assertions() -> &'static str {
+    r#"
+require_relative "app/controllers/widgets_controller"
+alpha = Widget.create!(name: "alpha")
+beta = Widget.create!(name: "beta")
+Part.create!(widget: alpha, label: "a1")
+Part.create!(widget: alpha, label: "a2")
+Part.create!(widget: beta, label: "a1")
+controller = WidgetsController.new
+controller.process_action(:index)
+raise "named binds: #{controller.body}" unless controller.body == "alpha|beta|2|true"
+puts "named binds passed"
+"#
+}
+
+#[test]
+fn named_binds_reach_the_query() {
+    named_binds_app().run_ruby(named_binds_assertions()).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn named_binds_reach_the_query_on_spinel() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{}",
+        named_binds_assertions()
+    );
+    named_binds_app().run_spinel(&script).assert_passes();
+}
+
+/// Rails 7.2's query assertions and the notification they are built on,
+/// over the runtime's statement capture, with `connection.select_rows`
+/// answering Arrays: campfire's tests count queries, assert none match a
+/// pattern, and read an `EXPLAIN QUERY PLAN` through a `->(*, payload)`
+/// callback (basecamp/once-campfire#295, #304, #310, #312).
+#[test]
+fn query_assertions_and_sql_notifications_run() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/article_queries_test.rb",
+            r#"require "test_helper"
+
+class ArticleQueriesTest < ActiveSupport::TestCase
+  test "query assertions count, match and explain" do
+    article = Article.create!(title: "Counted", body: "Body text here")
+
+    found = assert_queries_count(1) { Article.find(article.id) }
+    assert_equal "Counted", found.title
+    assert_no_queries { found.title }
+    assert_no_queries_match(/comments/) { Article.find(article.id) }
+    assert_queries_match(/articles/) { Article.where(title: "Counted").to_a }
+
+    statements = []
+    callback = ->(*, payload) { statements << payload[:sql] }
+    ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+      Article.where(title: "Counted").to_a
+    end
+    assert_equal 1, statements.size
+    # Rails' quoting, which apps' tests filter statements by
+    # (`start_with?(%(SELECT "messages"))`, basecamp/once-campfire#312).
+    assert statements.first.start_with?(%(SELECT "articles")), statements.first
+    plan = Article.connection.select_rows("EXPLAIN QUERY PLAN #{statements.first}").map(&:last).join(" | ")
+    assert_match(/articles/, plan)
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_queries_test.rb")
+        .assert_passes();
+}
+
+/// `offset(n).exists?` asks for a row past the first n (campfire's
+/// `paged?`, basecamp/once-campfire#297) where a COUNT ignored the offset;
+/// and the caching knobs campfire's messages caching test turns
+/// (`Rails.cache =`, `ActiveSupport::Cache::MemoryStore.new`,
+/// `ActionView::PartialRenderer.collection_cache`, a controller's
+/// `cache_store` and `perform_caching`).
+#[test]
+fn offset_exists_and_caching_knobs_run() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/article_paging_test.rb",
+            r#"require "test_helper"
+
+class ArticlePagingTest < ActiveSupport::TestCase
+  test "a row past the offset, and the caching knobs" do
+    Article.delete_all
+    2.times { |i| Article.create!(title: "Paged #{i}", body: "Body text here") }
+    assert Article.offset(1).exists?
+    assert_not Article.offset(2).exists?
+
+    store = ActiveSupport::Cache::MemoryStore.new
+    Rails.cache = store
+    ActionView::PartialRenderer.collection_cache = Rails.cache
+    ArticlesController.cache_store = Rails.cache
+    ArticlesController.perform_caching = true
+    assert_same store, Rails.cache
+    assert_same store, ActionView::PartialRenderer.collection_cache
+    assert_same store, ArticlesController.cache_store
+    assert ArticlesController.perform_caching
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_paging_test.rb")
+        .assert_passes();
+}
+
 #[test]
 fn the_unedited_blog_runs() {
     emit_and_run::real_blog()
@@ -3785,6 +4220,303 @@ end
         )
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
+}
+
+/// Gap #18.1: Tim Tischler's trailing keyword-hash enum runtime pin.
+#[test]
+fn enum_keyword_hash_mapping_predicate_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.string \"kind\", default: \"kind\", null: false\n    t.integer \"priority\", default: 17, null: false",
+        )
+        .edit(
+            "app/models/article.rb",
+            "has_many :comments, dependent: :destroy\n",
+            "has_many :comments, dependent: :destroy\n\n  enum :kind, kind: 'kind', other: 'other'\n  enum :priority, pending: 17, priority: 41\n",
+        )
+        .edit(
+            "app/views/articles/show.html.erb",
+            "<h1 class=\"font-bold text-4xl\"><%= @article.title %></h1>",
+            "<h1 class=\"font-bold text-4xl\"><%= @article.title %></h1>\n  <p id=\"kind-predicate\"><%= @article.kind? %></p>\n  <p id=\"priority-predicate\"><%= @article.priority? %></p>",
+        )
+        .run_ruby(r#"
+article = Article.create!(title: "Enum control", body: "A sufficiently long body")
+raise "enum default predicate is false" unless article.kind?
+article.kind = "other"
+raise "enum predicate ignored its value" if article.kind?
+raise "bare integer mapping lost stored values" unless Article.priorities == {"pending" => 17, "priority" => 41}
+raise "integer enum default label is wrong" unless article.pending?
+raise "column predicate shadowed enum comparison" if article.priority?
+article.priority = 41
+raise "integer label predicate is false" unless article.priority?
+raise "integer label predicate ignored its value" if article.pending?
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn anonymous_keywords_run_without_capturing_user_bindings() {
+    const METHODS: &str = r#"
+  def self.pr197_forward(label, __fwd_kwargs, **)
+    [label - __fwd_kwargs, pr197_sink(**)]
+  end
+  def self.pr197_sink(factor:, offset: 2)
+    factor * 3 + offset
+  end
+  def self.pr197_local_collision(**)
+    __fwd_kwargs = {factor: 99}
+    pr197_sink(**)
+  end
+  def pr197_instance(label, __fwd_kwargs, **)
+    [label - __fwd_kwargs, pr197_instance_sink(**)]
+  end
+  def pr197_instance_sink(factor:, offset: 2)
+    factor * 3 + offset
+  end
+"#;
+    let library = format!("class KeywordProbe\n{METHODS}end\n");
+    emit_and_run::real_blog()
+        .write("app/services/keyword_probe.rb", &library)
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n",
+            &format!("class Article < ApplicationRecord\n{METHODS}"))
+        .run_ruby(r#"
+[Article, KeywordProbe].each do |owner|
+  raise "keyword packet captured a local" unless owner.pr197_local_collision(factor: 7) == 23
+  raise "class keyword packet captured a positional" unless owner.pr197_forward(11, 4, factor: 7, offset: 5) == [7, 26]
+  raise "class keyword default lost" unless owner.pr197_forward(11, 4, factor: 7) == [7, 23]
+  instance = owner.new
+  raise "instance keyword packet captured a positional" unless instance.pr197_instance(11, 4, factor: 7, offset: 5) == [7, 26]
+  raise "instance keyword default lost" unless instance.pr197_instance(11, 4, factor: 7) == [7, 23]
+  begin
+    owner.pr197_forward(11, 4)
+    raise "missing required keyword accepted"
+  rescue ArgumentError
+  end
+end
+"#).assert_passes();
+}
+
+#[test]
+fn anonymous_keywords_forward_empty_and_false_values_through_super() {
+    emit_and_run::real_blog()
+        .write("app/services/keyword_parent.rb", r#"class KeywordParent
+  def call(factor: false, offset: nil, **)
+    [factor, offset]
+  end
+end
+class KeywordChild < KeywordParent
+  def call(**)
+    super(**)
+  end
+end
+"#)
+        .run_ruby(r#"
+probe = KeywordChild.new
+raise "empty keyword packet changed defaults" unless probe.call == [false, nil]
+raise "false or nil keyword was dropped" unless probe.call(factor: nil, offset: false) == [nil, false]
+"#).assert_passes();
+}
+
+#[test]
+fn destructuring_preserves_user_bindings_and_expression_values() {
+    const TEMPLATE: &str = r#"class HygieneProbe
+  def self.targets
+    a, *TARGET, c = [11, 22, 33]
+    [a, TARGET, c]
+  end
+  def self.scope(PARAM)
+    a, *middle, c = [11, 22, 33]
+    [a, middle, c, PARAM]
+  end
+  def self.expression
+    (a, *middle, c = [11, 22, 33, 44])
+  end
+  def self.instance_targets
+    @a, *@middle, @c = [*[11, 22], 33, 44]
+    [@a, @middle, @c]
+  end
+end
+"#;
+    // Deliberately collide with both span-derived stems. Parameter names
+    // change later offsets, so settle the source before ingesting it.
+    let mut target = "__target".to_string();
+    let mut param = "__param".to_string();
+    let source = loop {
+        let source = TEMPLATE.replace("TARGET", &target).replace("PARAM", &param);
+        let next_target = format!("__mw_{}", source.find("a, *").unwrap());
+        let next_param = format!("__mw_{}", source.find("a, *middle").unwrap());
+        if target == next_target && param == next_param { break source }
+        target = next_target;
+        param = next_param;
+    };
+    const ASSERTIONS: &str = r#"
+raise "temporary captured rest target" unless HygieneProbe.targets == [11, [22], 33]
+raise "temporary captured a parameter" unless HygieneProbe.scope(41) == [11, [22], 33, 41]
+raise "assignment expression lost RHS" unless HygieneProbe.expression == [11, 22, 33, 44]
+raise "ivar targets or array splat changed" unless HygieneProbe.instance_targets == [11, [22, 33], 44]
+"#;
+    let native = std::process::Command::new("ruby").arg("-e")
+        .arg(format!("{source}\n{ASSERTIONS}"))
+        .output().expect("CRuby control");
+    assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+    emit_and_run::real_blog().write("app/services/hygiene_probe.rb", &source)
+        .run_ruby(ASSERTIONS).assert_passes();
+}
+
+#[test]
+fn post_rest_destructuring_handles_short_arrays_and_evaluates_once() {
+    const SOURCE: &str = r#"class DestructureProbe
+  def self.first_value
+    @calls ||= 0
+    @calls = @calls + 1
+    11
+  end
+  def self.short
+    a, *b, c, d = [first_value, 22]
+    [a, b, c, d, @calls]
+  end
+  def self.empty
+    a, *b, c, d = []
+    [a, b, c, d]
+  end
+  def self.one
+    a, *b, c, d = [11]
+    [a, b, c, d]
+  end
+  def self.exact
+    a, *b, c, d = [11, 22, 33]
+    [a, b, c, d]
+  end
+  def self.long
+    a, *b, c, d = [11, 22, 33, 44, 55]
+    [a, b, c, d]
+  end
+  def self.discard
+    a, *, c, d = [11, 22]
+    [a, c, d]
+  end
+end
+"#;
+    const ASSERTIONS: &str = r##"
+expected = {short: [11, [], 22, nil, 1], empty: [nil, [], nil, nil], one: [11, [], nil, nil], exact: [11, [], 22, 33], long: [11, [22, 33], 44, 55], discard: [11, 22, nil]}
+expected.each do |method, want|
+  got = DestructureProbe.public_send(method)
+  raise "#{method}: #{got.inspect}, expected #{want.inspect}" unless got == want
+end
+"##;
+    let native = std::process::Command::new("ruby").arg("-e")
+        .arg(format!("{SOURCE}\n{ASSERTIONS}"))
+        .output().expect("CRuby control");
+    assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+    emit_and_run::real_blog()
+        .write("app/services/destructure_probe.rb", SOURCE)
+        .run_ruby(ASSERTIONS).assert_passes();
+}
+
+#[test]
+fn class_variable_compound_writes_share_the_read_storage() {
+    emit_and_run::real_blog()
+        .write("app/services/counter_probe.rb", r#"class CounterProbe
+  @@count = nil
+  def next_value
+    @@count ||= 11
+    @@count = @@count + 3
+    @@count
+  end
+  def operators
+    @@count += 7
+    @@count -= 3
+    @@count &&= @@count + 2
+    @@count
+  end
+  def skip
+    @@count = false
+    @@count &&= explode
+    @@count
+  end
+  def explode
+    raise "short circuit evaluated RHS"
+  end
+  def self.current
+    @@count
+  end
+end
+class CounterChild < CounterProbe
+end
+"#)
+        .run_ruby(r#"
+raise "native nil initializer was dropped" unless CounterProbe.current.nil? && CounterChild.current.nil?
+raise "compound write and read used different storage" unless CounterChild.new.next_value == 14
+raise "class reader used per-class storage" unless CounterProbe.current == 14 && CounterChild.current == 14
+raise "class variable storage split across inheritance" unless CounterProbe.new.next_value == 17
+raise "class reader lost the shared update" unless CounterProbe.current == 17 && CounterChild.current == 17
+raise "compound operators changed" unless CounterChild.new.operators == 23
+raise "operator storage split across inheritance" unless CounterProbe.current == 23
+raise "false RHS was evaluated" unless CounterProbe.new.skip == false
+raise "shared false storage lost" unless CounterChild.current == false
+"#).assert_passes();
+}
+
+#[test]
+fn defined_guards_and_source_literals_run_after_emission() {
+    emit_and_run::real_blog()
+        .write("app/services/guard_probe.rb", r#"class GuardProbe
+  VALUE = 11
+  def self.constants
+    [defined?(GuardProbe), defined?(GuardProbe::VALUE), defined?(MissingPr197), defined?(GuardProbe::MissingPr197)]
+  end
+  def self.uninvoked
+    raise "defined? invoked its terminal method"
+  end
+  def self.calls
+    defined?(self.uninvoked)
+  end
+  def self.location
+    [__FILE__, __LINE__]
+  end
+  def self.value
+    11
+  end
+  def self.predicates
+    [defined?(self.uninvoked.nil?), defined?(self.value.nil?), defined?(self.value.present?)]
+  end
+  def self.simple
+    [defined?(self), defined?(nil), defined?(true), defined?(false), defined?(17), defined?(MissingOuterPr197::Inner)]
+  end
+  def classvars
+    before = defined?(@@value)
+    @@value = nil
+    [before, defined?(@@value)]
+  end
+  def visible
+    11
+  end
+  private
+  def hidden
+    raise "private query invoked method"
+  end
+end
+class GuardChild < GuardProbe
+  def self.calls
+    defined?(super)
+  end
+  def queries
+    [defined?(self.visible), defined?(self.hidden)]
+  end
+end
+"#)
+        .run_ruby(r#"
+raise "constant guard changed" unless GuardProbe.constants == ["constant", "constant", nil, nil]
+raise "method guard changed" unless GuardProbe.calls == "method"
+raise "super guard changed" unless GuardChild.calls == "super"
+raise "source identity changed" unless GuardProbe.location == ["app/services/guard_probe.rb", 13]
+raise "predicate query was lowered or evaluated as a normal call" unless GuardProbe.predicates == [nil, "method", "method"]
+raise "static descriptors became booleans" unless GuardProbe.simple == ["self", "nil", "true", "false", "expression", nil]
+raise "nil class variable was confused with absence" unless GuardProbe.new.classvars == [nil, "class variable"]
+raise "inherited or private method query changed" unless GuardChild.new.queries == ["method", nil]
+"#).assert_passes();
 }
 
 /// A routed action with a template and no method behind it: Rails runs

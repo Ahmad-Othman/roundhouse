@@ -157,6 +157,8 @@ fn count_gradual_recurse(e: &Expr, total: &mut usize) {
         | N::Retry
         | N::Redo
         | N::ForwardArgs
+        | N::ForwardKeywords
+        | N::Defined { .. }
         | N::SelfRef => {}
         N::If { cond, then_branch, else_branch } => {
             count_gradual_recurse(cond, total);
@@ -272,6 +274,8 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
         | ExprNode::Retry
         | ExprNode::Redo
         | ExprNode::ForwardArgs
+        | ExprNode::ForwardKeywords
+        | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_untyped(cond, &format!("{path}/if.cond"), out);
@@ -1546,7 +1550,23 @@ fn every_runtime_method_body_concretely_typed() {
     // @orders / @records / to_a seam every other terminal already
     // pays. What it bought: campfire's ordered.last(PAGE_SIZE) is
     // ORDER BY … DESC LIMIT n, not the whole room history.
-    const CEILING: usize = 537;
+    //
+    // 537 -> 538, ONE MEASURED (relation.rb 256 -> 257): `Relation#reorder`
+    // hands its untyped `*parts` to `order`, the read `order` and `order!`
+    // already pay. `skip_preloading!` and `preload_associations` beside it
+    // cost nothing once `records` is typed `Array[untyped]`. What it bought:
+    // campfire's message paging after basecamp/once-campfire#292 (and #304,
+    // #312, which `reorder` a page's relation).
+    //
+    // 538 -> 543, FIVE MEASURED (active_support_ext.rb 40 -> 44,
+    // active_job.rb 1 -> 2): `ActiveSupport::JSON.encode` reads its
+    // untyped Hash's pairs and each scalar once (a `case`, not a chain of
+    // tests, which cost nine), and `ActiveJob.perform_held` calls a held
+    // Proc, the `.call` `drain` already pays. What it bought: campfire's
+    // unread notice, encoded once and broadcast `coder: nil`
+    // (basecamp/once-campfire#292), and #296's tests, which post first
+    // and perform the held fanout job after.
+    const CEILING: usize = 543;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

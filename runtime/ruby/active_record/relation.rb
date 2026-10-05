@@ -40,6 +40,7 @@ module ActiveRecord
       @limit = nil
       @offset = nil
       @includes = []
+      @skip_preloading = false
       @records = nil
       @scope_attributes = {}
       @from = nil
@@ -201,6 +202,14 @@ module ActiveRecord
         @records = nil
       end
       self
+    end
+
+    # `reorder(*parts)` — Rails' "replace the ordering": drop every term
+    # gathered so far, then order by these. Same in-memory resort as
+    # `order` when the records are already loaded.
+    def reorder(*parts)
+      @orders = []
+      order(*parts)
     end
 
     # Rails' mutating spellings. This Relation's chain methods already
@@ -593,6 +602,25 @@ module ActiveRecord
       self
     end
 
+    # `skip_preloading!` — load the rows without running the recorded
+    # `includes`/`preload` specs. The specs stay on the relation, so a
+    # caller can apply them later, to just the records it needs, with
+    # `preload_associations`. campfire's message pages load this way and
+    # preload only the messages its fragment cache missed.
+    def skip_preloading!
+      @records = nil
+      @skip_preloading = true
+      self
+    end
+
+    # `preload_associations(records)` — run this relation's recorded
+    # preload specs against `records`, loaded here or anywhere else, the
+    # batched `IN` loads `load_records` would have run on its own rows.
+    def preload_associations(records)
+      @model.preload_associations(records, @includes) if @includes.length > 0
+      records
+    end
+
     def eager_load(*names)
       @records = nil
       names.each { |n| @includes << n }
@@ -716,7 +744,7 @@ module ActiveRecord
         rows = ActiveRecord.adapter.select_rows(to_sql)
         rows.map { |row| @model.instantiate(row) }
       end
-      @model.preload_associations(records, @includes) if @includes.length > 0
+      @model.preload_associations(records, @includes) if @includes.length > 0 && !@skip_preloading
       records
     end
 
@@ -724,6 +752,13 @@ module ActiveRecord
     # loaded records, which is what lets `[story, relation].flatten`
     # splice the relation's records into the surrounding Array
     # (Array#flatten recurses into elements that respond to to_ary).
+    # `relation.to_set` — Enumerable's, on the loaded records (campfire's
+    # `Rooms::Direct.find_or_create_for(...).users.to_set`, comparing
+    # direct-room members whatever their order).
+    def to_set
+      Set.new(to_a)
+    end
+
     def to_ary
       to_a
     end
@@ -1189,6 +1224,7 @@ module ActiveRecord
     # An `Integer?` param narrows by early return, not by a guard —
     # rust2 does not narrow an `Option` across `unless x.nil?`.
     def exists?(id = nil)
+      return offset_row_exists? if id.nil? && !@offset.nil?
       return count > 0 if id.nil?
       # Popped for the same reason `find` and `find_by` pop: a terminal
       # that answered a question must not narrow the relation it was
@@ -1197,6 +1233,18 @@ module ActiveRecord
       found = count > 0
       @wheres.pop
       found
+    end
+
+    # `offset(n).exists?` — whether a row lies past the first n, which
+    # is campfire's `paged?` (basecamp/once-campfire#297). A COUNT ignores
+    # the offset and answered whether the room had any messages at all;
+    # Rails asks for one row past it, `SELECT 1 … LIMIT 1 OFFSET n`.
+    def offset_row_exists?
+      prior = @limit
+      @limit = 1
+      sql = select_sql_with("1 AS one")
+      @limit = prior
+      ActiveRecord.adapter.select_rows(sql).length > 0
     end
 
     def length
@@ -1617,9 +1665,53 @@ module ActiveRecord
     # the leftmost remaining `?`, so iterating the args consumes them in
     # order.
     def substitute_binds(sql, args)
+      first = args[0]
+      return substitute_named_binds(sql, first) if args.length == 1 && first.is_a?(Hash)
       result = sql
       args.each { |a| result = result.sub("?", ActiveRecord.adapter.escape_value(a)) }
       result
+    end
+
+    # Rails' named binds: `having("COUNT(*) = :size AND … IN (:user_ids)",
+    # size: 2, user_ids: [3, 5])`, campfire's direct-room lookup
+    # (basecamp/once-campfire#310). Each `:name` the Hash answers is
+    # replaced by its escaped value, and an Array value by a
+    # comma-separated list. A `::` cast is left alone, as is a name the
+    # Hash does not have. Before this, the placeholders reached SQLite
+    # unbound and read as NULL: every lookup missed and every Ping
+    # created a new direct room.
+    def substitute_named_binds(sql, binds)
+      out = ""
+      i = 0
+      n = sql.length
+      while i < n
+        ch = sql[i, 1].to_s
+        prev = i > 0 ? sql[i - 1, 1].to_s : ""
+        nxt = sql[i + 1, 1].to_s
+        if ch == ":" && prev != ":" && nxt != ":" && named_bind_start?(nxt)
+          j = i + 1
+          j += 1 while j < n && named_bind_char?(sql[j, 1].to_s)
+          name = sql[i + 1, j - i - 1].to_s
+          key = name.to_sym
+          if binds.key?(key)
+            value = binds[key]
+            out = out + (value.is_a?(Array) ? escape_list(value) : ActiveRecord.adapter.escape_value(value))
+            i = j
+            next
+          end
+        end
+        out = out + ch
+        i += 1
+      end
+      out
+    end
+
+    def named_bind_start?(ch)
+      (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch == "_"
+    end
+
+    def named_bind_char?(ch)
+      named_bind_start?(ch) || (ch >= "0" && ch <= "9")
     end
 
     def escape_list(vals)

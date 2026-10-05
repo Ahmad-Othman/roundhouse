@@ -30,6 +30,7 @@ module ActiveRecord
     def quote: (untyped value) -> String
     def quote_string: (String str) -> String
     def execute: (String sql) -> Result
+    def select_rows: (String sql) -> Array[Array[untyped]]
     def exec_query: (String sql) -> Result
     def select_all: (String sql) -> Result
     def exec_update: (String sql, ?untyped name, ?Array[untyped] binds) -> Integer

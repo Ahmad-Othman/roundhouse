@@ -814,7 +814,14 @@ process keeps one record per digest scheme. Purging a blob purges its
 variant records, their image blobs and their files first. The app's
 libvips loader policy (`Vips.block_untrusted(true)`, `Vips.block(op,
 true)` in an initializer) is lifted at ingest onto the `Rails
-::Application` reopen and applied when the processor loads. `variable?`
+::Application` reopen and applied when the processor loads. The
+processor also wraps `Vips.vips_foreign_find_load` so a blocked
+loader is not selected: libvips 8.15+ skips BLOCKED classes in
+`vips_foreign_map`, but 8.14 still names Magick/Svg after
+`block_untrusted` even though load itself raises. The wrap reaches
+the C finder through `VipsExt` (the spinel package's binding, or an
+FFI stand-in on the gem). Wrapping the Ruby finder in place re-enters
+the wrapper on the spinel package. `variable?`
 is Rails' content-type question, answered from `variable_content_types`
 minus what the app's initializer subtracts (ingest lifts
 `config.active_storage.variable_content_types -= %w[…]` onto the same
