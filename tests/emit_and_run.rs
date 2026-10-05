@@ -4633,3 +4633,27 @@ end
         )
         .assert_passes();
 }
+
+/// A view directory with a hyphen (`product-item/`) is legal in Rails and
+/// common in real apps, but `Views::Product-item` and a `product-item`
+/// parameter are not Ruby. The emitted partial must load and render.
+#[test]
+fn a_hyphenated_view_directory_renders() {
+    emit_and_run::real_blog()
+        .write(
+            "app/views/note-card/_note.html.erb",
+            "<aside class=\"note-card\"><%= note %></aside>\n",
+        )
+        .edit(
+            "app/views/articles/index.html.erb",
+            "<div class=\"w-full\">\n",
+            "<div class=\"w-full\">\n  <%= render \"note-card/note\", note: \"hyphen ok\" %>\n",
+        )
+        .edit(
+            "test/controllers/articles_controller_test.rb",
+            "    assert_select \"h1\", \"Articles\"\n",
+            "    assert_select \"h1\", \"Articles\"\n    assert_select \"aside.note-card\", \"hyphen ok\"\n",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
