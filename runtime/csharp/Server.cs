@@ -57,9 +57,18 @@ public static class Server
         // The raw request target, still percent-encoded, minus its query:
         // the shared router decodes each capture (`Router.decode_segment`),
         // as Rails' does. `Request.Path` is ASP.NET's decoded form (all but
-        // `%2F`), which the router would decode a second time.
+        // `%2F`), which the router would decode a second time. An
+        // absolute-form target (`GET http://host/articles`, as sent to a
+        // proxy) carries a scheme and host; `Uri.AbsolutePath` keeps just
+        // its path, still escaped.
         var rawTarget = ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpRequestFeature>()?.RawTarget;
-        var path = string.IsNullOrEmpty(rawTarget) ? (ctx.Request.Path.Value ?? "/") : rawTarget.Split('?')[0];
+        string path;
+        if (!string.IsNullOrEmpty(rawTarget) && rawTarget.StartsWith('/'))
+            path = rawTarget.Split('?')[0];
+        else if (!string.IsNullOrEmpty(rawTarget) && Uri.TryCreate(rawTarget, UriKind.Absolute, out var targetUri))
+            path = targetUri.AbsolutePath;
+        else
+            path = ctx.Request.Path.Value ?? "/";
 
         // Action Cable WebSocket — upgrade /cable and hand the socket to the
         // Cable handler, negotiating the actioncable-v1-json subprotocol Turbo
