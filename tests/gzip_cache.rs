@@ -40,6 +40,11 @@ raise "HEAD gzipped" if head[1]["content-encoding"]
 no_body = GzipCache.wrap(lambda { |_e| [204, { "content-type" => "text/html" }, ["y" * 128]] })
 nb = no_body.call(env)
 raise "204 gzipped" if nb[1]["content-encoding"]
+
+q0 = wrapped.call(env.merge("HTTP_ACCEPT_ENCODING" => "gzip;q=0, identity"))
+raise "q=0 gzipped" if q0[1]["content-encoding"]
+q08 = wrapped.call(env.merge("HTTP_ACCEPT_ENCODING" => "gzip;q=0.8"))
+raise "q=0.8 skipped" unless q08[1]["content-encoding"] == "gzip"
 puts "ALL OK"
 "#;
     let out = Command::new("ruby")

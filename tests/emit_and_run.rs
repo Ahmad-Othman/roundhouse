@@ -898,6 +898,12 @@ raise "loaded last_n re-queried: #{seen.inspect}" if seen.any? { |s| s.include?(
 
 off = ActiveRecord::Relation.new(Article).where("title LIKE 'tail-%'").order(:title).offset(1)
 raise "offset tail" unless off.last_n(2).map(&:title) == ["tail-d", "tail-e"]
+
+rel = ActiveRecord::Relation.new(Article)
+raise "one col" unless rel.reverse_order_term("title DESC") == "title ASC"
+raise "hash join" unless rel.reverse_order_term("a ASC, b DESC") == "a DESC, b ASC"
+raise "raw pair" unless rel.reverse_order_term("created_at DESC, id DESC") == "created_at ASC, id ASC"
+raise "bare" unless rel.reverse_order_term("title") == "title DESC"
 puts "ok"
 "##,
         )

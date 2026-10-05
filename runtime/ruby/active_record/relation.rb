@@ -306,11 +306,34 @@ module ActiveRecord
       words.length == 2 && words[1].upcase == "DESC"
     end
 
-    # Flip ASC/DESC on one ORDER BY fragment so `last_n` can LIMIT the
-    # tail in SQL. A term with no direction is ASC (SQLite and Rails);
-    # DESC becomes ASC. Expressions keep their text and only the last
-    # direction word moves — `created_at DESC` → `created_at ASC`.
+    # Flip ASC/DESC so `last_n` can LIMIT the tail in SQL. A term with
+    # no direction is ASC (SQLite and Rails). `order_term` joins a Hash
+    # into one comma-separated string (`"a ASC, b DESC"`), and a raw
+    # `"created_at DESC, id DESC"` is stored as one `@orders` entry, so
+    # each comma-separated fragment is reversed on its own.
     def reverse_order_term(term)
+      t = term.strip
+      out = ""
+      start = 0
+      i = 0
+      n = t.length
+      while i <= n
+        comma = false
+        comma = true if i < n && t[i] == ","
+        if i == n || comma
+          part = t[start, i - start].to_s.strip
+          if part.length > 0
+            out = "#{out}, " if out.length > 0
+            out = "#{out}#{reverse_one_order_term(part)}"
+          end
+          start = i + 1
+        end
+        i += 1
+      end
+      out
+    end
+
+    def reverse_one_order_term(term)
       t = term.strip
       upper = t.upcase
       if upper.end_with?(" DESC")

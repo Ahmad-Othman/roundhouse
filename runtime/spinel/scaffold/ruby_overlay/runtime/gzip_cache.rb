@@ -31,7 +31,7 @@ module GzipCache
     return [status, headers, body] if status < 200 || status == 204 || status == 304
     return [status, headers, body] if env["REQUEST_METHOD"] == "HEAD"
     accept = env["HTTP_ACCEPT_ENCODING"].to_s
-    return [status, headers, body] unless accept.downcase.include?("gzip")
+    return [status, headers, body] unless accepts_gzip?(accept)
     return [status, headers, body] if header(headers, "content-encoding")
     raw = join_body(body)
     return [status, headers, [raw]] if raw.bytesize < 64
@@ -71,6 +71,19 @@ module GzipCache
 
   def self.header(headers, name)
     headers[name] || headers[name.split("-").map(&:capitalize).join("-")]
+  end
+
+  def self.accepts_gzip?(accept)
+    accept.to_s.downcase.split(",").any? { |part|
+      coding, *params = part.strip.split(";")
+      next false unless coding == "gzip" || coding == "x-gzip"
+      q = "1"
+      params.each { |p|
+        k, v = p.strip.split("=", 2)
+        q = v.to_s if k == "q"
+      }
+      q.to_f > 0.0
+    }
   end
 
   def self.binary?(ct)

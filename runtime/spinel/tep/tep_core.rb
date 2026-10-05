@@ -97,6 +97,81 @@ module Tep
     @max_body_bytes
   end
 
+  # gzip / x-gzip with q>0. `include?("gzip")` would honour gzip;q=0
+  # (RFC 9110 §12.5.3: q=0 means not acceptable) and would match
+  # `gzipfoo`. wrk sends `gzip` or `identity`; this is the protocol.
+  def self.accepts_gzip?(accept)
+    s = accept.downcase
+    n = s.bytesize
+    i = 0
+    while i < n
+      while i < n
+        b = s.getbyte(i)
+        break unless b == 32 || b == 44
+        i += 1
+      end
+      break if i >= n
+      name_end = i
+      while name_end < n
+        b = s.getbyte(name_end)
+        break if b == 32 || b == 44 || b == 59
+        name_end += 1
+      end
+      namelen = name_end - i
+      gzip = (namelen == 4 && s[i, 4] == "gzip") || (namelen == 6 && s[i, 6] == "x-gzip")
+      j = name_end
+      while j < n && s.getbyte(j) != 44
+        j += 1
+      end
+      if gzip
+        q = Tep.encoding_q(s, name_end, j)
+        return true if q > 0
+      end
+      i = j + 1
+    end
+    false
+  end
+
+  # Quality value of one coding, from the ';' after its name to the
+  # comma (or end). Missing q is 1. q=0 / q=0.0 is 0; q=0.8 is 8 tenths
+  # so the caller can treat it as > 0 without Float.
+  def self.encoding_q(s, from, to)
+    j = from
+    while j < to
+      if s.getbyte(j) == 59
+        j += 1
+        while j < to && s.getbyte(j) == 32
+          j += 1
+        end
+        if j + 1 < to && s.getbyte(j) == 113 && s.getbyte(j + 1) == 61
+          j += 2
+          return 0 if Tep.q_is_zero?(s, j, to)
+          return 1
+        end
+      else
+        j += 1
+      end
+    end
+    1
+  end
+
+  def self.q_is_zero?(s, from, to)
+    j = from
+    return true if j >= to
+    while j < to
+      b = s.getbyte(j)
+      break if b == 32 || b == 59
+      if b == 46
+        j += 1
+        next
+      end
+      return false if b < 48 || b > 57
+      return false if b != 48
+      j += 1
+    end
+    true
+  end
+
   # Gzip of an identity body, keyed by the identity bytes. A campfire
   # room page is the same HTML for every wrk GET that shares a session;
   # without this, Zlib.gzip runs on every request and is the measured
@@ -137,7 +212,7 @@ module Tep
     return if res.body.bytesize < 64
     return if res.headers["Content-Encoding"].length > 0
     accept = req.req_headers["accept-encoding"]
-    return unless accept.downcase.include?("gzip")
+    return unless Tep.accepts_gzip?(accept)
     ct = res.headers["Content-Type"]
     return if ct.start_with?("image/") || ct.start_with?("audio/") ||
               ct.start_with?("video/") || ct.start_with?("font/") ||

@@ -35,6 +35,8 @@ module Tep
   _tep_seed_res.set_cookie("", "", str_hash)
   _tep_seed_res.start_stream(Streamer.new)
   Tep.gzip_cached("seed-gzip-cache-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+  Tep.accepts_gzip?("gzip")
+  Tep.accepts_gzip?("gzip;q=0, identity")
   _tep_seed_stream = Stream.new(0)
   _tep_seed_res.streamer.pump(_tep_seed_stream)
   _tep_seed_stream.write("")
