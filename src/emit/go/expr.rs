@@ -161,6 +161,7 @@ impl EmitCtx {
     }
 }
 
+/// Render a Go expression in its declaration context, selecting whole-call primitives first.
 pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
     if let Some(s) = crate::emit::shared::string_bytes::emit(e, crate::emit::shared::string_bytes::Target::Go, |recv| emit_expr(ctx, recv)) {
         return s;

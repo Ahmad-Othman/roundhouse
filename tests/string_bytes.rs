@@ -37,6 +37,28 @@ fn analyze_source(source: &str) -> roundhouse::App {
     app
 }
 
+/// Extract the actual analyzed call, retaining a literal nil block operand so
+/// primitive execution tests exercise the same classifier as project emission.
+fn analyzed_call(name: &str) -> roundhouse::expr::Expr {
+    let app = analyzed();
+    let class = app
+        .library_classes
+        .iter()
+        .find(|class| class.name.0.as_str() == "ByteProbe")
+        .unwrap();
+    let body = &class
+        .methods
+        .iter()
+        .find(|method| method.name.as_str() == name)
+        .unwrap()
+        .body;
+    if let roundhouse::expr::ExprNode::Seq { exprs } = &*body.node {
+        exprs.last().unwrap().clone()
+    } else {
+        body.clone()
+    }
+}
+
 /// Pin both the collection element type and the block yield/return contract;
 /// an explicit nil block still requests array materialization.
 #[test]
@@ -122,6 +144,7 @@ fn every_bridge_dispatches_and_refuses_the_supplied_block() {
         app
     };
     let app = make_app("\"Aé東🎉\".bytes");
+    let nil_app = make_app("\"Aé東🎉\".bytes(&nil)");
     let block_app = make_app("\"é\".bytes { |byte| byte + 1 }");
     let targets = [
         ("rust", BuildTarget::Rust, ".as_bytes().iter().map("),
@@ -177,12 +200,164 @@ fn every_bridge_dispatches_and_refuses_the_supplied_block() {
             files.iter().any(|(_, content)| content.contains(bridge)),
             "{name} did not dispatch String#bytes: {errors:?}"
         );
+        // Exercise project admission even for Python, whose arbitrary model
+        // methods use the separate library expression path below.
+        let (result, diagnostics) = emit::diagnostics::scope(|| {
+            roundhouse::project::target_files(&nil_app, std::path::Path::new("."), target)
+        });
+        assert!(result.is_ok(), "{name} refused literal &nil: {result:?}");
+        assert!(diagnostics.is_empty(), "{name}: {diagnostics:?}");
+        let (files, diagnostics) =
+            emit::diagnostics::scope(|| output(&nil_app, target, "nil_block"));
+        assert!(diagnostics.is_empty(), "{name}: {diagnostics:?}");
+        assert!(
+            files.iter().any(|(_, content)| content.contains(bridge)),
+            "{name} did not materialize literal &nil"
+        );
         let (_, diagnostics) = emit::diagnostics::scope(|| output(&block_app, target, "yielded"));
         assert!(
             diagnostics
                 .iter()
                 .any(|d| d.severity == Severity::Error && d.message.contains("String#bytes")),
             "{name} discarded the block: {diagnostics:?}"
+        );
+    }
+}
+
+/// Ruby and Spinel share emission, so canonicalize only the typed no-block byte
+/// call; unrelated forwarding and effectful block operands must survive.
+#[test]
+fn ruby_family_canonicalizes_only_literal_nil_bytes() {
+    let app = analyze_source(
+        r#"class ByteProbe
+  def values
+    "é".bytes(&nil)
+  end
+  def unrelated
+    "é".upcase(&nil)
+  end
+  def effectful
+    "é".bytes(&(puts("side effect"); nil))
+  end
+  def yielded
+    "é".bytes { |byte| byte + 1 }
+  end
+end
+"#,
+    );
+    let class = app
+        .library_classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "ByteProbe")
+        .unwrap();
+    let output = |name: &str| {
+        emit::ruby::emit_expr(
+            &class
+                .methods
+                .iter()
+                .find(|m| m.name.as_str() == name)
+                .unwrap()
+                .body,
+        )
+    };
+    let values = output("values");
+    assert!(values.contains(".bytes"), "{values}");
+    assert!(!values.contains('&'), "{values}");
+    let unrelated = output("unrelated");
+    assert!(unrelated.contains("&nil"), "{unrelated}");
+    let effectful = output("effectful");
+    assert!(
+        effectful.contains('&') && effectful.contains("side effect"),
+        "{effectful}"
+    );
+    let yielded = output("yielded");
+    assert!(
+        yielded.contains("|byte|") && yielded.contains("byte + 1"),
+        "{yielded}"
+    );
+}
+
+/// Lowering may represent an unsupported expression as a diagnostic-bearing
+/// nil. It must remain a refusal or raise, never become an omitted block.
+#[test]
+fn diagnostic_nil_block_is_not_discarded() {
+    use emit::shared::string_bytes::{self, Target};
+    use roundhouse::diagnostic::DiagnosticKind;
+    use roundhouse::expr::ExprNode;
+    let mut call = analyzed_call("nil_block");
+    let ExprNode::Send {
+        block: Some(block), ..
+    } = &mut *call.node
+    else {
+        panic!("expected the literal-nil byte call");
+    };
+    block.diagnostic = Some(DiagnosticKind::Unsupported {
+        target: None,
+        construct: "forwarded operand".into(),
+        detail: "preserve this refusal".into(),
+    });
+    assert!(!string_bytes::materializes_array(&call));
+    let ruby = emit::ruby::emit_expr(&call);
+    assert!(
+        ruby.contains("raise") && ruby.contains("forwarded operand not supported"),
+        "{ruby}"
+    );
+    let (_, diagnostics) = emit::diagnostics::scope(|| {
+        string_bytes::emit(&call, Target::Python, |_| panic!("must not materialize"))
+    });
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error && d.message.contains("String#bytes")),
+        "{diagnostics:?}"
+    );
+}
+
+/// The bytes exemption is local to the implemented primitive. It must not
+/// admit unrelated forwarding or skip validation within an effectful receiver.
+#[test]
+fn nil_bytes_exemption_preserves_other_forwarding_boundaries() {
+    for source in [
+        "class ByteProbe < ActiveRecord::Base\n  def values\n    \"A\".upcase(&nil)\n  end\nend\n",
+        "class ByteProbe < ActiveRecord::Base\n  def receiver\n    \"A\"\n  end\n  def values\n    receiver(&nil).bytes(&nil)\n  end\nend\n",
+        "class ByteProbe < ActiveRecord::Base\n  def values\n    \"A\".bytes(&(puts(\"side effect\"); nil))\n  end\nend\n",
+    ] {
+        let mut app = roundhouse::ingest::ingest_app_from_tree(HashMap::from([
+            (PathBuf::from("app/models/byte_probe.rb"), source.as_bytes().to_vec()),
+            (PathBuf::from("db/schema.rb"), b"ActiveRecord::Schema.define do\n  create_table :byte_probes do |t|\n    t.string :name\n  end\nend\n".to_vec()),
+        ])).unwrap();
+        roundhouse::session::analyze_and_lower(&mut app);
+        let mut pending: Vec<_> = app
+            .models
+            .iter()
+            .flat_map(|model| model.methods().map(|method| &method.body))
+            .collect();
+        let mut materializing_call = false;
+        while let Some(expression) = pending.pop() {
+            materializing_call |= emit::shared::string_bytes::materializes_array(expression);
+            expression
+                .node
+                .for_each_child(&mut |child| pending.push(child));
+        }
+        assert_eq!(
+            materializing_call,
+            source.contains("receiver(&nil).bytes"),
+            "the nested receiver control must reach the bytes exemption: {source}"
+        );
+        let (result, diagnostics) = emit::diagnostics::scope(|| {
+            roundhouse::project::target_files(&app, std::path::Path::new("."), BuildTarget::Rust)
+        });
+        assert!(
+            result.is_err(),
+            "unrelated forwarding was accepted: {source}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| matches!(&diagnostic.kind,
+            roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+                if construct.as_str() == "forwarded_proc")),
+            "{source}: {diagnostics:?}"
         );
     }
 }
@@ -221,18 +396,22 @@ fn shared_bridge_evaluates_receiver_once_and_rejects_arguments() {
         Target::Go,
         Target::Elixir,
     ] {
-        let mut calls = 0;
-        let output = string_bytes::emit(&expression, target, |_| {
-            calls += 1;
-            "effectful_receiver()".into()
-        })
-        .unwrap();
-        assert_eq!(calls, 1);
-        assert_eq!(
-            output.matches("effectful_receiver()").count(),
-            1,
-            "{output}"
-        );
+        for method in ["values", "nil_block"] {
+            let call = analyzed_call(method);
+            assert!(string_bytes::materializes_array(&call));
+            let mut calls = 0;
+            let output = string_bytes::emit(&call, target, |_| {
+                calls += 1;
+                "effectful_receiver()".into()
+            })
+            .unwrap();
+            assert_eq!(calls, 1);
+            assert_eq!(
+                output.matches("effectful_receiver()").count(),
+                1,
+                "{output}"
+            );
+        }
     }
     let argument = expression.clone();
     if let ExprNode::Send { args, .. } = &mut *expression.node {
@@ -261,15 +440,24 @@ fn generated_byte_expressions_execute_with_unsigned_values_and_one_receiver_call
     let dir = std::env::temp_dir().join(format!("roundhouse-string-bytes-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let rust = string_bytes::render(Target::Rust, "effectful_receiver()");
+    let nil_rust = string_bytes::emit(&analyzed_call("nil_block"), Target::Rust, |_| {
+        "effectful_receiver()".into()
+    })
+    .unwrap();
     let source = format!(
         r#"
 use std::sync::atomic::{{AtomicUsize, Ordering}};
 static CALLS: AtomicUsize = AtomicUsize::new(0);
+/// Count source receiver evaluations for the emitted primitive expressions.
 fn effectful_receiver() -> String {{ CALLS.fetch_add(1, Ordering::SeqCst); "A\0é東🎉".to_string() }}
+/// Execute both omitted-block and literal-nil forms with identical byte checks.
 fn main() {{
   let bytes: Vec<i64> = {rust};
   assert_eq!(bytes, vec![65, 0, 195, 169, 230, 157, 177, 240, 159, 142, 137]);
   assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+  let nil_bytes: Vec<i64> = {nil_rust};
+  assert_eq!(nil_bytes, bytes);
+  assert_eq!(CALLS.load(Ordering::SeqCst), 2);
   let empty: Vec<i64> = {empty};
   assert!(empty.is_empty());
 }}
@@ -290,15 +478,22 @@ fn main() {{
     );
     assert!(Command::new(dir.join("probe")).status().unwrap().success());
     let python = string_bytes::render(Target::Python, "effectful_receiver()");
+    let nil_python = string_bytes::emit(&analyzed_call("nil_block"), Target::Python, |_| {
+        "effectful_receiver()".into()
+    })
+    .unwrap();
     let source = format!(
         r#"
 calls = 0
 def effectful_receiver():
+    """Count source receiver evaluations for the emitted primitive expressions."""
     global calls
     calls += 1
     return "A\0é東🎉"
 assert {python} == [65, 0, 195, 169, 230, 157, 177, 240, 159, 142, 137]
 assert calls == 1
+assert {nil_python} == [65, 0, 195, 169, 230, 157, 177, 240, 159, 142, 137]
+assert calls == 2
 assert {empty} == []
 "#,
         empty = string_bytes::render(Target::Python, "\"\"")

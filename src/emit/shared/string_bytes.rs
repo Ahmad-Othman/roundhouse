@@ -1,5 +1,5 @@
 //! String#bytes materializes the receiver once as unsigned byte integers.
-use crate::expr::{Expr, ExprNode};
+use crate::expr::{Expr, ExprNode, Literal};
 use crate::ty::Ty;
 
 /// Targets whose string representation needs a byte-array bridge.
@@ -17,6 +17,7 @@ pub enum Target {
 }
 
 impl Target {
+    /// Use the diagnostic ledger's target name when refusing a call shape.
     fn name(self) -> &'static str {
         match self {
             Self::Rust => "rust",
@@ -32,15 +33,15 @@ impl Target {
     }
 }
 
-/// Classify the complete call before a backend separates its block from its
-/// receiver. Only the no-argument, no-block form materializes an array; a
-/// supplied block must never disappear into that bridge. Ruby and Spinel use
-/// their native implementation, including its block semantics.
-pub fn emit(
-    e: &Expr,
-    target: Target,
-    emit_receiver: impl FnOnce(&Expr) -> String,
-) -> Option<String> {
+enum Call<'a> {
+    Array(&'a Expr),
+    Unsupported(&'static str),
+}
+
+/// Keep call recognition and support policy shared by project validation and
+/// backend dispatch. Literal `&nil` passes no block in Ruby; arbitrary block
+/// operands still need an implementation and must never disappear.
+fn classify(e: &Expr) -> Option<Call<'_>> {
     if e.diagnostic.is_some() {
         return None;
     }
@@ -57,21 +58,47 @@ pub fn emit(
     if method.as_str() != "bytes" || recv.ty.as_ref() != Some(&Ty::Str) {
         return None;
     }
-    let unsupported = if !args.is_empty() {
-        Some("String#bytes accepts no positional arguments")
-    } else if block.is_some() {
-        Some("String#bytes with a block is not implemented for this target")
+    Some(if !args.is_empty() {
+        Call::Unsupported("String#bytes accepts no positional arguments")
+    } else if block.as_ref().is_some_and(|block| {
+        block.diagnostic.is_some()
+            || !matches!(
+                &*block.node,
+                ExprNode::Lit {
+                    value: Literal::Nil
+                }
+            )
+    }) {
+        Call::Unsupported("String#bytes with a block is not implemented for this target")
     } else {
-        None
-    };
-    Some(match unsupported {
-        Some(detail) => crate::emit::diagnostics::report_unsupported(
+        Call::Array(recv)
+    })
+}
+
+/// Let the project guard recognize this implemented no-block primitive and
+/// Ruby-family emission canonicalize literal &nil without accepting unrelated
+/// or effectful Proc forwarding.
+pub fn materializes_array(e: &Expr) -> bool {
+    matches!(classify(e), Some(Call::Array(_)))
+}
+
+/// Classify the complete call before a backend separates its block from its
+/// receiver. Omitted blocks and literal `&nil` materialize an array; supplied
+/// blocks remain explicit refusals. Ruby/Spinel keep native byte behavior and
+/// canonicalize literal &nil to an omitted block through the same classifier.
+pub fn emit(
+    e: &Expr,
+    target: Target,
+    emit_receiver: impl FnOnce(&Expr) -> String,
+) -> Option<String> {
+    Some(match classify(e)? {
+        Call::Unsupported(detail) => crate::emit::diagnostics::report_unsupported(
             e.span,
             target.name(),
             "String#bytes",
             detail,
         ),
-        None => render(target, &emit_receiver(recv)),
+        Call::Array(recv) => render(target, &emit_receiver(recv)),
     })
 }
 

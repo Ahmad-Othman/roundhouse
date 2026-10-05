@@ -800,6 +800,7 @@ fn emit_block_body(e: &Expr, void: bool) -> String {
     super::shared::indent_py(&inner)
 }
 
+/// Render a Python expression, retaining diagnostics and complete-call primitive handling.
 pub(super) fn emit_expr(e: &Expr) -> String {
     if let Some(s) = crate::emit::shared::string_bytes::emit(e, crate::emit::shared::string_bytes::Target::Python, emit_expr) {
         return s;
