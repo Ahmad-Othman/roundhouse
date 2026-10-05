@@ -290,6 +290,21 @@ pub(super) fn library_class_and_struct_base(
     } else {
         parent
     };
+    // Spinel (and any AOT that refuses core subclasses) cannot emit
+    // `class Page < Array` — it would build, then answer differently
+    // from CRuby for `is_a?`/`==`/`p` until a real Array subclass
+    // exists (spinel `refuse_builtin_subclass`). Rewrite into an
+    // Object that wraps the records in `@elements` and exposes the
+    // Array surface Campfire's pagination page needs (`to_a`/`to_ary`
+    // for collection render, `each`/`any?`/`+`/`first`/`last`/…).
+    // Same shape Spinel's refusal message asks the program for; done
+    // here so every target sees one typed class, not a spinel-only
+    // emit special case.
+    let (parent, methods) = if parent.as_ref().is_some_and(is_array_parent) {
+        (None, wrap_array_subclass(&owner, methods))
+    } else {
+        (parent, methods)
+    };
     let base = struct_members
         .as_ref()
         .map(|members| struct_base_class(&owner, members));
@@ -680,6 +695,178 @@ fn block_of(param: &str, body: Expr) -> Expr {
             block_style: crate::expr::BlockStyle::Brace,
         },
     )
+}
+
+/// `Array` or `::Array` in superclass position — the only core class
+/// Campfire subclasses today (`Message::Pagination::Page < Array`).
+fn is_array_parent(parent: &ClassId) -> bool {
+    matches!(parent.0.as_str(), "Array" | "::Array")
+}
+
+/// Rewrite `class X < Array` into an Object that holds `@elements`.
+///
+/// `super(records)` in `initialize` becomes `@elements = records`.
+/// Synthesized forwards cover the Array surface the corpus actually
+/// calls on a page (collection render, `page_around`'s `+`, sidebar
+/// `any?`, bot paging `first`/`last`, search `count`). User methods
+/// of the same name win — the synthesizer skips names already present.
+fn wrap_array_subclass(owner: &ClassId, mut methods: Vec<MethodDef>) -> Vec<MethodDef> {
+    for method in &mut methods {
+        rewrite_array_super_to_elements(&mut method.body);
+    }
+    let existing: HashSet<String> = methods
+        .iter()
+        .filter(|m| m.receiver == MethodReceiver::Instance)
+        .map(|m| m.name.as_str().to_string())
+        .collect();
+    let mut synthesized = synth_array_wrapper_methods(owner);
+    synthesized.retain(|m| !existing.contains(m.name.as_str()));
+    synthesized.append(&mut methods);
+    synthesized
+}
+
+/// `super(records)` / `super(records, …)` → `@elements = records`.
+/// Bare `super` / `super()` → `@elements = []`. Deeper args are
+/// dropped: Array#initialize takes one collection (or a size), and
+/// every corpus subclass only forwards the records.
+fn rewrite_array_super_to_elements(expr: &mut Expr) {
+    expr.node
+        .for_each_child_mut(&mut rewrite_array_super_to_elements);
+    let elements = Symbol::from("elements");
+    let replacement = match &*expr.node {
+        ExprNode::Super { args: Some(args) } if !args.is_empty() => Some(Expr::new(
+            expr.span,
+            ExprNode::Assign {
+                target: LValue::Ivar {
+                    name: elements.clone(),
+                },
+                value: args[0].clone(),
+            },
+        )),
+        ExprNode::Super { .. } => Some(Expr::new(
+            expr.span,
+            ExprNode::Assign {
+                target: LValue::Ivar { name: elements },
+                value: Expr::new(
+                    expr.span,
+                    ExprNode::Array {
+                        elements: vec![],
+                        style: crate::expr::ArrayStyle::default(),
+                    },
+                ),
+            },
+        )),
+        _ => None,
+    };
+    if let Some(next) = replacement {
+        *expr = next;
+    }
+}
+
+fn synth_array_wrapper_methods(owner: &ClassId) -> Vec<MethodDef> {
+    let ivar = || {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Ivar {
+                name: Symbol::from("elements"),
+            },
+        )
+    };
+    let method = |name: &str, params: Vec<Param>, body: Expr, has_block: bool| MethodDef {
+        name_span: Span::synthetic(),
+        name: Symbol::from(name),
+        receiver: MethodReceiver::Instance,
+        visibility: crate::dialect::MethodVisibility::Public,
+        params,
+        unsupported_formals: None,
+        has_anonymous_block: has_block,
+        body,
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: crate::dialect::AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    };
+    let forward0 = |name: &str| {
+        method(
+            name,
+            vec![],
+            call(Some(ivar()), name, vec![]),
+            false,
+        )
+    };
+    let forward1 = |name: &str, param: &str| {
+        method(
+            name,
+            vec![Param::positional(Symbol::from(param))],
+            call(Some(ivar()), name, vec![local(param)]),
+            false,
+        )
+    };
+    // `@elements.each { |x| yield x }; self` — same yield-through
+    // shape Relation uses for Enumerable terminals; keeps the page
+    // as the `each` return value (Array#each contract).
+    let each_body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Seq {
+            exprs: vec![
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(ivar()),
+                        method: Symbol::from("each"),
+                        args: vec![],
+                        block: Some(block_of(
+                            "x",
+                            Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Yield {
+                                    args: vec![local("x")],
+                                },
+                            ),
+                        )),
+                        parenthesized: false,
+                    },
+                ),
+                Expr::new(Span::synthetic(), ExprNode::SelfRef),
+            ],
+        },
+    );
+    let all_body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(ivar()),
+            method: Symbol::from("all?"),
+            args: vec![],
+            block: Some(block_of(
+                "x",
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Yield {
+                        args: vec![local("x")],
+                    },
+                ),
+            )),
+            parenthesized: false,
+        },
+    );
+    vec![
+        method("to_a", vec![], ivar(), false),
+        method("to_ary", vec![], ivar(), false),
+        method("each", vec![], each_body, true),
+        forward1("+", "other"),
+        forward0("any?"),
+        forward0("empty?"),
+        forward0("size"),
+        forward0("length"),
+        forward0("count"),
+        forward0("first"),
+        forward0("last"),
+        forward1("drop", "n"),
+        method("all?", vec![], all_body, true),
+    ]
 }
 
 fn self_class() -> Expr {
