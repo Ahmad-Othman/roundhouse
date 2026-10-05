@@ -1465,11 +1465,18 @@ pub(super) fn ingest_method(
         // Beside a positional `*rest` the flattening does not parse
         // (`def both(*args, options = {})`), so there the slot stays a
         // real `**kwrest`, as the library-class path keeps it.
+        //
+        // Beside an earlier keyword (`def notification(badge: …,
+        // **params)` — campfire preview) flattening to `params = {}`
+        // also does not parse: optional positionals cannot follow
+        // keywords. Keep a real keyword-rest there too (same rule
+        // `library_class` applies when `keeps_keywords`).
         if let Some(krest) = pn.keyword_rest() {
             if let Some(krp) = krest.as_keyword_rest_parameter_node() {
                 if let Some(loc) = krp.name() {
                     let name = Symbol::from(constant_id_str(&loc));
-                    let mut p = if params.iter().any(|p| p.rest) {
+                    let has_keywords = params.iter().any(|p| p.keyword || p.from_keyword);
+                    let mut p = if params.iter().any(|p| p.rest) || has_keywords {
                         let mut p = crate::dialect::Param::keyword(name, None);
                         p.rest = true;
                         p
