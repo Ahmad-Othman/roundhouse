@@ -4746,8 +4746,10 @@ fn synthesize_redirect_controller(
                 //
                 // Only `path:` keeps the query, and its location is a
                 // string literal, so the separator and the fragment are
-                // decided here: a `%{name}` filled from a path segment
-                // cannot bring a `?` or `#` of its own.
+                // decided here. A `%{name}` cannot bring a `?` or `#` of
+                // its own: the router leaves a capture percent-encoded, so
+                // a literal one cannot reach it (see
+                // `redirect_location_source`).
                 let (path, fragment) = redirect.location.split_once('#').unwrap_or((&redirect.location, ""));
                 let separator = if path.contains('?') { '&' } else { '?' };
                 let fragment = if fragment.is_empty() {
@@ -4826,7 +4828,12 @@ fn synthesize_redirect_controller(
 /// A routing redirect's target as a Ruby string literal. Rails'
 /// `redirect("/~%{username}")` fills each `%{name}` from the matched
 /// path parameters, so the placeholder becomes `#{params[:name]}`.
-/// (Rails also URI-escapes the value; the emitted action does not.)
+/// Rails percent-decodes the capture and re-escapes it
+/// (`Journey::Router::Utils.escape_path`). The emitted router does
+/// neither: a capture keeps the request's own percent-encoding, so the
+/// segment passes through as sent, `a%23top` included. That is the same
+/// location Rails builds, short of its normalizing (`%7e` becomes `~`).
+/// Escaping here would double-encode it.
 fn redirect_location_source(location: &str) -> String {
     let mut out = String::from("\"");
     let mut rest = location;

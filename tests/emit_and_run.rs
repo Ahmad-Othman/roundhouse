@@ -362,6 +362,9 @@ end
 /// joined with `&`, and the query goes ahead of a fragment. The last two
 /// diverge from Rails on purpose, since Rails builds `/articles?sort=new?page=2`
 /// and `/articles#top?page=2` (see `synthesize_redirect_controller`).
+/// A `%{id}` holding an encoded `#` or `?` stays in the path, in both
+/// redirect forms: the same location Rails builds by decoding the capture
+/// and re-escaping it.
 /// Jumpstart Pro routes its Devise-era `/users/sign_in` this way.
 #[test]
 fn a_path_option_redirect_keeps_the_request_query() {
@@ -369,7 +372,7 @@ fn a_path_option_redirect_keeps_the_request_query() {
         .edit(
             "config/routes.rb",
             "  root \"articles#index\"\n",
-            "  root \"articles#index\"\n  get \"/posts\", to: redirect(path: \"/articles\")\n  get \"/filtered\", to: redirect(path: \"/articles?sort=new\")\n  get \"/step\", to: redirect(path: \"/articles#top\")\n  get \"/old/:id\", to: redirect(path: \"/articles/%{id}\", status: 302)\n",
+            "  root \"articles#index\"\n  get \"/posts\", to: redirect(path: \"/articles\")\n  get \"/filtered\", to: redirect(path: \"/articles?sort=new\")\n  get \"/step\", to: redirect(path: \"/articles#top\")\n  get \"/old/:id\", to: redirect(path: \"/articles/%{id}\", status: 302)\n  get \"/legacy/:id\", to: redirect(\"/articles/%{id}\")\n",
         )
         .write(
             "test/controllers/path_redirects_controller_test.rb",
@@ -391,6 +394,10 @@ class PathRedirectsControllerTest < ActionDispatch::IntegrationTest
     get "/old/7?page=2"
     assert_response 302
     assert_redirected_to "/articles/7?page=2"
+    get "/old/a%23top?page=2"
+    assert_redirected_to "/articles/a%23top?page=2"
+    get "/legacy/a%20b%3Fc"
+    assert_redirected_to "/articles/a%20b%3Fc"
   end
 end
 "#,
