@@ -9,6 +9,9 @@
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
+/// The issue's exact shape: a required keyword beside the `**rest`.
+/// The emitted program must bind the named keyword and collect the
+/// extras — and return `nil` for an extra that was never passed.
 #[test]
 fn a_model_keyword_rest_beside_a_required_keyword_collects_the_extras() {
     emit_and_run::real_blog()
@@ -28,6 +31,10 @@ puts "kwrest ok"
         .assert_passes();
 }
 
+/// An optional keyword beside the `**rest`. The library-class path may
+/// flatten this shape (`keeps_keywords`); the model path keeps the
+/// keyword real, so the kwrest must stay too — with the default still
+/// binding when the keyword is omitted.
 #[test]
 fn a_model_keyword_rest_beside_an_optional_keyword_collects_the_extras() {
     emit_and_run::real_blog()
