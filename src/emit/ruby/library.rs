@@ -6945,6 +6945,9 @@ fn require_path_for_body_const(
     // body to need this: `created_at: <%= 1.hour.ago %>` grounds to
     // `ActiveSupport::Duration.hour(1)` and `test/fixtures/<x>.rb` is
     // reached from the test harness, not from main.rb's require chain.
+    if joined == "ActiveSupport::SecurityUtils" {
+        return Some("runtime/security_utils".to_string());
+    }
     if joined == "ActiveSupport::Duration" {
         return Some("runtime/active_support_duration".to_string());
     }
