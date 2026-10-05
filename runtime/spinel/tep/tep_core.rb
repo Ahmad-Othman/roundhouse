@@ -44,11 +44,17 @@ module Tep
   # header reads as through str_hash, and Puma reads an empty value as
   # zero too.
   #
-  # A run longer than 18 digits SATURATES at BYTE_COUNT_CEILING instead
-  # of being converted: spinel's Integer is a fixed int64, so a 25-digit
-  # length cannot be converted at all, and it is too large whatever the
-  # cap is. The caller compares the result against the cap and answers
-  # 413. Every 18-digit value is below the ceiling, which is below 2^63.
+  # Leading zeros are skipped, so a zero-padded value reads as its value
+  # (Puma's `.to_i` does the same). More than 18 SIGNIFICANT digits
+  # saturates at BYTE_COUNT_CEILING instead of being converted: spinel's
+  # Integer is a fixed int64, so a 25-digit length cannot be converted at
+  # all. Every 18-digit value is below the ceiling, which is below 2^63.
+  #
+  # The ceiling means "too large to represent", never a real size, so no
+  # comparison may treat it as one: `body_refusal` refuses it whatever
+  # the cap, and `max_body_from_env` will not take it as a cap. When the
+  # override could saturate too, a zero-padded "…0001024" became a cap of
+  # 10^18 and a 25-digit Content-Length compared EQUAL to it and passed.
   BYTE_COUNT_CEILING = 1000000000000000000
 
   def self.decimal_byte_count(s)
@@ -61,11 +67,14 @@ module Tep
       end
       i += 1
     end
-    if n > 18
+    i = 0
+    while i < n && s.getbyte(i) == 48
+      i += 1
+    end
+    if n - i > 18
       return BYTE_COUNT_CEILING
     end
     v = 0
-    i = 0
     while i < n
       v = v * 10 + (s.getbyte(i) - 48)
       i += 1
@@ -84,12 +93,13 @@ module Tep
   # per-request memory bound, and it has to clear what the apps upload
   # (campfire attachments arrive as multipart bodies through here, and
   # campfire sets no limit of its own). TEP_MAX_BODY_BYTES overrides it;
-  # a value that is not a positive byte count leaves the default.
+  # a value that is not a positive byte count below BYTE_COUNT_CEILING
+  # leaves the default — an override too large to represent is not a cap.
   MAX_BODY_BYTES_DEFAULT = 100 * 1024 * 1024
 
   def self.max_body_from_env
     v = Tep.decimal_byte_count(ENV["TEP_MAX_BODY_BYTES"] || "")
-    v > 0 ? v : MAX_BODY_BYTES_DEFAULT
+    v > 0 && v < BYTE_COUNT_CEILING ? v : MAX_BODY_BYTES_DEFAULT
   end
 
   # Read once, at load: the environment does not change under a running

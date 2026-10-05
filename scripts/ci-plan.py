@@ -42,6 +42,7 @@ SPINEL_TESTS = [
     "spinel_web_push_crypto",
     "spinel_db_lease",
     "param_binds",
+    "spinel_stmt_cache_lru",
     "spinel_param_builder",
     "rails_compat_vectors_spinel",
 ]
@@ -118,7 +119,8 @@ def native_coverage(path):
         if any(
             word in path for word in ("/db", "sqlite", "active_support_time_parsing")
         ):
-            owned_tests.update(("spinel_db_lease", "param_binds"))
+            # Shared database inputs own lease/ownership, binds, and cache recency.
+            owned_tests.update(("spinel_db_lease", "param_binds", "spinel_stmt_cache_lru"))
         if any(word in name for word in ("param", "multipart", "request")):
             owned_tests.add("spinel_param_builder")
         if (
