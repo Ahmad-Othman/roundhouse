@@ -219,6 +219,11 @@ fn variant_app_emits_a_find_load_wrap_that_honors_the_policy() {
 
 /// Emitted Ruby: Magick/Svg are not selected after `block_untrusted`, a
 /// PNG still is, and a named `Vips.block` hides that class too.
+///
+/// Needs the ruby-vips gem and a loadable libvips, the same
+/// prerequisite as `emit_and_run` needing sqlite3. The unit job
+/// installs both; a harness that skipped here would pass CI while a
+/// machine with the gem hid the gap.
 #[test]
 fn find_load_hides_blocked_loaders_on_emitted_ruby() {
     let overlay = emit_and_run::empty_app()
