@@ -95,3 +95,38 @@ fn an_unless_block_and_a_modifier_if_route_are_each_ledgered() {
         "the modifier `if` route is ledgered with its line: {messages:?}"
     );
 }
+
+/// A `case`/`when` block and a `case`/`in` pattern match are distinct
+/// node kinds (`CaseNode` vs `CaseMatchNode`); both ledger as a
+/// conditional `case` block.
+#[test]
+fn a_case_block_and_a_case_match_block_are_each_ledgered() {
+    let source = b"Rails.application.routes.draw do\n  root \"pages#home\"\n  case ENV[\"MODE\"]\n  when \"admin\"\n    get \"/admin\", to: \"admin#index\"\n  end\n  case ENV[\"TIER\"]\n  in \"beta\"\n    get \"/beta\", to: \"beta#show\"\n  end\nend\n";
+    assert!(
+        ingest(source).is_err(),
+        "strict ingest fails loud on the first `case`"
+    );
+
+    let (paths, gaps) = survey_ingest(source);
+    assert!(
+        paths.iter().any(|p| p == "/"),
+        "the sibling `root` route survives: {paths:?}"
+    );
+    assert!(
+        !paths.iter().any(|p| p == "/admin" || p == "/beta"),
+        "the predicates are not evaluated: {paths:?}"
+    );
+    let messages = gap_messages(&gaps);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("conditional `case` block") && m.contains("line 3")),
+        "the `case`/`when` block is ledgered with its line: {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("conditional `case` block") && m.contains("line 7")),
+        "the `case`/`in` block is ledgered with its line: {messages:?}"
+    );
+}
