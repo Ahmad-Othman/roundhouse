@@ -752,6 +752,13 @@ module ActiveRecord
     # loaded records, which is what lets `[story, relation].flatten`
     # splice the relation's records into the surrounding Array
     # (Array#flatten recurses into elements that respond to to_ary).
+    # `relation.to_set` — Enumerable's, on the loaded records (campfire's
+    # `Rooms::Direct.find_or_create_for(...).users.to_set`, comparing
+    # direct-room members whatever their order).
+    def to_set
+      Set.new(to_a)
+    end
+
     def to_ary
       to_a
     end
@@ -1645,9 +1652,53 @@ module ActiveRecord
     # the leftmost remaining `?`, so iterating the args consumes them in
     # order.
     def substitute_binds(sql, args)
+      first = args[0]
+      return substitute_named_binds(sql, first) if args.length == 1 && first.is_a?(Hash)
       result = sql
       args.each { |a| result = result.sub("?", ActiveRecord.adapter.escape_value(a)) }
       result
+    end
+
+    # Rails' named binds: `having("COUNT(*) = :size AND … IN (:user_ids)",
+    # size: 2, user_ids: [3, 5])`, campfire's direct-room lookup
+    # (basecamp/once-campfire#310). Each `:name` the Hash answers is
+    # replaced by its escaped value, and an Array value by a
+    # comma-separated list. A `::` cast is left alone, as is a name the
+    # Hash does not have. Before this, the placeholders reached SQLite
+    # unbound and read as NULL: every lookup missed and every Ping
+    # created a new direct room.
+    def substitute_named_binds(sql, binds)
+      out = ""
+      i = 0
+      n = sql.length
+      while i < n
+        ch = sql[i, 1].to_s
+        prev = i > 0 ? sql[i - 1, 1].to_s : ""
+        nxt = sql[i + 1, 1].to_s
+        if ch == ":" && prev != ":" && nxt != ":" && named_bind_start?(nxt)
+          j = i + 1
+          j += 1 while j < n && named_bind_char?(sql[j, 1].to_s)
+          name = sql[i + 1, j - i - 1].to_s
+          key = name.to_sym
+          if binds.key?(key)
+            value = binds[key]
+            out = out + (value.is_a?(Array) ? escape_list(value) : ActiveRecord.adapter.escape_value(value))
+            i = j
+            next
+          end
+        end
+        out = out + ch
+        i += 1
+      end
+      out
+    end
+
+    def named_bind_start?(ch)
+      (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch == "_"
+    end
+
+    def named_bind_char?(ch)
+      named_bind_start?(ch) || (ch >= "0" && ch <= "9")
     end
 
     def escape_list(vals)

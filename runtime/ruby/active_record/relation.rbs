@@ -104,6 +104,7 @@ module ActiveRecord
 
     def to_a: () -> Array[untyped]
     def load_records: () -> Array[untyped]
+    def to_set: () -> Set[untyped]
     def to_ary: () -> Array[untyped]
     def ==: (untyped other) -> bool
     def filter: () { (untyped) -> bool } -> Array[untyped]
@@ -206,6 +207,9 @@ module ActiveRecord
     def hash_conditions: (untyped hash) -> String
     def column_predicate: (String col, untyped val) -> String
     def substitute_binds: (String sql, Array[untyped] args) -> String
+    def substitute_named_binds: (String sql, Hash[Symbol, untyped] binds) -> String
+    def named_bind_start?: (String ch) -> bool
+    def named_bind_char?: (String ch) -> bool
     def escape_list: (Array[untyped] vals) -> String
     def order_term: (untyped p) -> String
   end

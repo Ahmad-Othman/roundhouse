@@ -398,6 +398,78 @@ end
         .assert_passes();
 }
 
+/// Named binds in `where` and `having` — `:size` used twice and an Array
+/// bound into `IN (:labels)` — in the shape of campfire's direct-room
+/// lookup (basecamp/once-campfire#310). Unbound, the placeholders reached
+/// SQLite as NULL and the lookup found nothing; campfire then created a
+/// second room on every Ping. Plus `relation.to_set`.
+fn named_binds_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "parts", force: :cascade do |t|
+    t.integer "widget_id"
+    t.string "label"
+  end
+end
+"#)
+        .write("app/models/widget.rb", r#"class Widget < ApplicationRecord
+  has_many :parts
+
+  def self.with_exactly(labels)
+    joins(:parts).group(:id)
+      .having("COUNT(*) = :size AND COUNT(CASE WHEN parts.label IN (:labels) THEN 1 END) = :size", size: labels.size, labels: labels)
+      .first
+  end
+end
+"#)
+        .write("app/models/part.rb", "class Part < ApplicationRecord\n  belongs_to :widget\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/widgets\", to: \"widgets#index\"\nend\n")
+        .write("app/controllers/widgets_controller.rb", r##"class WidgetsController < ApplicationController
+  def index
+    exact = Widget.with_exactly(%w[ a1 a2 ])
+    named = Widget.where("name = :name", name: "beta").first
+    set = Widget.where(name: %w[ alpha beta ]).to_set
+    render plain: "#{exact&.name}|#{named&.name}|#{set.size}|#{set.include?(named)}"
+  end
+end
+"##)
+}
+
+fn named_binds_assertions() -> &'static str {
+    r#"
+require_relative "app/controllers/widgets_controller"
+alpha = Widget.create!(name: "alpha")
+beta = Widget.create!(name: "beta")
+Part.create!(widget: alpha, label: "a1")
+Part.create!(widget: alpha, label: "a2")
+Part.create!(widget: beta, label: "a1")
+controller = WidgetsController.new
+controller.process_action(:index)
+raise "named binds: #{controller.body}" unless controller.body == "alpha|beta|2|true"
+puts "named binds passed"
+"#
+}
+
+#[test]
+fn named_binds_reach_the_query() {
+    named_binds_app().run_ruby(named_binds_assertions()).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn named_binds_reach_the_query_on_spinel() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{}",
+        named_binds_assertions()
+    );
+    named_binds_app().run_spinel(&script).assert_passes();
+}
+
 #[test]
 fn the_unedited_blog_runs() {
     emit_and_run::real_blog()

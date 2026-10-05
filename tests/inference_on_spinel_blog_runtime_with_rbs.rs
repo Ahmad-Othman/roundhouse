@@ -949,7 +949,15 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // TyVars; the full-context gate in runtime_src_integration counts
     // ONE (reorder's splat). What it buys: campfire's message paging after
     // basecamp/once-campfire#292, and #304/#312's `reorder`.
-    const CEILING: usize = 1280;
+    // 2026-10-05 1280 -> 1336, +56, MEASURED (relation.rb 809 -> 865):
+    // Relation#substitute_named_binds and its two character tests, plus
+    // #to_set. This probe resolves neither self-sends nor `sql[i, 1]`
+    // slices, which a character scan is made of; the full-context gate
+    // in runtime_src_integration counts ZERO new sites. What it buys:
+    // named binds in `where`/`having`, without which campfire's direct-
+    // room lookup (basecamp/once-campfire#310) read NULL and created a
+    // room on every Ping.
+    const CEILING: usize = 1336;
 
     assert!(
         all_untyped.len() <= CEILING,
