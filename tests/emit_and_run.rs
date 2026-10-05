@@ -498,6 +498,9 @@ class ArticleQueriesTest < ActiveSupport::TestCase
       Article.where(title: "Counted").to_a
     end
     assert_equal 1, statements.size
+    # Rails' quoting, which apps' tests filter statements by
+    # (`start_with?(%(SELECT "messages"))`, basecamp/once-campfire#312).
+    assert statements.first.start_with?(%(SELECT "articles")), statements.first
     plan = Article.connection.select_rows("EXPLAIN QUERY PLAN #{statements.first}").map(&:last).join(" | ")
     assert_match(/articles/, plan)
   end
