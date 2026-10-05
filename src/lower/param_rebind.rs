@@ -171,9 +171,16 @@ fn collect_unsafe_writes(
         } else {
             else_branch
         };
-        if let Some((_, value)) = param_assign(branch, params) {
-            collect_unsafe_writes(&value, params, out, in_unsafe_scope);
+        let Some((param, value)) = param_assign(branch, params) else {
+            return;
+        };
+        // A modifier-if join only dominates at method scope. Nested in
+        // a loop, rescue, or outer `if`, the write is still visible
+        // afterwards in Ruby, so the whole parameter stays unchanged.
+        if in_unsafe_scope {
+            out.insert(param);
         }
+        collect_unsafe_writes(&value, params, out, in_unsafe_scope);
         return;
     }
     match &*expr.node {

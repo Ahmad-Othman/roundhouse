@@ -555,12 +555,92 @@ end
         .map(|f| f.content)
         .collect::<Vec<_>>()
         .join("\n");
+    // `attachments_for` only *consumes* `**details`, so ingest flattens
+    // the def to `details = {}`. Restoring `**details` against that is
+    // unexpected keywords. The caller `embeds_from` forwards, so its
+    // def stays `**details`.
     assert!(
-        src.contains("attachments_for(**details)"),
-        "expected the splat restored into **rest:\n{src}"
+        src.contains("def attachments_for(details = {})")
+            || src.contains("def attachments_for(details={})"),
+        "a consuming **rest must emit as a positional Hash:\n{src}"
     );
     assert!(
-        !src.contains("attachments_for(details)"),
-        "must not pass the Hash positionally into **rest:\n{src}"
+        src.contains("attachments_for(details)") || src.contains("attachments_for(details,"),
+        "the call into the flattened def stays positional:\n{src}"
+    );
+    assert!(
+        !src.contains("attachments_for(**details)"),
+        "must not restore ** against a flattened details = {{}}:\n{src}"
+    );
+    assert!(
+        src.contains("def embeds_from(**details)") || src.contains("def embeds_from(**details,"),
+        "a forwarding **rest keeps the keyword-rest def:\n{src}"
+    );
+}
+
+/// `def f(**rest)` whose body itself forwards `**rest` keeps the
+/// keyword-rest on the wire. A positional Hash into THAT def must
+/// become `**h`; a consuming `**rest` still flattens to `name = {}`.
+#[test]
+fn a_splat_into_a_forwarding_keyword_rest_is_restored() {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(
+        PathBuf::from("db/schema.rb"),
+        b"ActiveRecord::Schema.define(version: 1) do\n  create_table :rooms do |t|\n    t.string :name\n  end\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("app/models/room.rb"),
+        b"class Room < ApplicationRecord\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("config/routes.rb"),
+        b"Rails.application.routes.draw do\n  resources :rooms\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("test/models/room_test.rb"),
+        br#"require "test_helper"
+
+class RoomTest < ActiveSupport::TestCase
+  test "forwards" do
+    wrap(payload)
+  end
+
+  private
+    def other(**details)
+      details
+    end
+
+    def consume(**details)
+      other(**details)
+    end
+
+    def wrap(**details)
+      consume(**details)
+    end
+end
+"#
+        .to_vec(),
+    );
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let src = roundhouse::emit::ruby::emit_spinel(&app)
+        .into_iter()
+        .filter(|f| f.path.to_string_lossy().contains("room_test"))
+        .map(|f| f.content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        src.contains("def consume(**details)") || src.contains("def consume(**details,"),
+        "a forwarding **rest keeps the keyword-rest def:\n{src}"
+    );
+    assert!(
+        src.contains("consume(**details)"),
+        "the call into that def restores the splat:\n{src}"
+    );
+    assert!(
+        src.contains("def other(details = {})") || src.contains("def other(details={})"),
+        "a consuming **rest still flattens:\n{src}"
     );
 }

@@ -312,8 +312,8 @@ end
         "expected a reject over the values:\n{out}"
     );
     assert!(
-        out.contains("_k") || out.contains("|k,"),
-        "Hash reject keeps the key:\n{out}"
+        out.contains("_k") && out.contains("__cb"),
+        "Hash reject binds the key and tests the value:\n{out}"
     );
     assert!(diags.is_empty(), "{diags:?}");
 }
@@ -367,7 +367,7 @@ end
         "must not keep the send:\n{out}"
     );
     assert!(
-        out.contains("ActiveSupport.blank?") || out.contains("reject"),
+        out.contains("reject") && out.contains("ActiveSupport.blank?"),
         "expected a reject through the runtime predicate:\n{out}"
     );
     assert!(diags.is_empty(), "{diags:?}");

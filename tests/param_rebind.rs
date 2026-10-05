@@ -255,7 +255,7 @@ end
         "first coerce needs a fresh local:\n{out}"
     );
     assert!(
-        out.contains("__rh_id_2") || out.matches("__rh_id").count() >= 2,
+        out.contains("__rh_id_2"),
         "second coerce must not reuse the first fresh local's slot as the parameter:\n{out}"
     );
     assert!(
@@ -395,6 +395,45 @@ end
     );
 }
 
+/// A modifier-if join nested in a loop (or outer `if`) does not
+/// dominate later reads. Splitting it would leave the trailing `id`
+/// on the original binder.
+#[test]
+fn a_nested_modifier_if_join_is_left_alone() {
+    let looped = emit_classes(
+        r#"
+class Ids
+  def convert(id)
+    while id.is_a?(String)
+      id = id.to_i if id.is_a?(String)
+    end
+    id
+  end
+end
+"#,
+    );
+    assert!(
+        !looped.contains("__rh_id"),
+        "a join inside while must not split:\n{looped}"
+    );
+    let branched = emit_classes(
+        r#"
+class Sessions
+  def sign_in(user)
+    if extra
+      user = users(user) unless user.is_a?(User)
+    end
+    user
+  end
+end
+"#,
+    );
+    assert!(
+        !branched.contains("__rh_user"),
+        "a join inside if must not split:\n{branched}"
+    );
+}
+
 /// A method that never writes its parameter is a no-op.
 #[test]
 fn a_parameter_that_is_never_written_is_left_alone() {
@@ -432,7 +471,7 @@ end
 "#,
     );
     assert!(
-        out.contains("__rh_user_2") || (out.contains("__rh_user") && out.contains("users(user)")),
+        out.contains("__rh_user_2"),
         "must not steal a name the body already uses:\n{out}"
     );
     assert!(
@@ -459,6 +498,10 @@ end
     assert!(
         out.contains("|user|"),
         "the block parameter keeps its name:\n{out}"
+    );
+    assert!(
+        !out.contains("|user| __rh_user") && !out.contains("{ |user| __rh_user"),
+        "reads inside the block stay on the block parameter:\n{out}"
     );
 }
 

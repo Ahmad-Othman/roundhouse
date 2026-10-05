@@ -378,9 +378,11 @@ fn restore_kwrest_splat(args: &mut Vec<Expr>, params: &[Param]) {
         .count();
     let Some(last) = params.last() else { return };
     // Ingest keeps `**rest` as a keyword-rest when the def already has
-    // a rest/required-keyword, and otherwise flattens it to a trailing
-    // positional marked `from_kwrest`. Both are the same Ruby slot.
-    if !(last.from_kwrest || (last.keyword && last.rest)) {
+    // a rest/required-keyword or the body forwards `**name`. Otherwise
+    // it flattens to a trailing positional marked `from_kwrest`, and
+    // emit prints `name = {}`. Restoring `**h` against that def is
+    // unexpected keywords. Only the kept `**name` slot needs the splat.
+    if !(last.keyword && last.rest) {
         return;
     }
     if args.len() != positional + 1 {
