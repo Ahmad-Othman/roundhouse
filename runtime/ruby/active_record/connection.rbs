@@ -2,6 +2,19 @@
 # Hash[String, untyped] by design — raw SQL's row shape (aliased
 # aggregates, computed columns) is genuinely dynamic; see connection.rb.
 module ActiveRecord
+  class IntegerKeyCast
+    @valid: bool
+    @value: Integer
+    def valid: () -> bool
+    def value: () -> Integer
+    def initialize: (bool valid, Integer value) -> void
+    def self.input_text: (Integer | String | nil id) -> String
+    def self.parse: (Integer | String | nil id) -> ::ActiveRecord::IntegerKeyCast
+    def self.number_start: (String text) -> Integer
+    def self.digit_value: (String char) -> Integer
+    def self.exceeds_limit: (String digits, String limit) -> bool
+  end
+
   class Result
     @rows: Array[Hash[String, untyped]]
 
@@ -25,6 +38,10 @@ module ActiveRecord
   end
 
   class Base
+    # Request values stay intact until the schema-selected scalar adapter.
+    def self.find: (Integer | String | nil id) -> Base
+    def self._find_primary_key_input: (Integer | String | nil id) -> Base?
+    def self._cast_primary_key: (Integer | String | nil id) -> (Integer | String | nil)
     def self.connection: () -> Connection
     def self.sanitize_sql: (Array[untyped] statement) -> String
     def self.transaction: () { () -> untyped } -> untyped
@@ -48,7 +65,6 @@ module ActiveRecord
     def self.first: () -> untyped
     def self.take: () -> untyped
     def self._hydrate_all: (String sql) -> Array[Base]
-    def self._cast_primary_key: (Integer | String id) -> (Integer | String | nil)
     def update_attribute: (Symbol name, untyped value) -> bool
     # Ruby-family overrides of base.rb's dirty-tracking stubs.
     def __track_saved_changes: (bool was_new) -> void

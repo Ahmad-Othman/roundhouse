@@ -77,6 +77,64 @@ pub(super) fn push_adapter_methods(
 // insert / update / delete).
 // ---------------------------------------------------------------------------
 
+/// Select shared normalization using the schema before the scalar adapter.
+/// This is dispatch only: all prefix/range rules stay in IntegerKeyCast.
+/// A runtime branch would compile both incompatible scalar adapter calls.
+pub(super) fn synth_find_primary_key_input(owner: &ClassId, table: &Table) -> MethodDef {
+    let id = Symbol::from("id");
+    let key = key_ty(table);
+    let caster = ClassId(Symbol::from("ActiveRecord::IntegerKeyCast"));
+    let adapter_call = |value| Expr::new(Span::synthetic(), ExprNode::Send {
+        recv: None, method: Symbol::from("_adapter_find_by_id"),
+        args: vec![value], block: None, parenthesized: true,
+    });
+    let caster_call = |method: &str| Expr::new(Span::synthetic(), ExprNode::Send {
+        recv: Some(super::class_const(&caster)), method: Symbol::from(method),
+        args: vec![var_ref(&id)], block: None, parenthesized: true,
+    });
+    let body = if key == Ty::Str {
+        adapter_call(caster_call("input_text"))
+    } else if key != Ty::Int {
+        // Other schema keys retain their existing adapter conversion. For
+        // example, a Float key must not normalize "1.5" into integer row 1.
+        adapter_call(var_ref(&id))
+    } else {
+        let cast = Symbol::from("cast");
+        let read = |method: &str| Expr::new(Span::synthetic(), ExprNode::Send {
+            recv: Some(var_ref(&cast)), method: Symbol::from(method),
+            args: vec![], block: None, parenthesized: true,
+        });
+        super::seq(vec![
+            arel_assign(&cast, caster_call("parse")),
+            Expr::new(Span::synthetic(), ExprNode::If {
+                cond: read("valid"), then_branch: adapter_call(read("value")),
+                else_branch: super::nil_lit(),
+            }),
+        ])
+    };
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: Span::synthetic(),
+        name: Symbol::from("_find_primary_key_input"),
+        receiver: MethodReceiver::Class,
+        params: vec![Param::positional(id.clone())],
+        body,
+        signature: Some(fn_sig(
+            vec![(id, super::finder_input_ty(&key))],
+            Ty::Union { variants: vec![owner_ty, Ty::Nil] },
+        )),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
+}
+
 fn synth_adapter_find_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
     let id = Symbol::from("id");
     let key_ty = key_ty(table);

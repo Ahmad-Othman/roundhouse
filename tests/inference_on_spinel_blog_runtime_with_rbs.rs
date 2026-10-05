@@ -398,6 +398,41 @@ fn qualified_runtime_signatures_seed_contexts_and_results() {
     }
 }
 
+/// Parameter seeds must reach the actual nested classes, and a canonical
+/// parser result must retain its typed validity/value readers on dispatch.
+#[test]
+fn qualified_finder_signatures_seed_contexts_and_results() {
+    let (registry, sigs) = build_class_registry();
+    let classes = ingest_runtime_classes();
+    let key_class = ClassId(Symbol::new("ActiveRecord::IntegerKeyCast"));
+    let input = Ty::Union { variants: vec![Ty::Int, Ty::Str, Ty::Nil] };
+    for (class, method, expected) in [
+        ("ActiveRecord::IntegerKeyCast", "initialize", vec![("valid", Ty::Bool), ("value", Ty::Int)]),
+        ("ActiveRecord::IntegerKeyCast", "parse", vec![("id", input.clone())]),
+        ("ActiveRecord::Base", "find", vec![("id", input)]),
+    ] {
+        let (_, lc) = classes.iter().find(|(_, lc)| lc.name.0.as_str() == class &&
+            lc.methods.iter().any(|m| m.name.as_str() == method)).expect("runtime class/method");
+        let method = lc.methods.iter().find(|m| m.name.as_str() == method).unwrap();
+        let ctx = build_method_ctx(&lc.name, method, &sigs, &HashMap::new());
+        for (name, ty) in expected {
+            assert_eq!(ctx.local_bindings.get(&Symbol::new(name)), Some(&ty), "{class}.{name}");
+        }
+    }
+    let Ty::Fn { ret, .. } = &sigs[&key_class][&Symbol::new("parse")] else { panic!("parse signature"); };
+    assert_eq!(ret.as_ref(), &Ty::Class { id: key_class.clone(), args: vec![] });
+    let source = b"class Probe; def valid(cast); cast.valid; end; def value(cast); cast.value; end; end";
+    let mut probes = ingest_library_classes(source, "probe.rb").unwrap();
+    let mut ctx = Ctx::default();
+    ctx.local_bindings.insert(Symbol::new("cast"), *ret.clone());
+    let typer = BodyTyper::new(&registry);
+    for method in &mut probes[0].methods {
+        typer.analyze_expr(&mut method.body, &ctx);
+        let expected = if method.name.as_str() == "valid" { Ty::Bool } else { Ty::Int };
+        assert_eq!(method.body.ty, Some(expected));
+    }
+}
+
 /// A short alias may not combine identically named classes in distinct modules.
 #[test]
 fn ambiguous_short_aliases_do_not_merge_signatures() {
@@ -461,6 +496,13 @@ fn untyped_subexpressions_with_rbs_baseline() {
             let before = all_untyped.len();
             collect_untyped(&method.body, &path, &mut all_untyped);
             let added = all_untyped.len() - before;
+            // The finder additions must type in their own right; a reduction
+            // elsewhere cannot conceal missing seeds or unresolved parser calls.
+            if stem == "connection" && (lc.name.0.as_str() == "ActiveRecord::IntegerKeyCast" ||
+                (lc.name.0.as_str() == "ActiveRecord::Base" && matches!(method.name.as_str(),
+                    "find" | "_find_primary_key_input" | "_cast_primary_key"))) {
+                assert_eq!(added, 0, "new finder runtime method must type completely: {path}");
+            }
             *by_file.entry(stem.clone()).or_insert(0) += added;
         }
     }
@@ -991,6 +1033,8 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // runtime sources measure 45 sites instead of 1273. No nodes or
     // diagnostics are excluded: parameter and dispatch seeds now reach the
     // classes they describe. Keep the ratchet at that corrected baseline.
+    // Finder additions also contribute zero per method, asserted above;
+    // the exact 45-site baseline remains unchanged.
     const CEILING: usize = 45;
 
     assert!(
