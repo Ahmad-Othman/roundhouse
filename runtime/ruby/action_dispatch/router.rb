@@ -290,7 +290,115 @@ module ActionDispatch
         end
         i += 1
       end
-      params
+      decode_captures(params)
+    end
+
+    # Route matching and constraints operate on the encoded path. Decode only
+    # after the entire pattern matches, so an escaped slash or dot cannot
+    # change segmentation and a rejected route cannot raise while decoding.
+    def self.decode_captures(params)
+      decoded = {}
+      params.each do |name, value|
+        decoded[name] = decode_capture(value)
+      end
+      decoded
+    end
+
+    # Decode bytes before interpreting UTF-8: one character may mix raw and
+    # percent-escaped bytes. A literal '+' is preserved, unlike form decoding.
+    # String#bytes materializes once, including for Unicode-native targets.
+    def self.decode_capture(value)
+      bytes = percent_bytes(value.bytes)
+      out = +""
+      i = 0
+      while i < bytes.length
+        byte = bytes[i]
+        width = 1
+        if byte >= 0xF0 && byte <= 0xF4
+          width = 4
+        elsif byte >= 0xE0 && byte <= 0xEF
+          width = 3
+        elsif byte >= 0xC2 && byte <= 0xDF
+          width = 2
+        elsif byte >= 0x80
+          raise ArgumentError, "Invalid encoding for path parameter"
+        end
+        out = out + utf8_character(bytes, i, byte, width)
+        i += width
+      end
+      out
+    end
+
+    # Validate one decoded UTF-8 sequence before constructing its scalar.
+    # Bounds reject truncated, overlong, surrogate and out-of-range sequences.
+    # Byte-array indices stay within the checked Integer-only sequence.
+    def self.utf8_character(bytes, from, first, width)
+      raise ArgumentError, "Invalid encoding for path parameter" if from + width > bytes.length
+      cp = first
+      if width == 2
+        cp = first - 0xC0
+      elsif width == 3
+        cp = first - 0xE0
+      elsif width == 4
+        cp = first - 0xF0
+      end
+      j = 1
+      while j < width
+        byte = bytes[from + j]
+        if byte < 0x80
+          raise ArgumentError, "Invalid encoding for path parameter"
+        end
+        if byte > 0xBF
+          raise ArgumentError, "Invalid encoding for path parameter"
+        end
+        cp = cp * 64 + byte - 0x80
+        j += 1
+      end
+      if (width == 2 && cp < 0x80) || (width == 3 && cp < 0x800) ||
+         (width == 4 && cp < 0x10000) || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF
+        raise ArgumentError, "Invalid encoding for path parameter"
+      end
+      cp.chr(Encoding::UTF_8)
+    end
+
+    # Invalid/incomplete escapes stay literal, as in Rails' path decoder.
+    # Advance over the original input only: %25FF becomes literal %FF.
+    def self.percent_bytes(bytes)
+      decoded = []
+      i = 0
+      while i < bytes.length
+        byte = percent_byte(bytes, i)
+        advance = 1
+        if byte < 0
+          decoded << bytes[i]
+        else
+          decoded << byte
+          advance = 3
+        end
+        # One trailing counter step also permits functional targets to lower
+        # the scan into recursion without changing single-decoding semantics.
+        i += advance
+      end
+      decoded
+    end
+
+    # A valid %HH escape at this byte offset, or -1 to retain literal bytes.
+    def self.percent_byte(bytes, at)
+      return -1 if at + 2 >= bytes.length
+      return -1 if bytes[at] != 37
+      hi = hex_digit(bytes[at + 1])
+      lo = hex_digit(bytes[at + 2])
+      return -1 if hi < 0
+      return -1 if lo < 0
+      hi * 16 + lo
+    end
+
+    # ASCII hexadecimal classification without Unicode case folding.
+    def self.hex_digit(byte)
+      return byte - 48 if byte >= 48 && byte <= 57
+      return byte - 65 + 10 if byte >= 65 && byte <= 70
+      return byte - 97 + 10 if byte >= 97 && byte <= 102
+      -1
     end
 
     # The path from segment `from` on, slash-joined: a `*glob`'s value.

@@ -680,6 +680,9 @@ fn emit_block_with_value(e: &Expr) -> String {
 
 /// Render an Elixir expression while preserving complete-call primitive semantics.
 pub(super) fn emit_expr(e: &Expr) -> String {
+    if let Some(s) = crate::emit::shared::utf8_chr::emit(e, crate::emit::shared::utf8_chr::Target::Elixir, emit_expr) {
+        return s;
+    }
     if let Some(s) = crate::emit::shared::string_bytes::emit(e, crate::emit::shared::string_bytes::Target::Elixir, emit_expr) {
         return s;
     }

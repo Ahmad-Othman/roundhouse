@@ -89,6 +89,13 @@ module ActionDispatch
       ?String format
     ) -> Hash[String, String]?
 
+    def self.decode_captures: (Hash[String, String] params) -> Hash[String, String]
+    def self.decode_capture: (String value) -> String
+    def self.utf8_character: (Array[Integer] bytes, Integer from, Integer first, Integer width) -> String
+    def self.percent_bytes: (Array[Integer] bytes) -> Array[Integer]
+    def self.percent_byte: (Array[Integer] bytes, Integer at) -> Integer
+    def self.hex_digit: (Integer byte) -> Integer
+
     # Digit-only (`Integer` matcher / `constraints: /\d+/`) param
     # enforcement — is `name` in the route's space-joined constraint
     # list? A constrained non-digit segment makes the route a non-match.

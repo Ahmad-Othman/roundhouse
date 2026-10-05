@@ -1145,6 +1145,9 @@ fn children(e: &Expr) -> Vec<&Expr> {
 
 /// Render a Swift value expression after shared primitive and string-builder selection.
 pub fn emit_expr(e: &Expr) -> String {
+    if let Some(s) = crate::emit::shared::utf8_chr::emit(e, crate::emit::shared::utf8_chr::Target::Swift, emit_expr) {
+        return s;
+    }
     if let Some(s) = crate::emit::shared::string_bytes::emit(e, crate::emit::shared::string_bytes::Target::Swift, emit_expr) {
         return s;
     }
