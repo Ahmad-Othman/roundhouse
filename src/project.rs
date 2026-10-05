@@ -950,6 +950,33 @@ fn report_sqlite_index_predicates(app: &App, target: BuildTarget) {
     }
 }
 
+/// Report syntax whose runtime contract is currently native Ruby only.
+fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
+        return;
+    }
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget) {
+        use crate::expr::{ExprNode, LValue};
+        let construct = match &*expr.node {
+            ExprNode::ForwardKeywords => Some("anonymous keyword forwarding"),
+            ExprNode::Defined { .. } => Some("runtime defined? query"),
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+            | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. }
+                if name.as_str().starts_with("@@") => Some("class variable write"),
+            ExprNode::Var { name, .. } if name.as_str().starts_with("@@") => Some("class variable read"),
+            _ => None,
+        };
+        if let Some(construct) = construct {
+            crate::emit::diagnostics::report_unsupported(
+                expr.span, target.as_str(), construct,
+                "native Ruby semantics have no verified implementation on this target",
+            );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, target));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target));
+}
+
 /// `case/in` is not equivalent to the targets' existing `case/when`
 /// renderers, even for nil or a plain binding. Refuse before file emission
 /// rather than lose bindings, skip evaluation, or turn a test into a wildcard.
@@ -997,6 +1024,7 @@ pub fn target_files(
     report_unsupported_keys(app, target);
     report_unsupported_bundled_constants(app, target);
     report_sqlite_index_predicates(app, target);
+    report_native_ruby_syntax(app, target);
     // Full forwarding currently has a native Ruby contract only. A
     // declaration must be gated even when its body never forwards.
     if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
@@ -1105,13 +1133,24 @@ pub fn target_files(
         target,
         BuildTarget::Spinel | BuildTarget::Ruby | BuildTarget::Jruby
     ) {
-        let synth_shakeable: std::collections::HashSet<String> = app
+        let mut synth_shakeable: std::collections::HashSet<String> = app
             .models
             .iter()
-            .filter_map(|m| app.schema.tables.get(&m.table.0))
-            .flat_map(crate::lower::model_to_library::shakeable_synthesized_names)
+            .flat_map(|m| app.schema.tables.get(&m.table.0).into_iter()
+                .flat_map(|t| crate::lower::model_to_library::shakeable_synthesized_names(t, m)))
             .map(|s| s.as_str().to_string())
             .collect();
+        // Ruby's text-level shake uses a global name set. An optional
+        // predicate on another model must not expose a user's enum override
+        // to shaking; conservatively keep that name on every model.
+        for model in &app.models {
+            for column in model.enums.keys() {
+                let predicate = crate::ident::Symbol::from(format!("{}?", column.as_str()));
+                if crate::lower::model_to_library::model_defines_instance_method(model, &predicate) {
+                    synth_shakeable.remove(predicate.as_str());
+                }
+            }
+        }
         let mut files = files;
         crate::timings::phase(format_args!("emit {}: tree shake", target.as_str()), || {
             emit::ruby::shake::shake_tree(&mut files, &synth_shakeable, target.as_str());
@@ -5636,6 +5675,46 @@ fn with_bundled_requires(mut files: Vec<(String, String)>) -> Vec<(String, Strin
     files
 }
 
+/// The libraries in `BUNDLED` that are bundled gems, not default gems,
+/// as of Ruby 3.4. Under bundler a bundled gem is not on the load path
+/// unless the Gemfile names it.
+const BUNDLED_GEMS: [&str; 3] = ["base64", "bigdecimal", "csv"];
+
+/// Names in the Gemfile each bundled gem that the tree requires.
+/// Without the line, `bundle exec` stops at the require with "cannot
+/// load such file -- csv". The scaffold Gemfile names the gems that the
+/// runtime requires, so in practice only an app that names `CSV` gets
+/// a line.
+///
+/// The last step of `write_bundled_requires`: the emit drops the app's
+/// own requires, and that pass writes them back from `BUNDLED`, so the
+/// requires are final only there. Every file, not only app/: a test
+/// that names `CSV` runs under the same bundle.
+fn apply_bundled_gem_wiring(files: &mut [(String, String)]) {
+    let Some(gemfile_at) = files.iter().position(|(p, _)| p == "Gemfile") else {
+        return;
+    };
+    let missing: Vec<&str> = BUNDLED_GEMS
+        .into_iter()
+        .filter(|gem| !files[gemfile_at].1.contains(&format!("gem {gem:?}")))
+        .filter(|gem| {
+            let require_line = format!("require {gem:?}");
+            files.iter().any(|(p, c)| p.ends_with(".rb") && requires_feature(c, &require_line))
+        })
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let gemfile = &mut files[gemfile_at].1;
+    gemfile.push_str(
+        "\n# Bundled gems that the tree requires. Declared by\n\
+         # `project.rs::apply_bundled_gem_wiring`.\n",
+    );
+    for gem in missing {
+        gemfile.push_str(&format!("gem {gem:?}\n"));
+    }
+}
+
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
@@ -5769,6 +5848,7 @@ fn write_bundled_requires(files: &mut [(String, String)]) {
     for (i, require_line) in bundled_require_gaps(files) {
         files[i].1.insert_str(0, &format!("{require_line}\n"));
     }
+    apply_bundled_gem_wiring(files);
 }
 
 /// The emitted call every declared variant lowers to (`lower::attached
@@ -7574,6 +7654,14 @@ mod tests {
         let processor = get(&with, "runtime/active_storage_processor.rb");
         assert!(processor.contains("require \"vips\""), "{processor}");
         assert!(processor.contains("Vips::Image.thumbnail_buffer"), "{processor}");
+        assert!(
+            processor.contains("VipsExt.sp_vips_find_load"),
+            "find_load wrap must reach C through VipsExt:\n{processor}"
+        );
+        assert!(
+            !processor.contains("alias_method :"),
+            "wrapping the Ruby finder in place re-enters the wrapper on the spinel package:\n{processor}"
+        );
         let manifest = get(&with, "spin.toml");
         assert!(manifest.contains("[dependencies]\n"), "{manifest}");
         assert!(

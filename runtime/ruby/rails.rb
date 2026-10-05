@@ -223,7 +223,8 @@ module Rails
       k = key.to_s
       return nil unless @entries.key?(k)
       due = @expires_at[k]
-      return @entries[k] if due == 0 || due > Time.now.to_i
+      return @entries[k] if due == 0
+      return @entries[k] if due > Time.now.to_i
       forget(k)
       nil
     end
@@ -486,8 +487,9 @@ module Rails
     # user uploads sets before any image is decoded. Lifted at ingest
     # onto the reopen, the same way as the trim above; applied by the
     # image processor (runtime/spinel/facades/active_storage_processor
-    # _vips.rb) when it loads. Nothing blocked when the app says
-    # nothing, which is libvips' own default.
+    # _vips.rb) when it loads, which also wraps find_load so a blocked
+    # loader is not selected on libvips 8.14. Nothing blocked when the
+    # app says nothing, which is libvips' own default.
     def vips_block_untrusted
       false
     end

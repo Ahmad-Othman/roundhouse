@@ -3342,7 +3342,12 @@ pub(crate) fn build_view_signature_from(
     })
 }
 
-pub(crate) fn infer_view_arg(stem: &str, dir: &str, is_partial: bool, _known_models: &[String]) -> String {
+pub(crate) fn infer_view_arg(stem: &str, dir: &str, is_partial: bool, known_models: &[String]) -> String {
+    // A hyphenated directory (`product-item`) is no identifier.
+    infer_view_arg_raw(stem, dir, is_partial, known_models).replace('-', "_")
+}
+
+fn infer_view_arg_raw(stem: &str, dir: &str, is_partial: bool, _known_models: &[String]) -> String {
     if dir.is_empty() {
         return String::new();
     }
@@ -3564,6 +3569,8 @@ fn rewrite_defined_to_nil_check(expr: &mut Expr) {
         | ExprNode::Retry
         | ExprNode::Redo
         | ExprNode::ForwardArgs
+        | ExprNode::ForwardKeywords
+        | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
         ExprNode::Hash { entries, .. } => {
             for (k, v) in entries {
@@ -4470,6 +4477,12 @@ mod tests {
     fn module_id_for_articles_dir() {
         let id = view_module_id("articles");
         assert_eq!(id.0.as_str(), "Views::Articles");
+    }
+
+    #[test]
+    fn a_hyphenated_view_directory_yields_a_valid_constant_and_local() {
+        assert_eq!(view_module_id("product-item").0.as_str(), "Views::ProductItem");
+        assert_eq!(infer_view_arg("_default", "product-item", true, &[]), "product_item");
     }
 
     #[test]

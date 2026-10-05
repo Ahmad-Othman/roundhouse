@@ -309,7 +309,7 @@ module RequestDispatch
   # values are recursive Hash | original-leaf, both unified as untyped.
   def stringify_keys: (Hash[untyped, untyped] hash) -> Hash[String, untyped]
 
-  def assert_response: (Symbol | Integer expected, ?ActionResponse response) -> void
+  def assert_response: (Symbol | Integer expected, ?String? message) -> void
   def assert_redirected_to: (String expected_path, ?ActionResponse response) -> void
 
   # Two positional + optional content/opts forms + optional block.

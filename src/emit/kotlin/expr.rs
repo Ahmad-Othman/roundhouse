@@ -1012,8 +1012,20 @@ fn escape_str(s: &str) -> String {
 
 fn emit_hash(entries: &[(Expr, Expr)], e: &Expr) -> String {
     if entries.is_empty() {
+        // Untyped/var empty `{}` would be MutableMap<Any?, Any?> and
+        // fail Kotlin invariance against String-keyed helper params.
         if let Some(crate::ty::Ty::Hash { key, value }) = e.ty.as_ref() {
-            return format!("mutableMapOf<{}, {}>()", kotlin_ty(key), kotlin_ty(value));
+            let k = match key.as_ref() {
+                crate::ty::Ty::Untyped | crate::ty::Ty::Var { .. } | crate::ty::Ty::Sym => {
+                    "String".to_string()
+                }
+                _ => kotlin_ty(key),
+            };
+            let v = match value.as_ref() {
+                crate::ty::Ty::Untyped | crate::ty::Ty::Var { .. } => "Any?".to_string(),
+                _ => kotlin_ty(value),
+            };
+            return format!("mutableMapOf<{k}, {v}>()");
         }
         return "mutableMapOf<String, Any?>()".to_string();
     }

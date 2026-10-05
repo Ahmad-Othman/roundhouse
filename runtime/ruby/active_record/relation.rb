@@ -40,6 +40,7 @@ module ActiveRecord
       @limit = nil
       @offset = nil
       @includes = []
+      @skip_preloading = false
       @records = nil
       @scope_attributes = {}
       @from = nil
@@ -201,6 +202,14 @@ module ActiveRecord
         @records = nil
       end
       self
+    end
+
+    # `reorder(*parts)` — Rails' "replace the ordering": drop every term
+    # gathered so far, then order by these. Same in-memory resort as
+    # `order` when the records are already loaded.
+    def reorder(*parts)
+      @orders = []
+      order(*parts)
     end
 
     # Rails' mutating spellings. This Relation's chain methods already
@@ -444,7 +453,14 @@ module ActiveRecord
       current_page == 1
     end
 
+    # Loaded non-empty short page cannot have a successor — skip COUNT.
+    # Empty pages are ambiguous (page 1 of nothing vs. out of range).
     def last_page?
+      per_page = @limit
+      return true if per_page.nil?
+      raise ZeroDivisionError, "Total pages was incalculable. Perhaps you called .per(0)?" if per_page == 0
+      r = @records
+      return true if !r.nil? && r.length > 0 && r.length < per_page
       current_page == total_pages
     end
 
@@ -593,6 +609,25 @@ module ActiveRecord
       self
     end
 
+    # `skip_preloading!` — load the rows without running the recorded
+    # `includes`/`preload` specs. The specs stay on the relation, so a
+    # caller can apply them later, to just the records it needs, with
+    # `preload_associations`. campfire's message pages load this way and
+    # preload only the messages its fragment cache missed.
+    def skip_preloading!
+      @records = nil
+      @skip_preloading = true
+      self
+    end
+
+    # `preload_associations(records)` — run this relation's recorded
+    # preload specs against `records`, loaded here or anywhere else, the
+    # batched `IN` loads `load_records` would have run on its own rows.
+    def preload_associations(records)
+      @model.preload_associations(records, @includes) if @includes.length > 0
+      records
+    end
+
     def eager_load(*names)
       @records = nil
       names.each { |n| @includes << n }
@@ -716,7 +751,7 @@ module ActiveRecord
         rows = ActiveRecord.adapter.select_rows(to_sql)
         rows.map { |row| @model.instantiate(row) }
       end
-      @model.preload_associations(records, @includes) if @includes.length > 0
+      @model.preload_associations(records, @includes) if @includes.length > 0 && !@skip_preloading
       records
     end
 
@@ -724,6 +759,13 @@ module ActiveRecord
     # loaded records, which is what lets `[story, relation].flatten`
     # splice the relation's records into the surrounding Array
     # (Array#flatten recurses into elements that respond to to_ary).
+    # `relation.to_set` — Enumerable's, on the loaded records (campfire's
+    # `Rooms::Direct.find_or_create_for(...).users.to_set`, comparing
+    # direct-room members whatever their order).
+    def to_set
+      Set.new(to_a)
+    end
+
     def to_ary
       to_a
     end
@@ -828,32 +870,39 @@ module ActiveRecord
       records.map { |r| r.id }
     end
 
-    # `include?(record)` — Rails checks membership against the loaded
-    # records (`load` then id-compare); materializing matches that
-    # contract at our result-set sizes.
-    # Rails' `Relation#include?(record)`: a loaded relation asks its
-    # records, an unloaded one asks the database (`exists?(record.id)`).
-    # Either way the question is the RECORD's identity — class and id —
-    # never object identity, so two hydrations of one row agree.
-    # Compared by id here rather than through `==` because record
-    # equality is defined only on the CRuby overlay
-    # (`active_record_bang.rb`); a compiled target compares boxed objects
-    # by pointer, and campfire's `room.users.include?(users(:david))`
-    # read false for a user the room had just been granted.
-    #
-    # Through `ids` rather than `exists?(record.id)` the way Rails asks
-    # it: the caller's record is untyped, and handing its `id` to the
-    # nullable `Integer?` parameter is a shape spinel refuses at the C
-    # level (`passing 'int' to parameter of incompatible type
-    # 'sp_RbVal'`). `ids` is one projected query and a typed
-    # `Array[Integer]`, so the comparison stays typed end to end.
+    # Loaded: scan the cache. Unloaded: exists?(id), not ids (ORDER BY).
     def include?(record)
       return false if record.nil?
-      ids.include?(record.id)
+      rid = record.id
+      return false if rid.nil?
+      key = @model._cast_primary_key(rid)
+      return false if key.nil?
+      loaded = @records
+      unless loaded.nil?
+        return loaded.any? { |x| x.id == key }
+      end
+      exists?(key)
+    end
+
+    # Memoized rows, not a dup. each/find_each return self.
+    def loaded_records
+      records = @records
+      if records.nil?
+        records = load_records
+        @records = records
+      end
+      records
     end
 
     def each
-      to_a.each { |x| yield x }
+      records = loaded_records
+      i = 0
+      n = records.length
+      while i < n
+        yield records[i]
+        i += 1
+      end
+      self
     end
 
     # `index_by { |r| key }` — the records as a Hash keyed by the
@@ -865,11 +914,18 @@ module ActiveRecord
       h
     end
 
-    # `find_each` — Rails batches in groups of 1000; the result set sizes
-    # this runtime serves make plain iteration the same observable
-    # behavior (ordering aside, which our callers don't rely on).
+    # `find_each` — Rails batches; corpus sizes make one load the same
+    # answer. Loop duplicated from `each`: a nested `{ |x| yield x }`
+    # left `x` as TyVar under Bar A.
     def find_each
-      to_a.each { |x| yield x }
+      records = loaded_records
+      i = 0
+      n = records.length
+      while i < n
+        yield records[i]
+        i += 1
+      end
+      self
     end
 
     def map
@@ -1003,15 +1059,9 @@ module ActiveRecord
       rows
     end
 
-    # The last n IN RELATION ORDER — Rails does not reverse them
-    # (campfire's `ordered.last(PAGE_SIZE)` is the oldest-to-newest tail
-    # of a room's messages, which is the order the page renders).
-    #
-    # Unloaded, no OFFSET: reverse each ORDER BY, LIMIT n, load, reverse
-    # the rows back. That is Rails' SQL tail, and it is what `/rooms/1`
-    # and `messages?before=` pay — `to_a.last(n)` was the whole history.
-    # A loaded relation, or one with OFFSET, still takes the in-memory
-    # tail: reversing ORDER BY under OFFSET is not the same window.
+    # Last n in relation order (Rails does not reverse the page).
+    # Unloaded and unwindowed: reverse ORDER BY, LIMIT n, reverse rows.
+    # Loaded or already LIMIT/OFFSET: in-memory tail of that window.
     def last_n(n)
       loaded = @records
       unless loaded.nil?
@@ -1104,31 +1154,19 @@ module ActiveRecord
       h
     end
 
-    # Loaded relations answer from the cache; unloaded ones keep the
-    # COUNT round-trip (Rails asks EXISTS here — one row either way).
+    # Loaded: cache length. Unloaded: exists? (SELECT 1 LIMIT 1).
     def empty?
       r = @records
-      r.nil? ? count == 0 : r.length == 0
+      r.nil? ? !exists? : r.length == 0
     end
 
-    # Like `empty?`: a loaded relation answers from its records, an
-    # unloaded one asks the database for a count.
     def any?
       r = @records
-      r.nil? ? count > 0 : r.length > 0
+      r.nil? ? exists? : r.length > 0
     end
 
-    # ActiveSupport's blank family on a relation. Rails answers `blank?`
-    # through `records.blank?`, which LOADS; spelled against `empty?`
-    # here so an unloaded relation pays the COUNT round-trip `empty?`
-    # already pays rather than materialising every row.
-    #
-    # `lower::blank` folds these away where the receiver's static type
-    # is known (a typed relation grounds to `!empty?`). These are the
-    # runtime answers for the sites it declines: campfire's has_many
-    # extension `revise(granted: [], revoked: [])` takes a relation
-    # through an untyped kwarg, and `granted.present?` reaches the
-    # object by dispatch.
+    # Rails loads for blank?; empty? keeps the existence probe.
+    # lower::blank folds typed sites; these cover untyped dispatch.
     def blank?
       empty?
     end
@@ -1141,36 +1179,23 @@ module ActiveRecord
       empty? ? nil : self
     end
 
-    # Rails reaches Enumerable#none? through the relation, and without a
-    # block it is `any?` inverted. Spelled against `empty?` rather than
-    # `!any?` so the loaded case answers from the cache the way `empty?`
-    # does instead of paying a COUNT round-trip.
+    # Enumerable#none? without a block is empty? (uses the loaded cache).
     def none?
       empty?
     end
 
-    # `one?` — EXACTLY one row, the third of the Enumerable predicates
-    # Rails reaches through a relation. Its siblings have been here
-    # since `any?`; this one had no caller until a `has_many :through`
-    # reader started answering a real Relation, at which point
-    # campfire's `user.rooms.one?` stopped being an Array question.
-    #
-    # Block form is absent for the same reason `any?`'s is: it would
-    # have to materialize and iterate, and no call site asks.
+    # Exactly one row. Unloaded: SELECT 1 LIMIT 2. No block form.
     def one?
-      count == 1
+      r = @records
+      return r.length == 1 unless r.nil?
+      probe_existence(2) == 1
     end
 
-    # `many?` — MORE than one row, ActiveSupport's Enumerable addition
-    # Rails answers on a relation with `limit_value ? records.many? :
-    # size > 1`. Loaded answers from the cache like `any?`; unloaded
-    # pays the COUNT. campfire's sidebar asks it of a direct room's
-    # `users.without(user)` to pick the avatar-group layout — a site
-    # that was never reached until the helper's block-form `link_to`
-    # rendered its block.
+    # More than one row. Unloaded: SELECT 1 LIMIT 2.
     def many?
       r = @records
-      r.nil? ? count > 1 : r.length > 1
+      return r.length > 1 unless r.nil?
+      probe_existence(2) > 1
     end
 
     # Block form of Enumerable#all? over the materialized rows (the
@@ -1182,29 +1207,70 @@ module ActiveRecord
       ok
     end
 
-    # `exists?` / `exists?(id)` — Rails also takes a conditions Hash or
-    # a String; the id form is what the corpus spells
-    # (`Membership.connected.exists?(@membership.id)`), and a Hash
-    # would be the untyped-Hash-surface problem `has_json` mapped out.
-    # An `Integer?` param narrows by early return, not by a guard —
-    # rust2 does not narrow an `Option` across `unless x.nil?`.
+    # `exists?` / `exists?(id)`. Hash/String forms are unsupported.
+    # Integer? narrows by early return — rust2 does not narrow Option
+    # across `unless x.nil?`. Unloaded: exists_sql (SELECT 1 LIMIT 1).
     def exists?(id = nil)
-      return count > 0 if id.nil?
+      return false if @limit == 0
+      if id.nil?
+        r = @records
+        return r.length > 0 unless r.nil?
+        return probe_existence(1) > 0
+      end
       # Popped for the same reason `find` and `find_by` pop: a terminal
       # that answered a question must not narrow the relation it was
       # asked on.
-      @wheres << "#{@table}.id = #{ActiveRecord.adapter.escape_value(id)}"
-      found = count > 0
+      @wheres << "#{@table}.#{@model.primary_key} = #{ActiveRecord.adapter.escape_value(id)}"
+      found = probe_existence(1) > 0
       @wheres.pop
       found
+    end
+
+    # How many probe rows `exists_sql(n)` returns. Shared by `exists?`,
+    # `one?`, and `many?` so cardinality questions never hydrate.
+    def probe_existence(n)
+      return 0 if @limit == 0
+      ActiveRecord.adapter.select_rows(exists_sql(n)).length
+    end
+
+    # `count > n` without a COUNT(*): same FROM/JOIN/WHERE as
+    # `count_sql` (LIMIT/OFFSET/ORDER ignored), then `LIMIT 1 OFFSET n`.
+    # Does not mutate the relation — `offset(n).exists?` would, and a
+    # loaded `exists?` would ignore that offset.
+    def more_than?(n)
+      return true if n < 0
+      sql = "#{cte_prefix}SELECT 1 AS one FROM #{from_source}"
+      sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
+      sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
+      sql = "#{sql} LIMIT 1 OFFSET #{n}"
+      ActiveRecord.adapter.select_rows(sql).length > 0
     end
 
     def length
       to_a.length
     end
 
+    # Rails' `Relation#size`: length when loaded; COUNT when unloaded
+    # and unbounded. A LIMIT/OFFSET window must not answer the table
+    # total — `limit(2).size` is at most 2 — so the limited path counts
+    # a `SELECT 1` subquery rather than `count_sql` (which omits LIMIT
+    # on purpose for Kaminari `total_count`).
     def size
-      to_a.length
+      r = @records
+      return r.length unless r.nil?
+      return count if @limit.nil? && @offset.nil?
+      prior_orders = @orders
+      @orders = []
+      # Same DISTINCT pitfall as exists_sql: `SELECT DISTINCT 1` collapses
+      # every matching row into one, so `distinct.limit(5).size` would
+      # answer 1. Project the primary key when distinct so the outer
+      # COUNT sees separate rows under LIMIT.
+      cols = @distinct ? "#{@table}.#{@model.primary_key}" : "1 AS one"
+      inner = select_sql_with(cols)
+      @orders = prior_orders
+      sql = "SELECT COUNT(*) AS n FROM (#{inner}) AS __rh_size"
+      rows = ActiveRecord.adapter.select_rows(sql)
+      rows.length == 0 ? 0 : rows[0]["n"].to_i
     end
 
     # `delete_all` — bulk DELETE scoped by the accumulated WHEREs.
@@ -1546,6 +1612,33 @@ module ActiveRecord
       sql
     end
 
+    # `SELECT 1 AS one … LIMIT n` for existence probes. Drops ORDER BY
+    # and never hydrates. Keeps joins / WHERE / GROUP / HAVING / OFFSET.
+    def exists_sql(n)
+      # DISTINCT 1 collapses every row into one — `distinct.many?` would
+      # always be false. Project the primary key so each distinct row
+      # still occupies a probe slot under LIMIT n.
+      cols = if @distinct
+        "DISTINCT #{@table}.#{@model.primary_key} AS one"
+      else
+        "1 AS one"
+      end
+      sql = "#{cte_prefix}SELECT #{cols} FROM #{from_source}"
+      sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
+      sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
+      sql = "#{sql} GROUP BY #{@groups.join(", ")}" if @groups.length > 0
+      sql = "#{sql} HAVING #{@havings.join(" AND ")}" if @havings.length > 0
+      # Respect an existing relation LIMIT: many?/one? on limit(1) must
+      # not look past the window.
+      lim = n
+      unless @limit.nil?
+        lim = @limit < n ? @limit : n
+      end
+      sql = "#{sql} LIMIT #{lim}"
+      sql = "#{sql} OFFSET #{@offset}" unless @offset.nil?
+      sql
+    end
+
     # ---- helpers ----------------------------------------------------
 
     # `WITH RECURSIVE a AS (…), b AS (…) ` or nothing.
@@ -1617,9 +1710,53 @@ module ActiveRecord
     # the leftmost remaining `?`, so iterating the args consumes them in
     # order.
     def substitute_binds(sql, args)
+      first = args[0]
+      return substitute_named_binds(sql, first) if args.length == 1 && first.is_a?(Hash)
       result = sql
       args.each { |a| result = result.sub("?", ActiveRecord.adapter.escape_value(a)) }
       result
+    end
+
+    # Rails' named binds: `having("COUNT(*) = :size AND … IN (:user_ids)",
+    # size: 2, user_ids: [3, 5])`, campfire's direct-room lookup
+    # (basecamp/once-campfire#310). Each `:name` the Hash answers is
+    # replaced by its escaped value, and an Array value by a
+    # comma-separated list. A `::` cast is left alone, as is a name the
+    # Hash does not have. Before this, the placeholders reached SQLite
+    # unbound and read as NULL: every lookup missed and every Ping
+    # created a new direct room.
+    def substitute_named_binds(sql, binds)
+      out = ""
+      i = 0
+      n = sql.length
+      while i < n
+        ch = sql[i, 1].to_s
+        prev = i > 0 ? sql[i - 1, 1].to_s : ""
+        nxt = sql[i + 1, 1].to_s
+        if ch == ":" && prev != ":" && nxt != ":" && named_bind_start?(nxt)
+          j = i + 1
+          j += 1 while j < n && named_bind_char?(sql[j, 1].to_s)
+          name = sql[i + 1, j - i - 1].to_s
+          key = name.to_sym
+          if binds.key?(key)
+            value = binds[key]
+            out = out + (value.is_a?(Array) ? escape_list(value) : ActiveRecord.adapter.escape_value(value))
+            i = j
+            next
+          end
+        end
+        out = out + ch
+        i += 1
+      end
+      out
+    end
+
+    def named_bind_start?(ch)
+      (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch == "_"
+    end
+
+    def named_bind_char?(ch)
+      named_bind_start?(ch) || (ch >= "0" && ch <= "9")
     end
 
     def escape_list(vals)

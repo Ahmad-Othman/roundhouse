@@ -77,6 +77,13 @@ module ActiveRecord
       Result.new(ActiveRecord.adapter.select_rows(sql))
     end
 
+    # `select_rows(sql)` — Rails' rows as Arrays of values, in column
+    # order (campfire's tests read an `EXPLAIN QUERY PLAN`'s detail with
+    # `select_rows(…).map(&:last)`).
+    def select_rows(sql)
+      ActiveRecord.adapter.select_rows(sql).map { |row| row.values }
+    end
+
     def exec_query(sql)
       execute(sql)
     end
@@ -344,6 +351,15 @@ module ActiveRecord
     # `ActiveRecord::Relation.new(Model)` directly.
     def self.all
       ActiveRecord::Relation.new(self)
+    end
+
+    # SELECT 1 LIMIT 1. Strict targets keep COUNT in base.rb.
+    def self.any?
+      ActiveRecord::Relation.new(self).exists?
+    end
+
+    def self.none?
+      !any?
     end
 
     # Rails-shape `none` fallback, same story as `where`/`all` above:

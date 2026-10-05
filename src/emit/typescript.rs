@@ -652,7 +652,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             app.schema.tables.get(&m.table.0).map(|t| {
                 (
                     m.name.clone(),
-                    crate::lower::model_to_library::shakeable_synthesized_names(t)
+                    crate::lower::model_to_library::shakeable_synthesized_names(t, m)
                         .into_iter()
                         .collect(),
                 )
@@ -2736,6 +2736,8 @@ fn collect_ivar_assignments(
         | ExprNode::Retry
         | ExprNode::Redo
         | ExprNode::ForwardArgs
+        | ExprNode::ForwardKeywords
+        | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
     }
 }

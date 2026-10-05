@@ -1118,6 +1118,20 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         return_kind: Some(ReturnKind::RelationOfSelf),
     },
     CatalogedMethod {
+        name: "skip_preloading!",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::RelationOfSelf),
+    },
+    CatalogedMethod {
+        name: "preload_associations",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::ArrayOfSelf),
+    },
+    CatalogedMethod {
         name: "rewhere",
         receiver: ReceiverContext::Relation,
         effect: EffectClass::DbRead,
@@ -1480,6 +1494,13 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
     },
     CatalogedMethod {
         name: "exists?",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::Bool),
+    },
+    CatalogedMethod {
+        name: "more_than?",
         receiver: ReceiverContext::Relation,
         effect: EffectClass::DbRead,
         chain: ChainKind::Terminal,
@@ -1918,6 +1939,7 @@ mod tests {
             ("find_by", ReturnKind::SelfOrNil),
             ("count", ReturnKind::Int),
             ("exists?", ReturnKind::Bool),
+            ("more_than?", ReturnKind::Bool),
             ("pluck", ReturnKind::ArrayOfUntyped),
             ("pick", ReturnKind::Untyped),
             ("ids", ReturnKind::ArrayOfInt),

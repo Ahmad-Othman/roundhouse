@@ -146,6 +146,7 @@ pub mod params_permit;
 pub mod normalizes;
 pub mod relation_select_block;
 pub mod send_dispatch;
+pub mod relation_counted_terminal;
 pub(crate) mod secure_password;
 pub mod attached;
 pub mod attached_url;
@@ -624,6 +625,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Grounds the plural duration-unit calls that send_static_dispatch
     // synthesizes into case arms, so it must observe that pass's output.
     ("duration", &["send_static_dispatch"]),
+    // `first(n)`/`last(n)` on an analyzer-typed Relation -> `first_n` /
+    // `last_n`, and `rel.count > n` -> `more_than?(n)`, including the
+    // arms send_static_dispatch synthesizes from a `public_send(selector, n)`,
+    // so it observes that pass's output.
+    ("relation_counted_terminal", &["send_static_dispatch"]),
     // Grounds `attach(io:, filename:, content_type:)` to positional
     // Strings by reading the io at the call site — the runtime's RBS
     // has no File type, and an `untyped` parameter there is five new
@@ -975,6 +981,8 @@ pub fn apply_post_analyze_lowerings(
     // this grounding (`send_dispatch::duration_plural`).
     duration::apply_duration_lowering(app);
     ran!("duration");
+    relation_counted_terminal::apply_relation_counted_terminals(app);
+    ran!("relation_counted_terminal");
     attached::apply_attach_lowering(app);
     ran!("attach");
     attached_url::apply_attached_url_lowering(app);
@@ -1197,7 +1205,7 @@ pub(crate) fn for_each_owned_hook_body(
         }
     }
     for lc in &mut app.library_classes {
-        let crate::dialect::LibraryClass { name, methods, constants, unknown_calls, .. } = lc;
+        let crate::dialect::LibraryClass { name, methods, constants, unknown_calls, class_ivar_initializers, .. } = lc;
         let f = &mut |e: &mut crate::expr::Expr| f(Some(&*name), e);
         for method in methods.iter_mut() {
             visit_param_defaults(&mut method.params, f);
@@ -1208,6 +1216,9 @@ pub(crate) fn for_each_owned_hook_body(
         }
         for call in unknown_calls.iter_mut() {
             f(call);
+        }
+        for initializer in class_ivar_initializers.iter_mut() {
+            f(initializer);
         }
     }
     // `config/application.rb`. `App::rails_application` is a
@@ -1218,7 +1229,7 @@ pub(crate) fn for_each_owned_hook_body(
     // compiled to `undefined method 'presence' for an instance of
     // String`: a body that ships has to be walked.
     if let Some(lc) = &mut app.rails_application {
-        let crate::dialect::LibraryClass { name, methods, constants, unknown_calls, .. } = lc;
+        let crate::dialect::LibraryClass { name, methods, constants, unknown_calls, class_ivar_initializers, .. } = lc;
         let f = &mut |e: &mut crate::expr::Expr| f(Some(&*name), e);
         for method in methods.iter_mut() {
             visit_param_defaults(&mut method.params, f);
@@ -1229,6 +1240,9 @@ pub(crate) fn for_each_owned_hook_body(
         }
         for call in unknown_calls.iter_mut() {
             f(call);
+        }
+        for initializer in class_ivar_initializers.iter_mut() {
+            f(initializer);
         }
     }
     for controller in &mut app.controllers {
@@ -1333,6 +1347,9 @@ pub(crate) fn for_each_hook_body_ref(
         for call in &lc.unknown_calls {
             f(call);
         }
+        for initializer in &lc.class_ivar_initializers {
+            f(initializer);
+        }
     }
     // Same set as the mutable twin — see the note there.
     if let Some(lc) = &app.rails_application {
@@ -1345,6 +1362,9 @@ pub(crate) fn for_each_hook_body_ref(
         }
         for call in &lc.unknown_calls {
             f(call);
+        }
+        for initializer in &lc.class_ivar_initializers {
+            f(initializer);
         }
     }
     for controller in &app.controllers {
@@ -1394,6 +1414,7 @@ macro_rules! forwarding_roots {
                 }
                 for (_, value) in & $($mutable)? class.constants { $f(value); }
                 for call in & $($mutable)? class.unknown_calls { $f(call); }
+                for initializer in & $($mutable)? class.class_ivar_initializers { $f(initializer); }
             }
         }
     }
@@ -1590,5 +1611,71 @@ mod pass_order_tests {
         for (name, _) in POST_ANALYZE_PASS_ORDER {
             assert!(seen.insert(*name), "duplicate pass name in order table: {name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod body_root_tests {
+    use super::*;
+    use crate::expr::{Expr, ExprNode, Literal, LValue};
+
+    fn trace(expr: &Expr, seen: &mut Vec<String>) {
+        match &*expr.node {
+            ExprNode::Lit { value: Literal::Int { value } } => seen.push(value.to_string()),
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+                if name.as_str().starts_with("@@") => seen.push(name.as_str().to_owned()),
+            _ => {}
+        }
+        expr.node.for_each_child(&mut |child| trace(child, seen));
+    }
+
+    #[test]
+    fn surveys_and_rewrites_visit_each_owned_root_once_in_order() {
+        let files = [
+            ("app/models/widget.rb", "class Widget < ApplicationRecord\n def probe(value=11); 12; end\n scope :slice, ->(value=13) { 14 }\n before_save :probe, if: -> { 15 }\n has_many :items do\n def extra(value=16); 17; end\n end\n dsl(18)\nend"),
+            ("app/controllers/widgets_controller.rb", "class WidgetsController < ApplicationController\n before_action :probe, if: -> { 19 }, unless: -> { 20 }\n def index(value=21); 22; end\n dsl(23)\nend"),
+            ("app/services/probe.rb", "class Probe\n ITEM=24\n dsl(25)\n def probe(value=26); 27; end\nend\nclass Counter\n @@counter=nil\n def probe(value=28); 29; end\nend"),
+            ("config/application.rb", "module Shell\n class Application < Rails::Application\n def probe(value=30); 31; end\n end\nend"),
+            ("db/seeds.rb", "34"),
+            ("app/views/widgets/index.html.erb", "<%= 35 %>"),
+            ("test/models/probe_test.rb", "class ProbeTest < ActiveSupport::TestCase\n def test_probe; assert_equal 36, 37; end\n def helper(value=38); 39; end\n def setup; 40; end\n ITEM=41\n class Nested\n @@nested=nil\n def probe(value=42); 43; end\n end\nend"),
+        ];
+        let mut app = crate::ingest::ingest_app_from_tree(files.into_iter()
+            .map(|(path, code)| (std::path::PathBuf::from(path), code.as_bytes().to_vec()))
+            .collect()).unwrap();
+        // Config ingest filters class-body DSL. The walker still owns every
+        // LibraryClass field, including roots supplied by later passes.
+        let config = app.rails_application.as_mut().unwrap();
+        config.constants.push((crate::ident::Symbol::from("ITEM"),
+            Expr::new(crate::span::Span::synthetic(), ExprNode::Lit { value: Literal::Int { value: 32 } })));
+        config.unknown_calls.push(Expr::new(crate::span::Span::synthetic(),
+            ExprNode::Lit { value: Literal::Int { value: 33 } }));
+        let hooks = ["11", "12", "13", "14", "15", "16", "17", "18",
+            "26", "27", "24", "25", "28", "29", "@@counter",
+            "30", "31", "32", "33", "19", "20", "21", "22", "23", "34"];
+        let extras = ["35", "40", "36", "37", "41", "39", "38", "43", "42", "@@nested"];
+        let mut seen = Vec::new();
+        for_each_hook_body_ref(&app, &mut |root| trace(root, &mut seen));
+        assert_eq!(seen, hooks);
+        seen.clear();
+        for_each_owned_hook_body(&mut app, &mut |owner, root| {
+            if matches!(&*root.node, ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+                if name.as_str() == "@@counter") {
+                assert_eq!(owner.unwrap().0.as_str(), "Counter");
+            }
+            trace(root, &mut seen);
+        });
+        assert_eq!(seen, hooks);
+        let expected: Vec<_> = hooks.into_iter().chain(extras).collect();
+        seen.clear();
+        for_each_emit_body_ref(&app, &mut |root| trace(root, &mut seen));
+        assert_eq!(seen, expected);
+        seen.clear();
+        for_each_forwarding_body(&mut app, &mut |root| {
+            trace(root, &mut seen);
+            root.span.start = 99;
+        });
+        assert_eq!(seen, expected);
+        for_each_forwarding_body_ref(&app, &mut |root| assert_eq!(root.span.start, 99));
     }
 }
