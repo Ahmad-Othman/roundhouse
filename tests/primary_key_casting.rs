@@ -68,6 +68,63 @@ fn request_primary_keys_are_cast_before_the_emitted_ruby_adapter() {
     app().run_ruby(&format!("{ASSERTIONS}\n{CONTROLLER_ASSERTIONS}")).assert_passes();
 }
 
+/// Include real lowered Float call sites, not only a post-emission consumer.
+fn float_input_app() -> emit_and_run::Overlay {
+    app().edit("app/models/article.rb", "class Article < ApplicationRecord\nend\n", r#"class Article < ApplicationRecord
+  def self.tiny_float_title
+    find(1e-7).title
+  end
+  def self.huge_float_title
+    find(1e20).title
+  end
+end
+"#)
+}
+
+const FLOAT_ASSERTIONS: &str = r#"
+Db.exec("INSERT INTO articles (id, title) VALUES (0, 'zero'), (1, 'one'), (-1, 'negative one')")
+raise "lowered Float call aliased row one" unless Article.tiny_float_title == "zero"
+[-1e-7, 1e-7, 0.0].each do |input|
+  raise "direct tiny Float" unless Article.find(input).title == "zero"
+  raise "relation tiny Float" unless Article.all.find(input).title == "zero"
+end
+raise "positive fraction" unless Article.find(1.9).title == "one"
+raise "negative fraction" unless Article.find(-1.9).title == "negative one"
+raise "String exponent retains decimal-prefix semantics" unless Article.find("1e-7").title == "one"
+[1e20, -1e20, 9223372036854775808.0, 1.0 / 0.0, -1.0 / 0.0, 0.0 / 0.0].each do |input|
+  begin
+    Article.find(input)
+    raise "invalid Float matched a direct row"
+  rescue ActiveRecord::RecordNotFound
+  end
+  begin
+    Article.all.find(input)
+    raise "invalid Float matched a relation row"
+  rescue ActiveRecord::RecordNotFound
+  end
+end
+begin
+  Article.huge_float_title
+  raise "lowered overflowing Float call aliased row one"
+rescue ActiveRecord::RecordNotFound
+end
+puts "PASS numeric Float finder inputs"
+"#;
+
+#[test]
+/// Scientific notation and non-finite values must never select an unrelated row.
+fn float_primary_key_inputs_preserve_numeric_values_in_emitted_ruby() {
+    float_input_app().run_ruby(FLOAT_ASSERTIONS).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain and RBS extractor"]
+/// Exercise finite truncation and rejection independently of the existing MIN controls.
+fn float_primary_key_inputs_preserve_numeric_values_natively() {
+    let script = format!("Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{FLOAT_ASSERTIONS}");
+    run_seeded_native(float_input_app(), &script);
+}
+
 #[test]
 #[ignore = "requires the Spinel toolchain"]
 /// Keep the native full-range control visible, including upstream MIN failures.

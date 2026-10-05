@@ -407,7 +407,7 @@ fn qualified_finder_signatures_seed_contexts_and_results() {
     let (registry, sigs) = build_class_registry();
     let classes = ingest_runtime_classes();
     let key_class = ClassId(Symbol::new("ActiveRecord::IntegerKeyCast"));
-    let input = Ty::Union { variants: vec![Ty::Int, Ty::Str, Ty::Nil] };
+    let input = Ty::Union { variants: vec![Ty::Int, Ty::Float, Ty::Str, Ty::Nil] };
     for (class, method, expected) in [
         ("ActiveRecord::IntegerKeyCast", "initialize", vec![("valid", Ty::Bool), ("value", Ty::Int)]),
         ("ActiveRecord::IntegerKeyCast", "parse", vec![("id", input.clone())]),

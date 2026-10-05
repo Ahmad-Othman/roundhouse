@@ -37,6 +37,23 @@ class IntegerKeyCastTest < Minitest::Test
     end
   end
 
+  # Float text can use an exponent; integer keys truncate the numeric value.
+  def test_float_values_are_truncated_before_range_checked_lookup
+    {1e-7 => 0, -1e-7 => 0, 1.9 => 1, -1.9 => -1,
+     9223372036854775808.0.prev_float => 9223372036854774784,
+     -9223372036854775808.0 => -9223372036854775808}.each do |input, expected|
+      result = ActiveRecord::IntegerKeyCast.parse(input)
+      assert result.valid, input.inspect
+      assert_equal expected, result.value, input.inspect
+    end
+    [1e20, -1e20, 9223372036854775808.0,
+     (-9223372036854775808.0).prev_float,
+     Float::INFINITY, -Float::INFINITY, Float::NAN].each do |input|
+      refute ActiveRecord::IntegerKeyCast.parse(input).valid, input.inspect
+    end
+    assert_equal 1, ActiveRecord::IntegerKeyCast.parse("1e-7").value
+  end
+
   class Probe < ActiveRecord::Base
     # Detect invalid test inputs reaching the adapter, including a spurious row-zero lookup.
     def self._adapter_find_by_id(id)

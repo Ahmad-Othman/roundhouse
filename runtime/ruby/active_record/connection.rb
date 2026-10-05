@@ -45,6 +45,13 @@ module ActiveRecord
         return IntegerKeyCast.new(false, 0) if id < -9223372036854775808
         return IntegerKeyCast.new(false, 0) if id > 9223372036854775807
         return IntegerKeyCast.new(true, id)
+      elsif id.is_a?(Float)
+        # Numeric inputs truncate their VALUE, not a scientific-notation
+        # String prefix. Use an exclusive 2**63 upper bound: Float(MAX)
+        # rounds up to 2**63. These comparisons also reject NaN/infinities
+        # before to_i, while preserving the exactly representable MIN.
+        return IntegerKeyCast.new(false, 0) unless id >= -9223372036854775808.0 && id < 9223372036854775808.0
+        return IntegerKeyCast.new(true, id.to_i)
       end
       text = input_text(id)
       i = number_start(text)

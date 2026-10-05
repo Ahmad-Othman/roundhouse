@@ -275,7 +275,12 @@ fn untyped_subexpressions_baseline() {
     // Existing finder/parser sites are unchanged. The companion RBS
     // probe and full-context runtime gate still require every new finder
     // method to be fully typed; no node is excluded from this raw probe.
-    const CEILING: usize = 505;
+    // Float request inputs: 505 -> 512, MEASURED with the identical
+    // collector over the runtime before/after the numeric-value fix.
+    // All seven added sites are IntegerKeyCast#parse's unseeded Float
+    // guard/input reads and comparisons; no existing site changes.
+    // Its RBS-paired method still has the separate zero-residual assertion.
+    const CEILING: usize = 512;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ceiling of {CEILING}.\n\

@@ -8,8 +8,8 @@ module ActiveRecord
     def valid: () -> bool
     def value: () -> Integer
     def initialize: (bool valid, Integer value) -> void
-    def self.input_text: (Integer | String | nil id) -> String
-    def self.parse: (Integer | String | nil id) -> ::ActiveRecord::IntegerKeyCast
+    def self.input_text: (Integer | Float | String | nil id) -> String
+    def self.parse: (Integer | Float | String | nil id) -> ::ActiveRecord::IntegerKeyCast
     def self.number_start: (String text) -> Integer
     def self.digit_value: (String char) -> Integer
     def self.exceeds_limit: (String digits, String limit) -> bool
@@ -40,9 +40,9 @@ module ActiveRecord
 
   class Base
     # Request values stay intact until the schema-selected scalar adapter.
-    def self.find: (Integer | String | nil id) -> Base
-    def self._find_primary_key_input: (Integer | String | nil id) -> Base?
-    def self._cast_primary_key: (Integer | String | nil id) -> (Integer | String | nil)
+    def self.find: (Integer | Float | String | nil id) -> Base
+    def self._find_primary_key_input: (Integer | Float | String | nil id) -> Base?
+    def self._cast_primary_key: (Integer | Float | String | nil id) -> (Integer | String | nil)
     def self.connection: () -> Connection
     def self.sanitize_sql: (Array[untyped] statement) -> String
     def self.transaction: () { () -> untyped } -> untyped

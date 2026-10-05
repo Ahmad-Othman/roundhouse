@@ -1951,7 +1951,7 @@ fn broadcasts_class_info() -> crate::analyze::ClassInfo {
 /// existing input contracts rather than assigning them integer casting rules.
 pub(super) fn finder_input_ty(key: &Ty) -> Ty {
     if matches!(key, Ty::Int | Ty::Str) {
-        Ty::Union { variants: vec![Ty::Int, Ty::Str, Ty::Nil] }
+        Ty::Union { variants: vec![Ty::Int, Ty::Float, Ty::Str, Ty::Nil] }
     } else {
         key.clone()
     }
@@ -1962,7 +1962,7 @@ pub(super) fn finder_input_ty(key: &Ty) -> Ty {
 fn insert_integer_key_cast_info(classes: &mut HashMap<ClassId, crate::analyze::ClassInfo>) {
     let id = ClassId(Symbol::from("ActiveRecord::IntegerKeyCast"));
     let mut info = crate::analyze::ClassInfo::default();
-    let input = Ty::Union { variants: vec![Ty::Int, Ty::Str, Ty::Nil] };
+    let input = Ty::Union { variants: vec![Ty::Int, Ty::Float, Ty::Str, Ty::Nil] };
     info.class_methods.insert(Symbol::from("parse"), fn_sig(
         vec![(Symbol::from("id"), input.clone())], Ty::Class { id: id.clone(), args: vec![] },
     ));
