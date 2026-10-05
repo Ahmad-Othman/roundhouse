@@ -497,10 +497,22 @@ pub(crate) fn opens_passthrough_block(code: &str) -> bool {
     is_block_expr(t)
 }
 
+/// Double-quoted Ruby literal for `s`. A balanced `#{…}` keeps its body
+/// verbatim — it is code (HAML/Slim text interpolation), so its own
+/// quotes and backslashes must not be escaped; an unbalanced `#{` is
+/// plain text.
 pub(crate) fn ruby_string_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
-    for c in s.chars() {
+    let mut rest = s;
+    while let Some(c) = rest.chars().next() {
+        if rest.starts_with("#{") {
+            if let Some(end) = interpolation_end(rest) {
+                out.push_str(&rest[..end]);
+                rest = &rest[end..];
+                continue;
+            }
+        }
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
@@ -509,9 +521,37 @@ pub(crate) fn ruby_string_literal(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             other => out.push(other),
         }
+        rest = &rest[c.len_utf8()..];
     }
     out.push('"');
     out
+}
+
+/// Byte length of the `#{…}` at the start of `s` (brace-balanced, skipping
+/// quoted strings), or `None` when it never closes.
+fn interpolation_end(s: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    let mut chars = s.char_indices().skip(1);
+    while let Some((i, c)) = chars.next() {
+        match (quote, c) {
+            (Some(_), '\\') => {
+                chars.next();
+            }
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '{') => depth += 1,
+            (None, '}') => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn find_at(bytes: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
@@ -527,6 +567,13 @@ fn find_at(bytes: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn string_literal_keeps_interpolation_code_verbatim() {
+        assert_eq!(ruby_string_literal("a\"b #{x ? \"m\" : 'f'} \"c"), "\"a\\\"b #{x ? \"m\" : 'f'} \\\"c\"");
+        // Unbalanced `#{` is text, and escapes still apply.
+        assert_eq!(ruby_string_literal("#{ \"x"), "\"#{ \\\"x\"");
+    }
 
     /// Translate a compiled offset and assert it lands on the template
     /// offset where `needle` starts.
