@@ -115,6 +115,7 @@ pub mod in_predicate;
 pub mod including;
 pub mod enum_symbols;
 pub mod has_json;
+pub mod assoc_loaded;
 pub mod object_extend;
 pub mod param_rebind;
 pub mod to_sgid;
@@ -470,6 +471,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // constraint: the two-hop shape it consumes is one no other pass
     // produces, and the flat send it leaves is an ordinary typed call.
     ("has_json", &[]),
+    // `message.boosts.loaded?` → `message.boosts_loaded?`. Same two-hop
+    // flatten as has_json: the AssociationProxy Rails returns between
+    // those hops does not exist here (has_many readers answer Arrays),
+    // and the synthesizer already exposes the flat Bool predicate.
+    ("assoc_loaded", &[]),
     // Read-only ledger: a `self.update(k: …)` whose `k` no writer backs.
     // Rewrites nothing, so it has no ordering constraint of its own —
     // it just has to see the final tree.
@@ -875,6 +881,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("enum_symbols");
     diags.extend(has_json::apply_has_json_lowering(app));
     ran!("has_json");
+    diags.extend(assoc_loaded::apply_assoc_loaded_lowering(app));
+    ran!("assoc_loaded");
     // Read-only ledger, no rewrite — but it must run AFTER
     // `enum_symbols` so a label that pass already translated isn't
     // mistaken for anything, and after every pass that could introduce

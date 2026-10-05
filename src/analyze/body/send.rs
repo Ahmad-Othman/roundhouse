@@ -1960,6 +1960,12 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
             // array_method runs; reaching here means a union element,
             // where the manager's model is ambiguous — gradual.
             "arel" => return Ty::Untyped,
+            // AssociationProxy `#loaded?` on a has_many typed as
+            // `Array[Model]`. The `assoc_loaded` lowering rewrites the
+            // common `owner.assoc.loaded?` form onto `owner.assoc_loaded?`;
+            // this arm covers any residual / check-path site that still
+            // sees the Rails spelling against an Array representation.
+            "loaded?" => return Ty::Bool,
             _ => {}
         }
         // Everything else resolves through the Relation-context

@@ -1,0 +1,103 @@
+//! `record.assoc.loaded?` → `record.assoc_loaded?`.
+//!
+//! Roundhouse's has_many readers return a plain Array (cache hit) or run
+//! a query (cache miss) — never Rails' AssociationProxy — so the Rails
+//! spelling `message.boosts.loaded?` has nothing to dispatch on. The
+//! synthesizer already exposes the flag as a flat predicate
+//! (`message.boosts_loaded?`); rewrite the two-hop form onto that name
+//! so analyze, emit, and the Spinel AOT all see an ordinary Bool method.
+//!
+//! Same shape as `has_json`'s two-hop flatten (`account.settings.foo?` →
+//! `account.settings_foo?`): the intermediate object Rails invents is
+//! erased, and every target keeps a typed one-hop call.
+
+use std::collections::HashSet;
+
+use crate::app::App;
+use crate::diagnostic::Diagnostic;
+use crate::dialect::Association;
+use crate::expr::{Expr, ExprNode};
+use crate::ident::Symbol;
+use crate::ty::Ty;
+
+/// Association names that have a synthesized `<name>_loaded?` reader.
+fn has_many_names(app: &App) -> HashSet<Symbol> {
+    let mut out = HashSet::new();
+    for model in &app.models {
+        for (_, assoc) in model.spanned_associations() {
+            // Only has_many synthesizes `<name>_loaded?` / `<name>_target`
+            // (see `model_to_library::associations`). has_one keeps a
+            // singular reader with no flat loaded flag.
+            if let Association::HasMany { name, .. } = assoc {
+                out.insert(name.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Rewrite every `recv.assoc.loaded?` whose `assoc` is a known has_many /
+/// has_one into `recv.assoc_loaded?`.
+pub fn apply_assoc_loaded_lowering(app: &mut App) -> Vec<Diagnostic> {
+    let names = has_many_names(app);
+    if names.is_empty() {
+        return Vec::new();
+    }
+    super::for_each_hook_body(app, &mut |e| rewrite(e, &names));
+    for view in &mut app.views {
+        rewrite(&mut view.body, &names);
+    }
+    for tm in &mut app.test_modules {
+        if let Some(setup) = &mut tm.setup {
+            rewrite(setup, &names);
+        }
+        for t in &mut tm.tests {
+            rewrite(&mut t.body, &names);
+        }
+        for m in &mut tm.helpers {
+            rewrite(&mut m.body, &names);
+        }
+    }
+    Vec::new()
+}
+
+fn rewrite(expr: &mut Expr, names: &HashSet<Symbol>) {
+    expr.node.for_each_child_mut(&mut |c| rewrite(c, names));
+    let ExprNode::Send {
+        recv: Some(inner),
+        method,
+        args,
+        ..
+    } = &*expr.node
+    else {
+        return;
+    };
+    if method.as_str() != "loaded?" || !args.is_empty() {
+        return;
+    }
+    let ExprNode::Send {
+        recv: Some(owner),
+        method: assoc,
+        args: assoc_args,
+        ..
+    } = &*inner.node
+    else {
+        return;
+    };
+    if !assoc_args.is_empty() || !names.contains(assoc) {
+        return;
+    }
+    let flat = Symbol::from(format!("{}_loaded?", assoc.as_str()));
+    let mut rewritten = Expr::new(
+        expr.span,
+        ExprNode::Send {
+            recv: Some(owner.clone()),
+            method: flat,
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    rewritten.ty = Some(Ty::Bool);
+    *expr = rewritten;
+}
