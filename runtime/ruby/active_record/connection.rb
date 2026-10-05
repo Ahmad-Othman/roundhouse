@@ -488,6 +488,15 @@ module ActiveRecord
       ActiveRecord::Relation.new(self)
     end
 
+    # SELECT 1 LIMIT 1. Strict targets keep COUNT in base.rb.
+    def self.any?
+      ActiveRecord::Relation.new(self).exists?
+    end
+
+    def self.none?
+      !any?
+    end
+
     # Rails-shape `none` fallback, same story as `where`/`all` above:
     # an empty Relation off the class. lobsters' `Search` reaches it
     # through a class-valued method (`searched_model.none`), which no

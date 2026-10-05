@@ -931,7 +931,7 @@ fn classifies_models_vs_library_classes() {
 /// Survey-mode ingest must recover from an unsupported construct (rather
 /// than aborting the whole app) and must record skipped view templates.
 /// This is the behavior the LSP/MCP rely on to stay usable on real apps,
-/// and the surfacing that keeps unsupported (Slim/`.text.erb`/`.ruby`)
+/// and the surfacing that keeps unsupported (RABL/`.text.erb`/`.ruby`)
 /// views from vanishing silently.
 #[test]
 fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
@@ -948,8 +948,8 @@ fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
         ),
         // A HAML view: now ingested through the shared view pipeline.
         ("app/views/widgets/show.html.haml", "%h1= @widget.name\n"),
-        // A Slim view: still an unsupported engine the analyzer skips.
-        ("app/views/widgets/show.html.slim", "h1 = @widget.name\n"),
+        // A RABL view: still an unsupported engine the analyzer skips.
+        ("app/views/widgets/index.html.rabl", "object @widget\n"),
     ];
     let tree = || -> HashMap<PathBuf, Vec<u8>> {
         files
@@ -987,8 +987,8 @@ fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
     assert!(
         messages
             .iter()
-            .any(|m| m.contains("view template not ingested: slim")),
-        "skipped Slim view should be recorded as a gap, got: {messages:?}"
+            .any(|m| m.contains("view template not ingested: rabl")),
+        "skipped RABL view should be recorded as a gap, got: {messages:?}"
     );
     assert!(
         !messages.is_empty(),

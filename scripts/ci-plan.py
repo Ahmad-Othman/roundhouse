@@ -21,11 +21,11 @@ TARGETS = [
     "ruby",
     "jruby",
 ]
-DRAFT_FLOOR = ["generate-fixture", "unit"]
-# Ready-PR floor: the Ruby shape plus Campfire. Extra languages, Rust/TS
+# PR floor: the Ruby shape plus Campfire. Extra languages, Rust/TS
 # compare, WASM, and Spinel are not in this list.
 BASE = [
-    *DRAFT_FLOOR,
+    "generate-fixture",
+    "unit",
     "build-roundhouse",
     "store-check",
     "compare-ruby",
@@ -59,6 +59,10 @@ SPINEL11 = [
     "smoke-campfire",
     "smoke-campfire-docker",
 ]
+# Opt-in Spinel lane (`ci:spinel`): Ruby floor plus the full Spinel suite,
+# without other-language emitters, WASM, or Writebook. smoke-spinel needs
+# build-site; archive-results closes packaging evidence.
+SPINEL_LANE = [*BASE, *SPINEL11, "build-site", "archive-results"]
 ADVISORY = set(SPINEL11) - {"build-campfire-archive"}
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 PROJECT_BUILDERS = {
@@ -180,17 +184,24 @@ def archive_and_campfire_jobs(path, interpreter_only):
     return jobs
 
 
-def select(paths, *, draft=False, full=False, publish=False, project_scope=None):
-    if draft and not full:
+def select(
+    paths,
+    *,
+    full=False,
+    spinel_lane=False,
+    publish=False,
+    project_scope=None,
+):
+    if spinel_lane and not full:
         return finish(
-            DRAFT_FLOOR,
+            SPINEL_LANE,
             [],
             [],
             False,
             False,
-            False,
-            ["draft: fixture and unit only"],
-            spinel_tests=[],
+            True,
+            ["ci:spinel: Ruby floor plus Spinel suite"],
+            spinel_tests=list(SPINEL_TESTS),
         )
     targets, smoke = set(), set()
     jobs_selected, spinel_tests = set(), set()
@@ -506,9 +517,9 @@ def changed_inputs(event, event_name, sha):
 
 
 def check_results(plan, needs, *, compact=False):
-    if plan["jobs"] == DRAFT_FLOOR:
-        required = DRAFT_FLOOR
-    elif compact:
+    if compact:
+        # Compact gate only observes the publication floor jobs in its needs
+        # graph. Spinel/full extras are enforced by ci-summary, not here.
         required = [job for job in PUBLICATION if job in plan["jobs"]]
     else:
         required = plan["required"]
@@ -519,9 +530,14 @@ def check_results(plan, needs, *, compact=False):
     ]
     if needs.get("plan", {}).get("result") != "success":
         failures.append("plan: no successful routing decision")
-    if not compact and needs.get("compact-required", {}).get("result") != "success":
+    if (
+        not compact
+        and needs.get("compact-required", {}).get("result") != "success"
+    ):
         failures.append("compact-required: no successful baseline gate")
     # Advisory work never blocks the gate, but incomplete work is not complete.
+    # Compact only claims completeness for the publication floor it can see.
+    tracked = required if compact else plan["jobs"]
     complete = not failures and all(
         needs.get(j, {}).get("result") == "success"
         and (
@@ -535,7 +551,7 @@ def check_results(plan, needs, *, compact=False):
                 )
             )
         )
-        for j in plan["jobs"]
+        for j in tracked
     )
     return failures, complete
 
@@ -557,7 +573,14 @@ def main():
     parser.add_argument("command", choices=["plan", "gate", "compact-gate"])
     args = parser.parse_args()
     if args.command != "plan":
-        plan = json.loads(os.environ["CI_PLAN"])
+        raw_plan = os.environ.get("CI_PLAN", "")
+        if not raw_plan.strip():
+            # Plan cancelled/skipped leaves an empty output; do not crash the
+            # gates or claim a green floor.
+            write_outputs({"complete": False})
+            print("::notice::No plan output (cancelled or skipped); incomplete")
+            return True
+        plan = json.loads(raw_plan)
         failures, complete = check_results(
             plan,
             json.loads(os.environ["CI_NEEDS"]),
@@ -570,9 +593,9 @@ def main():
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     event_name = os.environ["GITHUB_EVENT_NAME"]
     pr = event.get("pull_request", {})
-    full = os.environ.get("CI_FULL") == "true" or any(
-        label["name"] == "ci:full" for label in pr.get("labels", [])
-    )
+    labels = {label["name"] for label in pr.get("labels", [])}
+    full = os.environ.get("CI_FULL") == "true" or "ci:full" in labels
+    spinel_lane = "ci:spinel" in labels
     if (
         event_name == "push"
         and os.environ.get("GITHUB_REF") == "refs/heads/main"
@@ -600,8 +623,8 @@ def main():
         raise ValueError("publication is only allowed by canonical main's full caller")
     plan = select(
         paths,
-        draft=pr.get("draft", False),
         full=full,
+        spinel_lane=spinel_lane,
         publish=publish,
         project_scope=project_scope,
     )

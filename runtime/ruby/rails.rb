@@ -223,7 +223,8 @@ module Rails
       k = key.to_s
       return nil unless @entries.key?(k)
       due = @expires_at[k]
-      return @entries[k] if due == 0 || due > Time.now.to_i
+      return @entries[k] if due == 0
+      return @entries[k] if due > Time.now.to_i
       forget(k)
       nil
     end

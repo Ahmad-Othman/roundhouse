@@ -1345,6 +1345,41 @@ puts "ok"
         .assert_passes();
 }
 
+/// `rel.more_than?(n)` is `SELECT 1 LIMIT 1 OFFSET n` with the same
+/// FROM/JOIN/WHERE as COUNT, and the relation is not mutated. Campfire's
+/// `Message.paged?` is `count > PAGE_SIZE` rewritten to this method.
+#[test]
+fn relation_more_than_probes_offset_without_count() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/article_more_than_test.rb",
+            r#"require "test_helper"
+
+class ArticleMoreThanTest < ActiveSupport::TestCase
+  test "more_than? offsets without COUNT or mutating the relation" do
+    Article.delete_all
+    3.times { |i| Article.create!(title: "more-#{i}", body: "Body text here") }
+    rel = Article.where("title LIKE 'more-%'")
+    prior = rel.to_sql
+    statements = []
+    callback = ->(*, payload) { statements << payload[:sql] }
+    ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+      assert rel.more_than?(2)
+      assert_not rel.more_than?(3)
+    end
+    assert_equal prior, rel.to_sql
+    sql = statements.find { |s| s.include?("OFFSET 2") }
+    assert sql, statements.inspect
+    assert_no_match(/COUNT/i, sql)
+    assert_match(/LIMIT 1/, sql)
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_more_than_test.rb")
+        .assert_passes();
+}
+
 /// The runtime defines this exception in `active_support_ext.rb`.
 #[test]
 fn framework_exception_resolves_from_real_runtime_source() {
@@ -5363,5 +5398,74 @@ end
 end
 "#,
         )
+        .assert_passes();
+}
+
+/// A Slim view is ingested rather than skipped, so `check` going quiet on
+/// it is a claim the emitted page renders. Swap the blog's index for a
+/// Slim twin that exercises the grammar (shortcuts merging with a
+/// `class=`, Ruby and boolean attributes, `tag: child` nesting, output
+/// and code lines with a block, `|` text, comments) and assert on the
+/// rendered markup, not just the status.
+#[test]
+fn a_slim_view_renders() {
+    let slim = r#"= turbo_stream_from "articles"
+- content_for :title, "Articles"
+- turbo_exempts_page_from_cache
+
+/ never rendered
+.w-full
+  - if notice.present?
+    p.py-2#notice = notice
+  .flex.justify-between
+    h1.font-bold.text-4xl Articles
+    = link_to "New article", new_article_path, class: "rounded-md"
+  #articles.min-w-full class="space-y-5" data-count=@articles.size
+    - if @articles.any?
+      = render @articles
+    - else
+      p.text-center No articles found.
+  ul.slim-list(data-kind="list" hidden)
+    - @articles.each do |article|
+      li: a href=article_path(article) = article.title
+  p.slim-text
+    | plain text
+"#;
+    emit_and_run::real_blog()
+        .remove("app/views/articles/index.html.erb")
+        .write("app/views/articles/index.html.slim", slim)
+        .edit(
+            "test/controllers/articles_controller_test.rb",
+            "    assert_select \"h1\", \"Articles\"\n",
+            "    assert_select \"h1.font-bold\", \"Articles\"\n    \
+             assert_select \"#articles.min-w-full.space-y-5[data-count]\"\n    \
+             assert_select \"ul.slim-list[data-kind=list][hidden] li a\", minimum: 1\n    \
+             assert_select \"p.slim-text\", \"plain text\"\n",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+/// A view directory with a hyphen (`product-item/`) is legal in Rails and
+/// common in real apps, but `Views::Product-item` and a `product-item`
+/// parameter are not Ruby. The emitted partial must load and render.
+#[test]
+fn a_hyphenated_view_directory_renders() {
+    emit_and_run::real_blog()
+        .write(
+            "app/views/note-card/_note.html.erb",
+            "<aside class=\"note-card\"><%= note %></aside>\n",
+        )
+        .edit(
+            "app/views/articles/index.html.erb",
+            "<div class=\"w-full\">\n",
+            "<div class=\"w-full\">\n  <%= render \"note-card/note\", note: \"hyphen ok\" %>\n",
+        )
+        .edit(
+            "test/controllers/articles_controller_test.rb",
+            "    assert_select \"h1\", \"Articles\"\n",
+            "    assert_select \"h1\", \"Articles\"\n    assert_select \"aside.note-card\", \"hyphen ok\"\n",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
 }

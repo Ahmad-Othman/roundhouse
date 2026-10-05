@@ -5,9 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    # Drafts default to fixture + unit; ci:full also expands drafts.
-    # Label/draft/head transitions cancel superseded PR runs via concurrency.
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, labeled, unlabeled]
+    # Draft and ready PRs share path/label selection. Draft transitions do
+    # not change coverage and must not replace an otherwise useful run.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_call:
     inputs:
       full:
@@ -542,9 +542,9 @@ jobs:
     strategy:
       # A failed shard must not cancel coverage or diagnostic output from others.
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 4
       matrix:
-        shard: [0, 1, 2]
+        shard: [0, 1, 2, 3]
     env:
       # Share first-party split DWARF instead of copying it into every test
       # executable. Integration sidecars are freed with their finished batch;
@@ -3463,8 +3463,10 @@ jobs:
   compact-required:
     # compare and browser-smoke-typescript stay in needs so a full/main run
     # can still require them. Unselected PR skips must not fail this gate.
+    # cancelled() overrides GitHub's implicit success(): evaluate skipped
+    # or failed needs, but do not schedule gates after workflow cancellation.
     needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare]
-    if: always()
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -3484,7 +3486,8 @@ jobs:
   ci-summary:
     name: CI summary
     needs: [plan, generate-fixture, unit, build-roundhouse, store-check, compare, compare-ruby, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, writebook-inventory, build-spinel, framework-tests-spinel, build-campfire-compare-spinel, campfire-compare-spinel, campfire-db-differential-spinel, toolchain-spinel, compare-spinel, smoke-spinel, build-campfire-archive, smoke-campfire, smoke-campfire-docker, archive-results, assemble-site]
-    if: always()
+    # Report selected failures and expected skips; stop on workflow cancellation.
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
