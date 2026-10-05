@@ -1557,7 +1557,16 @@ fn every_runtime_method_body_concretely_typed() {
     // cost nothing once `records` is typed `Array[untyped]`. What it bought:
     // campfire's message paging after basecamp/once-campfire#292 (and #304,
     // #312, which `reorder` a page's relation).
-    const CEILING: usize = 538;
+    //
+    // 538 -> 543, FIVE MEASURED (active_support_ext.rb 40 -> 44,
+    // active_job.rb 1 -> 2): `ActiveSupport::JSON.encode` reads its
+    // untyped Hash's pairs and each scalar once (a `case`, not a chain of
+    // tests, which cost nine), and `ActiveJob.perform_held` calls a held
+    // Proc, the `.call` `drain` already pays. What it bought: campfire's
+    // unread notice, encoded once and broadcast `coder: nil`
+    // (basecamp/once-campfire#292), and #296's tests, which post first
+    // and perform the held fanout job after.
+    const CEILING: usize = 543;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

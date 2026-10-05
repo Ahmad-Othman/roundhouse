@@ -327,6 +327,77 @@ fn a_send_whose_selector_every_caller_names_dispatches_statically_on_spinel() {
     param_selector_dispatch_app().run_spinel(&script).assert_passes();
 }
 
+/// assert_select attribute operators (`$=`, `^=`, `*=`) and `:not([…])`,
+/// and assert_response's failure message. Rails 8.2-era tests write all
+/// of them: basecamp/once-campfire#301 checks `img[src*='install-edge']`,
+/// #303 checks `input[type=checkbox]:not([checked])` and passes a message
+/// to assert_response.
+#[test]
+fn assert_select_attribute_operators_and_negation_run() {
+    emit_and_run::real_blog()
+        .write(
+            "test/controllers/article_selectors_controller_test.rb",
+            r#"require "test_helper"
+
+class ArticleSelectorsControllerTest < ActionDispatch::IntegrationTest
+  test "attribute operators, negation and a response message" do
+    article = Article.create!(title: "Selectors", body: "Body text here")
+    get article_url(article)
+    assert_response :success, "the article page"
+    assert_select "a[href$='/edit']"
+    assert_select "a[href^='/articles/']"
+    assert_select "a[href*='articles']"
+    assert_select "h1[class]:not([hidden])"
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/article_selectors_controller_test.rb")
+        .assert_passes();
+}
+
+/// A job `perform_later` enqueues under the test adapter is held, not
+/// dropped, and a blockless `perform_enqueued_jobs only:` runs it
+/// (basecamp/once-campfire#296's tests). Its broadcast is JSON encoded
+/// once with `ActiveSupport::JSON.encode` and sent `coder: nil`
+/// (#292), so the test pubsub hands it back decoded exactly once.
+#[test]
+fn held_jobs_run_on_demand_and_pre_encoded_broadcasts_arrive_once() {
+    emit_and_run::real_blog()
+        .write(
+            "app/jobs/notice_job.rb",
+            r#"class NoticeJob < ApplicationJob
+  def perform(article)
+    ActionCable.server.broadcast "notices", ActiveSupport::JSON.encode(articleId: article.id, title: article.title), coder: nil
+  end
+end
+"#,
+        )
+        .write(
+            "test/models/notice_job_test.rb",
+            r#"require "test_helper"
+
+class NoticeJobTest < ActiveSupport::TestCase
+  include ActiveJob::TestHelper
+
+  test "a held job runs when performed, and broadcasts pre-encoded JSON" do
+    article = Article.create!(title: "Held", body: "Body text here")
+    NoticeJob.perform_later(article)
+    assert_enqueued_with job: NoticeJob
+    assert_equal 0, ActionCable.server.pubsub.broadcasts("notices").size
+
+    perform_enqueued_jobs only: NoticeJob
+
+    notices = ActionCable.server.pubsub.broadcasts("notices").map { |broadcast| JSON.parse(broadcast) }
+    assert_equal [ { "articleId" => article.id, "title" => "Held" } ], notices
+  end
+end
+"#,
+        )
+        .run_test("test/models/notice_job_test.rb")
+        .assert_passes();
+}
+
 #[test]
 fn the_unedited_blog_runs() {
     emit_and_run::real_blog()

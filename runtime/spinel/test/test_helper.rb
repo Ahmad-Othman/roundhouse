@@ -237,6 +237,8 @@ module Dom
   # the tag.
   def self.select(root, selector)
     chunk = target_chunk(selector)
+    negated = negated_attrs(chunk)
+    chunk = without_negations(chunk)
     base = chunk.split("[")[0].to_s
     want_tag = selector_tag(base)
     want_id = selector_id(base)
@@ -258,7 +260,11 @@ module Dom
         present = tag_classes(tag)
         want_classes.each { |c| ok = false unless present.include?(c) }
       end
-      attrs.each { |a| ok = false unless tag.include?(a) }
+      # An attribute value matches as written or HTML-escaped: the tag
+      # helper escapes `>` (`change-&gt;form#submit`) where a hand-written
+      # attribute keeps it, and assert_select compares decoded values.
+      attrs.each { |a| ok = false unless attr_matches?(tag, a) }
+      negated.each { |a| ok = false if attr_present?(tag, a) }
       nodes << root if ok
     end
     nodes
@@ -395,6 +401,68 @@ module Dom
   # UNPASSABLE rather than loose: `assert_select
   # "turbo-stream[action='append']"` could not succeed against a body
   # that contained exactly that element.
+  # `:not([checked])` — the attribute predicates a match must NOT carry
+  # (campfire's `input.switch__input[type=checkbox]:not([checked])`).
+  # Attribute predicates only; anything else inside `:not` is left out of
+  # the match rather than read as required.
+  def self.negated_attrs(chunk)
+    out = []
+    from = 0
+    while (at = chunk.index(":not(", from))
+      close = chunk.index(")", at)
+      break if close.nil?
+      inner = chunk[at + 5, close - at - 5].to_s
+      selector_attrs(inner).each { |a| out << a }
+      from = close + 1
+    end
+    out
+  end
+
+  def self.without_negations(chunk)
+    out = ""
+    from = 0
+    while (at = chunk.index(":not(", from))
+      close = chunk.index(")", at)
+      break if close.nil?
+      out = out + chunk[from, at - from].to_s
+      from = close + 1
+    end
+    out + chunk[from, chunk.length].to_s
+  end
+
+  # One positive attribute predicate against a start tag. A value
+  # matches as written or HTML-escaped: the tag helper escapes `>`
+  # (`change-&gt;form#submit`) where a hand-written attribute keeps it,
+  # and assert_select compares decoded values.
+  def self.attr_matches?(tag, pred)
+    ["*=", "^=", "$="].each do |op|
+      at = pred.index(op)
+      next if at.nil? || pred.include?("=\"")
+      name = pred[0, at].to_s
+      want = pred[at + 2, pred.length].to_s
+      start = tag.index(" #{name}=\"")
+      return false if start.nil?
+      rest = tag[start + name.length + 3, tag.length].to_s
+      close = rest.index("\"")
+      value = close.nil? ? rest : rest[0, close].to_s
+      escaped = want.gsub(">", "&gt;").gsub("<", "&lt;")
+      return case op
+             when "*=" then value.include?(want) || value.include?(escaped)
+             when "^=" then value.start_with?(want) || value.start_with?(escaped)
+             else value.end_with?(want) || value.end_with?(escaped)
+             end
+    end
+    tag.include?(pred) || tag.include?(pred.gsub(">", "&gt;").gsub("<", "&lt;"))
+  end
+
+  # Whether a start tag carries the attribute a predicate names: a
+  # `name="value"` predicate is matched whole, a bare name at a word
+  # boundary, so `checked` does not hold on `data-checked-by`.
+  def self.attr_present?(tag, pred)
+    return tag.include?(pred) if pred.include?("=")
+    [" #{pred}=", " #{pred} ", " #{pred}>", " #{pred}/"].any? { |form| tag.include?(form) }
+  end
+
   def self.selector_attrs(chunk)
     out = []
     parts = chunk.split("[")
@@ -407,7 +475,16 @@ module Dom
       else
         name = pred[0, eq].to_s
         value = pred[eq + 1, pred.length].to_s.gsub("'", "").gsub("\"", "")
-        out << %(#{name}="#{value}")
+        # `*=` / `^=` / `$=` — substring, prefix and suffix matches
+        # (campfire's `img[src*='install-edge']`). Kept as the operator
+        # spelled out, which `attr_matches?` reads; `=` stays the literal
+        # `name="value"` every other caller already matches.
+        op = name[-1, 1].to_s
+        if op == "*" || op == "^" || op == "$"
+          out << "#{name[0, name.length - 1]}#{op}=#{value}"
+        else
+          out << %(#{name}="#{value}")
+        end
       end
       i += 1
     end
@@ -482,9 +559,15 @@ end
 # method, and clearing would hide what an earlier block did.
 module ActiveJob
   module TestHelper
+    # With a block, the jobs the block enqueues; without one, every job
+    # enqueued since the test began, which is what Rails' blockless
+    # `assert_enqueued_with` / `assert_enqueued_jobs` read.
     def capture_enqueued_jobs(only, &block)
-      before = ActiveJob.performed.length
-      block.call
+      before = @__jobs_from || 0
+      if block
+        before = ActiveJob.performed.length
+        block.call
+      end
       ActiveJob.performed[before..].select { |name| only.empty? || only.include?(name) }
     end
 
@@ -508,7 +591,12 @@ module ActiveJob
     #
     # `ensure`, and a STACK in `ActiveJob`, so a nested block and a
     # raising one both restore what they found.
+    # Without a block, Rails runs what the `:test` adapter already holds.
     def perform_enqueued_jobs(only: [], &block)
+      if block.nil?
+        ActiveJob.perform_held(only)
+        return nil
+      end
       ActiveJob.run_enqueued
       begin
         block.call
@@ -742,6 +830,13 @@ class TestBase
     # `assert_turbo_stream_broadcasts` does (see its note) would carry
     # one test's broadcasts into the next.
     Broadcasts.reset_log! if defined?(Broadcasts)
+    # Rails' `:test` job adapter starts each test empty. AFTER the
+    # schema reset for the same reason as the log above: fixture
+    # callbacks enqueue.
+    if defined?(ActiveJob)
+      ActiveJob.clear_held
+      @__jobs_from = ActiveJob.performed.length
+    end
     # Rails' integration test clears the :test delivery log around every
     # test (`ActionMailer::TestCase::ClearTestDeliveries`); the mailer
     # assertions below count from it.
@@ -1660,7 +1755,11 @@ module RequestDispatch
     error:    500..599,
   }.freeze
 
-  def assert_response(expected, response = @__response)
+  # Rails' second argument is a failure message, which campfire passes
+  # when it checks several responses in one test
+  # (`assert_response :success, platform`).
+  def assert_response(expected, message = nil)
+    response = @__response
     actual = response.status
     matches = if expected.is_a?(Symbol)
                 range = STATUS_RANGES[expected]
@@ -1679,7 +1778,10 @@ module RequestDispatch
     # body emits as a vacuous 0 and lets failures pass silently. Same
     # rationale for the other helpers in this file. See
     # project_spinel_assertions_vacuous.md.
-    raise "expected response #{expected.inspect}, got status=#{actual} body=#{response.body[0, 200].inspect}" unless matches
+    unless matches
+      detail = "expected response #{expected.inspect}, got status=#{actual} body=#{response.body[0, 200].inspect}"
+      raise(message.nil? ? detail : "#{message}: #{detail}")
+    end
   end
 
   # Two-argument form retained for hand-written spinel-blog tests
