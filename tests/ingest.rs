@@ -1976,3 +1976,28 @@ fn nested_class_methods_cannot_relocate_native_initializers() {
     let probe = classes.iter().find(|class| class.name.0.as_str() == "Probe").unwrap();
     assert_eq!(probe.class_ivar_initializers.len(), 1);
 }
+
+/// Parameters after a rest (`->(*, payload)`, `|*rest, a, b|`) used to
+/// vanish: Lambda IR has no slot for them, so `->(*, payload) {
+/// payload[:sql] }` emitted as `-> { payload[:sql] }`, a body reading a
+/// name nothing bound, and the expression IR diverged across a round
+/// trip. They are now popped off the rest, last first, which is Ruby's
+/// own rule, and the emitted form reaches a fixed point.
+#[test]
+fn parameters_after_a_rest_are_popped_off_it() {
+    use roundhouse::emit::ruby::emit_expr;
+    let cases: &[(&[u8], &[&str])] = &[
+        (b"cb = ->(*, payload) { payload[:sql] }", &["->(*__rest)", "payload = __rest.pop"]),
+        (b"cb = ->(*rest, a, b) { [rest, a, b] }", &["->(*rest)", "b = rest.pop", "a = rest.pop"]),
+        (b"cb = ->(*args) { args }", &["->(*args)"]),
+        (b"xs.each { |*, last| p last }", &["|*__rest|", "last = __rest.pop"]),
+    ];
+    for (source, wants) in cases {
+        let first = emit_expr(&ingest_snippet(source));
+        for want in *wants {
+            assert!(first.contains(want), "{}: expected `{want}` in:\n{first}", String::from_utf8_lossy(source));
+        }
+        let second = emit_expr(&ingest_snippet(first.as_bytes()));
+        assert_eq!(first, second, "{} is not a fixed point", String::from_utf8_lossy(source));
+    }
+}
