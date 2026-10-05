@@ -3,6 +3,10 @@ require_relative "../action_dispatch/session"
 require_relative "../action_view"
 
 module ActionController
+  # What `Base#redirect_to` deletes from a location — see there.
+  REDIRECT_LINE_BREAKS = { "\r" => "", "\n" => "" }.freeze
+  REDIRECT_LINE_BREAK_PATTERN = /[\r\n]/.freeze
+
   # Symbol form (`status: :see_other`) to integer code — Rack's
   # `SYMBOL_TO_STATUS_CODE`, PORTED whole rather than grown entry by
   # entry as apps surfaced them. It used to be "an ad-hoc subset; grow
@@ -216,8 +220,21 @@ module ActionController
     # status; surfaces flash messages via the flash hash. Default
     # status 302 (Found). Real-blog uses 303 (See Other) on
     # PATCH/DELETE responses; pass `status: :see_other` to match.
+    #
+    # CR and LF are DELETED from the location, as Rails'
+    # `_compute_redirect_to_location` does (`.delete("\0\r\n")`): the
+    # target is routinely request data (`redirect_to params[:return_to]`)
+    # and becomes the Location header, where a line break would end the
+    # header and start one of the attacker's. The include?-probe +
+    # gsub-with-Hash shape of `ViewHelpers.html_escape`, which every
+    # target compiles (a String-pattern `gsub` does not: Go and TS read
+    # the pattern as a Regexp). NUL is left to the servers, which drop
+    # a header holding one (Tep.header_lines, CgiIo.write_header).
     def redirect_to(path, notice: nil, alert: nil, status: :found)
       @location = path
+      if path.include?("\r") || path.include?("\n")
+        @location = path.gsub(REDIRECT_LINE_BREAK_PATTERN, REDIRECT_LINE_BREAKS)
+      end
       @status   = resolve_status(status)
       @performed = true
       @flash[:notice] = notice unless notice.nil?

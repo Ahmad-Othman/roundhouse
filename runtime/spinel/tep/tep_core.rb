@@ -82,6 +82,53 @@ module Tep
     v
   end
 
+  # The response's header lines and Set-Cookie lines, each ending in
+  # CRLF — every server's head is its status line, this, and its own
+  # framing headers. A value the app wrote can come from a request
+  # (a redirect Location built from a param, a Content-Disposition, a
+  # cookie option), and a CR or LF inside one ends the header early and
+  # writes whatever follows as a header — or a body — of the attacker's
+  # choosing. So a header that cannot be written as ONE line is DROPPED,
+  # Puma's rule (`illegal_header_key?` / `illegal_header_value?`, puma
+  # 8.0): a key with a control character, space, `"` or `:`, or a value
+  # with a control character other than tab. The rest of the response
+  # goes out.
+  def self.header_lines(res)
+    out = +""
+    res.headers.each do |k, v|
+      if Tep.header_key_ok?(k) && Tep.header_value_ok?(v)
+        out << k + ": " + v + "\r\n"
+      end
+    end
+    res.set_cookies.each do |line|
+      out << "Set-Cookie: " + line + "\r\n" if Tep.header_value_ok?(line)
+    end
+    out
+  end
+
+  def self.header_key_ok?(k)
+    n = k.bytesize
+    return false if n == 0
+    i = 0
+    while i < n
+      b = k.getbyte(i)
+      return false if b <= 32 || b == 127 || b == 34 || b == 58
+      i += 1
+    end
+    true
+  end
+
+  def self.header_value_ok?(v)
+    n = v.bytesize
+    i = 0
+    while i < n
+      b = v.getbyte(i)
+      return false if (b < 32 && b != 9) || b == 127
+      i += 1
+    end
+    true
+  end
+
   # The largest request body the servers will read, in bytes. Headers
   # were always capped (MAX_REQUEST_BYTES); the body was not, and every
   # drain held the whole of it in one String before the app saw the

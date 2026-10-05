@@ -5671,3 +5671,69 @@ fn a_hyphenated_view_directory_renders() {
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
 }
+
+/// Rails' own guards against a request-steered header, ahead of the
+/// server's (which drops any header holding a control character):
+/// `redirect_to` deletes CR and LF from the location
+/// (`_compute_redirect_to_location`, actionpack 8.1), and Active
+/// Storage serves only `inline` or `attachment`, whatever disposition a
+/// URL asks for (`content_disposition_with`, activestorage 8.1) — the
+/// blob redirect route takes it from a query param and signs it into
+/// the disk URL whose Content-Disposition it becomes.
+fn header_values_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "docs", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "active_storage_blobs", force: :cascade do |t|
+    t.string "key", null: false
+    t.string "filename", null: false
+    t.string "content_type"
+    t.text "metadata"
+    t.string "service_name", null: false
+    t.bigint "byte_size", null: false
+    t.string "checksum"
+    t.datetime "created_at", null: false
+  end
+  create_table "active_storage_attachments", force: :cascade do |t|
+    t.string "name", null: false
+    t.string "record_type", null: false
+    t.bigint "record_id", null: false
+    t.bigint "blob_id", null: false
+    t.datetime "created_at", null: false
+  end
+end
+"#)
+        .write("app/models/doc.rb", "class Doc < ApplicationRecord\n  has_one_attached :file\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/bounce\", to: \"docs#bounce\"\nend\n")
+        .write("app/controllers/docs_controller.rb", r#"class DocsController < ApplicationController
+  def bounce
+    redirect_to params[:back]
+  end
+end
+"#)
+}
+
+#[test]
+fn request_steered_header_values_stay_one_line() {
+    header_values_app()
+        .run_ruby(r#"
+require_relative "app/controllers/docs_controller"
+controller = DocsController.new
+controller.params = { "back" => "/next\r\nSet-Cookie: pwned=1" }
+controller.process_action(:bounce)
+location = controller.location.to_s
+raise "CR/LF reached the Location: #{location.inspect}" if location.include?("\r") || location.include?("\n")
+raise "the rest of the location is kept, as Rails keeps it: #{location.inspect}" unless location == "/nextSet-Cookie: pwned=1"
+
+asked = ActiveStorage::DiskKey.decode(ActiveStorage::DiskKey.encode("k", "attachment\r\nSet-Cookie: pwned=1"))
+raise "an unknown disposition was signed as asked: #{asked.inspect}" unless asked == ["k", "inline"]
+kept = ActiveStorage::DiskKey.decode(ActiveStorage::DiskKey.encode("k", "attachment"))
+raise "attachment is a disposition: #{kept.inspect}" unless kept == ["k", "attachment"]
+puts "header values passed"
+"#)
+        .assert_passes();
+}

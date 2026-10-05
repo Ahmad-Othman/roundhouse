@@ -111,19 +111,56 @@ module CgiIo
     code   = status.is_a?(Integer) ? status : status.to_i
     reason = REASON_PHRASES.fetch(code, "OK")
     io.write("Status: #{code} #{reason}\r\n")
-    io.write("Content-Type: #{content_type}\r\n")
-    io.write("Location: #{location}\r\n") unless location.nil?
-    extra_headers.each { |k, v| io.write("#{k}: #{v}\r\n") unless v.nil? }
+    write_header(io, "Content-Type", content_type.to_s)
+    write_header(io, "Location", location.to_s) unless location.nil?
+    extra_headers.each { |k, v| write_header(io, k.to_s, v.to_s) unless v.nil? }
     set_cookies.each do |name, val|
       if val.nil?
-        io.write("Set-Cookie: #{name}=; Path=/; Max-Age=0\r\n")
+        write_header(io, "Set-Cookie", "#{name}=; Path=/; Max-Age=0")
       else
-        io.write("Set-Cookie: #{name}=#{url_encode(val.to_s)}; Path=/; HttpOnly\r\n")
+        write_header(io, "Set-Cookie", "#{name}=#{url_encode(val.to_s)}; Path=/; HttpOnly")
       end
     end
     io.write("\r\n")
     io.write(body.to_s)
     nil
+  end
+
+  # One header line, or nothing when it cannot be one line. A value can
+  # carry request data (a redirect Location, a Content-Disposition, a
+  # blob's Content-Type), and a CR or LF in it would end the header and
+  # write the rest as a header the app never set. Puma's rule, the same
+  # one the spinel servers apply (`Tep.header_lines` — this lane does
+  # not load Tep, so the two predicates are twins): DROP a key holding a
+  # control character, space, `"` or `:`, or a value holding a control
+  # character other than tab.
+  def self.write_header(io, key, value)
+    return nil unless header_key_ok?(key) && header_value_ok?(value)
+    io.write(key + ": " + value + "\r\n")
+    nil
+  end
+
+  def self.header_key_ok?(k)
+    n = k.bytesize
+    return false if n == 0
+    i = 0
+    while i < n
+      b = k.getbyte(i)
+      return false if b <= 32 || b == 127 || b == 34 || b == 58
+      i += 1
+    end
+    true
+  end
+
+  def self.header_value_ok?(v)
+    n = v.bytesize
+    i = 0
+    while i < n
+      b = v.getbyte(i)
+      return false if (b < 32 && b != 9) || b == 127
+      i += 1
+    end
+    true
   end
 
   # ── cookie parsing ──────────────────────────────────────────────
