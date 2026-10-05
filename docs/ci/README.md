@@ -6,18 +6,28 @@ The workflows and their tests own implementation details, not this handbook.
 
 ## What runs
 
-Ready PRs run a Ruby floor: fixture preparation, unit tests, Store analysis,
-the CRuby comparison against Rails, and Campfire conformance/comparison.
-Three unit shards cover all package test targets in bounded batches; ignored
-integrations need selected toolchain lanes. Framework and toolchain suites
-also run inside comparison jobs, not necessarily as standalone checks.
+Coverage is a ladder. The planner (`scripts/ci-plan.py`) chooses jobs from
+labels and changed paths; draft and ready PRs use the same policy:
+
+| State | What runs |
+|---|---|
+| **Draft or ready**, no special label | Path-selected coverage on the Ruby floor |
+| **Draft or ready** + `ci:spinel` | Ruby floor plus the full Spinel suite; no other language SDKs |
+| **Draft or ready** + `ci:full` | Full validation (all targets, WASM, Writebook, Spinel) |
+
+PRs without a special label run a Ruby floor: fixture preparation, unit
+tests, Store analysis, the CRuby comparison against Rails, and Campfire
+conformance/comparison. Four unit shards cover all package test targets in
+bounded batches; ignored integrations need selected toolchain lanes. Framework
+and toolchain suites also run inside comparison jobs, not necessarily as
+standalone checks.
 
 That floor is the merge claim for ordinary analyzer, lowerer, and runtime
 work: the Ruby shape runs, and Campfire still matches Rails. Crystal, Go,
 Swift, Kotlin, C#, Elixir, Python, JRuby, Rust, TypeScript, WASM, Writebook,
 and Spinel do **not** start on that path unless the diff owns them or a
-maintainer applies `ci:full`. Extra-language failures after merge are a
-main ledger, not a reason to block the next Ruby PR.
+maintainer applies `ci:full` / `ci:spinel`. Extra-language failures after merge
+are a main ledger, not a reason to block the next Ruby PR.
 
 Selected lanes start once their inputs are ready, without waiting for unit
 tests to pass. Campfire consumes an independently built same-run debug compiler.
@@ -36,18 +46,22 @@ includes both sides of a rename, and expands only when the trees cannot be
 identified. A newer main than the event's `base.sha` is not unknown input.
 See the run's **plan** job for its selected jobs and reasons.
 
-Drafts default to fixture preparation and unit tests only. `ci:full` overrides
-that floor and runs full validation while the PR is still a draft.
-Documentation-only PRs still receive checks; changes to the rendered user
-guide also select site/browser coverage.
+Changing draft status does not restart checks or change coverage. `ci:draft`
+has no effect. Stacked labels prefer the broader lane: `ci:full` > `ci:spinel`.
+Documentation-only PRs still receive checks; changes to the rendered user guide
+also select site/browser coverage.
 
 Pushes to canonical `main` run full validation and cancel a superseded SHA
 on the same ref. Extra-target red on that run is follow-up work on main,
 not a merge gate for later Ruby PRs. The four-hour scheduled cycle remains
 the publication and floating-pin catch-up.
 
-## Request full or fresh validation
+## Request full, Spinel, or fresh validation
 
+- **Spinel-focused CI:** apply `ci:spinel` on a draft or ready PR. Runs the
+  Ruby floor plus every Spinel job; skips Crystal/Go/Swift/… SDKs, WASM, and
+  Writebook. Prefer this over `ci:full` when only the native/Ruby-family lane
+  matters.
 - **More coverage:** ask a maintainer to apply `ci:full` to a ready or draft PR. The
   label triggers a full run of the current PR merge tree and keeps full
   coverage on later pushes. A comment requesting it is not itself a trigger.
@@ -64,7 +78,12 @@ the publication and floating-pin catch-up.
 Superseded PR runs cancel. Push-to-main full runs also cancel a superseded
 SHA; the scheduled full-ci lock does not. Neither dependency-cache hits nor
 restored fixture source are test results; check the job summary for any
-explicitly reused execution evidence.
+explicitly reused execution evidence. The compact and summary gates run only
+when `plan` succeeded and the workflow has not been cancelled. Their explicit
+`!cancelled()` status check overrides GitHub's implicit `success()`, so skipped
+or failed dependencies still reach the result evaluator. Cancelling the workflow
+stops the gates instead of scheduling `always()` work in a superseded run.
+A missing plan output is not a valid successful selection.
 
 ## Read results honestly
 

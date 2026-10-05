@@ -49,6 +49,10 @@
 //!                                       built by the block
 //!  14. `json.array! col do |x| … end`  → the same array, as the whole
 //!                                       template
+//!  15. `json.partial! @record`         → (4) with the path Rails takes
+//!                                       from the record's model
+//!                                       (`partial:` and `as:` after
+//!                                       the record do not change it)
 //!
 //! (6)-(9) arrived together with campfire's bot API, which is six
 //! jbuilder templates written in exactly that dialect.
@@ -410,6 +414,10 @@ enum JbStmt<'a> {
         partial_path: String,
         arg: &'a Expr,
     },
+    /// `json.partial! @record` — the same call, with the path Rails
+    /// takes from the record (`to_partial_path`). Resolved at emit time,
+    /// where the app's models are known.
+    PartialRecord { arg: &'a Expr, as_name: Option<Symbol> },
     /// `json.<key> obj, partial: P, as: V` — one pair whose value is a
     /// partial render of a SINGLE object. The `array!`/`partial!`
     /// siblings above render a collection and own the whole template;
@@ -527,6 +535,10 @@ fn emit_object(raw_stmts: &[&Expr], ctx: &Ctx) -> Vec<Expr> {
             }
             JbStmt::ArrayBlock { collection, item_var, body } => {
                 Some(emit_array_block(collection, item_var, body, ctx))
+            }
+            JbStmt::PartialRecord { arg, as_name } => {
+                record_partial_path(arg, as_name.as_ref(), ctx)
+                    .map(|partial_path| emit_partial_call(&partial_path, arg, ctx))
             }
             _ => None,
         };
@@ -707,7 +719,10 @@ fn emit_pairs(
                 out.extend(emit_array_block(collection, item_var, body, ctx));
                 sep = Sep::After;
             }
-            JbStmt::ArrayPartial { .. } | JbStmt::Partial { .. } | JbStmt::ArrayBlock { .. } => {
+            JbStmt::ArrayPartial { .. }
+            | JbStmt::Partial { .. }
+            | JbStmt::ArrayBlock { .. }
+            | JbStmt::PartialRecord { .. } => {
                 // These shouldn't appear in an object template, but if
                 // they do (mixed with pair-emitting stmts), drop a
                 // TODO marker rather than emit malformed JSON.
@@ -976,6 +991,47 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             let Some(path_arg) = args.first() else {
                 return JbStmt::Unknown;
             };
+            // `json.partial! @record` — a positional that is a record,
+            // not a path. Jbuilder renders the record's own partial
+            // (`record.to_partial_path`) with the record as its local.
+            // `partial:` and `as:` after it do not change that:
+            // jbuilder's `partial!` sets `options[:partial]` to the
+            // positional, over the option, and `as:` only names the
+            // local (`record_partial_path` checks it is the name the
+            // lowered partial takes the record under). Any other
+            // option is a local for the partial, which the call has no
+            // way to pass, so that form stays Unknown.
+            if block.is_none() && local_name(path_arg).is_some() {
+                let options_ok = match args.len() {
+                    1 => true,
+                    2 => extract_hash(&args[1]).is_some_and(|opts| {
+                        opts.iter().all(|(k, _)| {
+                            matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+                                if matches!(value.as_str(), "partial" | "as"))
+                        })
+                    }),
+                    _ => false,
+                };
+                if !options_ok {
+                    return JbStmt::Unknown;
+                }
+                // `as:` is a Symbol or a String: Action View `to_sym`s
+                // it (`as: "entry"` binds `entry`). Any other value is
+                // a name only known at run time.
+                let as_value =
+                    args.get(1).and_then(extract_hash).and_then(|opts| hash_get_value(opts, "as"));
+                let as_name = match as_value {
+                    None => None,
+                    Some(v) => match &*v.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+                        _ => match string_literal(v) {
+                            Some(s) => Some(Symbol::from(s.as_str())),
+                            None => return JbStmt::Unknown,
+                        },
+                    },
+                };
+                return JbStmt::PartialRecord { arg: path_arg, as_name };
+            }
             let partial_path = match string_literal(path_arg) {
                 Some(s) => s,
                 None => return JbStmt::Unknown,
@@ -1355,6 +1411,47 @@ fn emit_array_block(collection: &Expr, item_var: &Symbol, body: &Expr, ctx: &Ctx
         ),
         io_append_lit(&ctx.accumulator, "]"),
     ]
+}
+
+/// The partial path `json.partial! <local>` renders: Active Model's
+/// `to_partial_path`, `"<plural>/<singular>"` of the record's model
+/// (`widgets/widget` for a `Widget`), under the namespace of the
+/// template's own directory (`admin/widgets/widget` from
+/// `admin/widgets/`), which is Action View's
+/// `prefix_partial_path_with_controller_namespace` default. The model
+/// is the one the local is named after, the same name-to-model reading
+/// the template's parameters get (`ivar_ty`). Unresolved when the
+/// local names no model of the app, or when `as:` names the partial's
+/// local something other than the model's singular: the lowered partial
+/// takes its record under that singular, and a partial reading the
+/// `as:` name would not find it.
+fn record_partial_path(arg: &Expr, as_name: Option<&Symbol>, ctx: &Ctx) -> Option<String> {
+    let name = local_name(arg)?;
+    let model = crate::naming::camelize(name.as_str());
+    if !ctx.models.contains(&model) {
+        return None;
+    }
+    let singular = crate::naming::snake_case(&model);
+    if as_name.is_some_and(|a| a.as_str() != singular) {
+        return None;
+    }
+    let path = format!("{}/{}", crate::naming::pluralize_snake(&model), singular);
+    Some(match ctx.resource_dir.rsplit_once('/') {
+        Some((namespace, _)) => format!("{namespace}/{path}"),
+        None => path,
+    })
+}
+
+/// The name of a bare local: a `Var`, or the receiverless, argless,
+/// blockless `Send` prism gives a partial's locals.
+fn local_name(e: &Expr) -> Option<Symbol> {
+    match &*e.node {
+        ExprNode::Var { name, .. } => Some(name.clone()),
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            Some(method.clone())
+        }
+        _ => None,
+    }
 }
 
 fn emit_partial_call(partial_path: &str, arg: &Expr, ctx: &Ctx) -> Vec<Expr> {

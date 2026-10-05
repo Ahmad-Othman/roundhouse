@@ -827,6 +827,8 @@ impl<'a> BodyTyper<'a> {
                 unknown()
             }
 
+            ExprNode::Defined { .. } => union_of(Ty::Str, Ty::Nil),
+
             ExprNode::Send { recv, method, args, block, parenthesized } => {
                 expr.decisions &= !crate::expr::RESOLVED_DATA_FACTORY;
                 if let Some(ty) = self.data_factories.and_then(|factories| factories.get(&expr_span)) {
@@ -915,29 +917,7 @@ impl<'a> BodyTyper<'a> {
                     Some(r) => Some(self.analyze_expr(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
-                // `defined?(Foo)` keeps the written path but must not
-                // resolve or autoload it. Absence is a runtime answer.
-                let defined_constant = recv.is_none()
-                    && method.as_str() == "defined?"
-                    && args.len() == 1
-                    && args[0].decisions & crate::expr::DEFINED_CONSTANT != 0;
                 for a in args.iter_mut() {
-                    if defined_constant {
-                        let path = match &*a.node {
-                            ExprNode::Const { path } => path.as_slice(),
-                            _ => &[],
-                        };
-                        let rooted = path.first().is_some_and(|segment| segment.as_str().is_empty());
-                        let id = if rooted {
-                            crate::ident::ClassId(crate::ident::Symbol::from(
-                                format!("::{}", path[1..].iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::")).as_str(),
-                            ))
-                        } else {
-                            written_class_id(path)
-                        };
-                        a.ty = Some(Ty::Class { id, args: vec![] });
-                        continue;
-                    }
                     self.analyze_expr(a, ctx);
                 }
                 if let Some(r) = recv.as_mut() {
@@ -1730,7 +1710,7 @@ impl<'a> BodyTyper<'a> {
                 Ty::Bottom
             }
 
-            ExprNode::ForwardArgs => Ty::Untyped,
+            ExprNode::ForwardArgs | ExprNode::ForwardKeywords => Ty::Untyped,
 
             ExprNode::Splat { value } | ExprNode::KeywordSplat { value } => {
                 // Splat propagates the inner expression's type
