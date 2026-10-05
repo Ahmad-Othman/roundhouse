@@ -599,6 +599,7 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
         "find", "find_by", "first", "last", "all", "each", "map", "to_a", "count",
         "exists?", "empty?", "any?", "none?", "sum", "maximum", "minimum", "pluck",
         "pick", "destroy_all", "delete_all", "update_all", "klass", "where_clauses",
+        "spawn", "find_each", "find_in_batches",
     ];
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
     // name -> [(model, params)] in app-model order, names sorted — the

@@ -47,6 +47,92 @@ module ActiveRecord
       @ctes = []
     end
 
+    # Rails' `Relation#spawn`: a new relation that shares this one's
+    # query state but not its accumulator arrays. Chain methods still
+    # mutate in place; scopes call `spawn` on entry so a fork like
+    # campfire's sidebar (`visible.with_direct_rooms` beside
+    # `visible.with_ordered_room.without_direct_rooms`) does not let
+    # one branch's joins/orders/wheres pollute the other. Accumulators
+    # are copied element-wise (no `Array#dup` — keep the element type
+    # the typer already knows); `@records` is shared until a chain
+    # method clears it, matching Rails' loaded-spawn contract.
+    def spawn
+      copy = Relation.new(@model)
+      copy.take_spawn_state(
+        copy_string_list(@wheres),
+        copy_string_list(@joins),
+        copy_string_list(@orders),
+        copy_string_list(@groups),
+        copy_string_list(@havings),
+        @select_sql,
+        @distinct,
+        @limit,
+        @offset,
+        copy_symbol_list(@includes),
+        @skip_preloading,
+        @records,
+        copy_scope_attributes(@scope_attributes),
+        @from,
+        copy_string_list(@ctes)
+      )
+      copy
+    end
+
+    # Called only from `spawn`. Kept as a real method (not a block into
+    # the new object) so strict targets see ordinary ivar writes.
+    def take_spawn_state(
+      wheres,
+      joins,
+      orders,
+      groups,
+      havings,
+      select_sql,
+      distinct,
+      limit,
+      offset,
+      includes,
+      skip_preloading,
+      records,
+      scope_attributes,
+      from_src,
+      ctes
+    )
+      @wheres = wheres
+      @joins = joins
+      @orders = orders
+      @groups = groups
+      @havings = havings
+      @select_sql = select_sql
+      @distinct = distinct
+      @limit = limit
+      @offset = offset
+      @includes = includes
+      @skip_preloading = skip_preloading
+      @records = records
+      @scope_attributes = scope_attributes
+      @from = from_src
+      @ctes = ctes
+      self
+    end
+
+    def copy_string_list(xs)
+      out = []
+      xs.each { |x| out << x }
+      out
+    end
+
+    def copy_symbol_list(xs)
+      out = []
+      xs.each { |x| out << x }
+      out
+    end
+
+    def copy_scope_attributes(attrs)
+      out = {}
+      attrs.each { |k, v| out[k] = v }
+      out
+    end
+
     # ---- chain methods (return self) --------------------------------
 
     # `with_recursive(parents: [base, step])` — a recursive common table
@@ -930,6 +1016,15 @@ module ActiveRecord
         yield records[i]
         i += 1
       end
+      self
+    end
+
+    # `find_in_batches` — Rails yields successive Arrays of rows.
+    # Corpus sizes make one load the same answer as find_each; yield
+    # the whole page as a single batch. Campfire's unread fanout /
+    # push paths call this on memberships.
+    def find_in_batches
+      yield loaded_records
       self
     end
 
@@ -1819,11 +1914,24 @@ module ActiveRecord
       out.join(", ")
     end
 
-    # `order(:col)` / `order("col DESC")` / `order(col: :desc)`.
+    # `order(:col)` / `order("col DESC")` / `order(col: :desc)` /
+    # `order(rooms: { updated_at: :desc })` — Rails' nested-hash form
+    # for a table-qualified column (campfire's direct-room sidebar).
+    # A nested value that is itself a Hash is `table.col DIR`, not the
+    # Hash's `to_s` (which reached SQLite as `rooms {UPDATED_AT: :DESC}`
+    # and raised `unrecognized token: "{"`).
     def order_term(p)
       if p.is_a?(Hash)
         parts = []
-        p.each { |col, dir| parts << "#{col} #{dir.to_s.upcase}" }
+        p.each do |col, dir|
+          if dir.is_a?(Hash)
+            dir.each do |inner_col, inner_dir|
+              parts << "#{col}.#{inner_col} #{inner_dir.to_s.upcase}"
+            end
+          else
+            parts << "#{col} #{dir.to_s.upcase}"
+          end
+        end
         parts.join(", ")
       else
         p.to_s

@@ -1179,6 +1179,7 @@ pub(crate) fn push_scope_methods(
     assocs: &crate::lower::scope_chain::AssocRegistry,
 ) {
     use crate::dialect::{AccessorKind, ModelBodyItem, Param};
+    use crate::expr::{Expr, ExprNode, LValue};
     let rel_param = Symbol::from("__rel");
     for item in &model.body {
         let ModelBodyItem::Scope { scope, .. } = item else { continue };
@@ -1203,6 +1204,43 @@ pub(crate) fn push_scope_methods(
             scopes,
             models_set,
             assocs,
+        );
+
+        // Rails scopes spawn on entry: `rel.visible.with_direct_rooms`
+        // must not leave joins/orders on `rel.visible` for a sibling
+        // `rel.visible.with_ordered_room`. Our chain methods mutate in
+        // place, so the scope method itself takes a copy first.
+        let span = body.span;
+        let spawn_assign = Expr::new(
+            span,
+            ExprNode::Assign {
+                target: LValue::Var {
+                    id: crate::ident::VarId(0),
+                    name: rel_param.clone(),
+                },
+                value: Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(Expr::new(
+                            span,
+                            ExprNode::Var {
+                                id: crate::ident::VarId(0),
+                                name: rel_param.clone(),
+                            },
+                        )),
+                        method: Symbol::from("spawn"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: true,
+                    },
+                ),
+            },
+        );
+        body = Expr::new(
+            span,
+            ExprNode::Seq {
+                exprs: vec![spawn_assign, body],
+            },
         );
 
         methods.push(MethodDef {
