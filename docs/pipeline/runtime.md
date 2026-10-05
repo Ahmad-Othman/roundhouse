@@ -2909,11 +2909,12 @@ header. Grouped by cause, largest first:
   site can frame a signed-in campfire page. The one to close first.
 - **The app's own `config.ru` middleware is not applied.** campfire's
   `config.ru` says `use Rack::Deflater`. The CRuby overlay now wraps
-  `Main.run_rack` in `Rack::Deflater` (Static stays outside so `/cable`
-  hijack is never compressed; CSS/JS stay identity). spinel tep gzips
-  inline bodies when `Accept-Encoding` includes gzip. Re-run
-  `scripts/campfire-http-shape` before treating the 65 Content-Encoding
-  misses as current.
+  `Main.run_rack` in `GzipCache` (Static stays outside so `/cable`
+  hijack is never compressed; CSS/JS stay identity; identical HTML is
+  not deflated on every request). spinel tep gzips inline bodies when
+  `Accept-Encoding` includes gzip, from the same identity-body cache.
+  Re-run `scripts/campfire-http-shape` before treating the 65
+  Content-Encoding misses as current.
 - **Rails' `Rack::ETag` / `Rack::ConditionalGet` are absent**: no weak
   ETag on a 200 (52), no `Cache-Control: max-age=0, private,
   must-revalidate`, so a revisit is 200 where Rails answers 304 (10-14).

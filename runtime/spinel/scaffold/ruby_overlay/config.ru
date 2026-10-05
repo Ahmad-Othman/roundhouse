@@ -13,6 +13,7 @@
 require "rack"
 require_relative "main"
 require_relative "cable"
+require_relative "runtime/gzip_cache"
 
 Main.configure_default_adapter!
 
@@ -53,13 +54,11 @@ end)
 # future spinel serving shapes.
 
 # Campfire's own config.ru is `use Rack::Deflater` then `run` the app.
-# Until this the overlay dropped it, so every HTML page went out
-# uncompressed (~420 KB room page vs ~20 KB behind Rails/Thruster) and
-# `scripts/campfire-http-shape` recorded 65 Content-Encoding misses.
-# HTML only: Static sits outside this lambda, so CSS/JS stay identity.
-# NOT `use Rack::Deflater` around the whole app: the hijack tuple
-# `[-1, {}, []]` has no skip in Deflater, so gzip wraps only run_rack.
-deflater = Rack::Deflater.new(lambda { |env|
+# GzipCache is that plus a body cache: the same identity HTML is not
+# deflated on every wrk GET. HTML only — Static sits outside this
+# lambda, so CSS/JS stay identity. NOT around the whole app: the
+# hijack tuple `[-1, {}, []]` has no skip, so gzip wraps only run_rack.
+gzip = GzipCache.wrap(lambda { |env|
   Db.with_connection { Main.run_rack(env) }
 })
 
@@ -96,8 +95,8 @@ app = lambda do |env|
   # Puma worker threads each read/write through their own handle rather
   # than serializing on a single shared one. `run_rack` reads the Rack
   # env directly and returns the response tuple. Gzip sits on this path
-  # only — see deflater above.
-  deflater.call(env)
+  # only — see gzip above.
+  gzip.call(env)
 end
 
 run app

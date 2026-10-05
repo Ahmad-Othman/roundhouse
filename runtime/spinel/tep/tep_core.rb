@@ -97,6 +97,33 @@ module Tep
     @max_body_bytes
   end
 
+  # Gzip of an identity body, keyed by the identity bytes. A campfire
+  # room page is the same HTML for every wrk GET that shares a session;
+  # without this, Zlib.gzip runs on every request and is the measured
+  # cliff (1984 → 694 req/s). Cap is a COUNT so a bound does not need
+  # an LRU touch on the read path. The lock is the fragment-cache one:
+  # a green thread can be descheduled inside Hash#[]=.
+  GZIP_CACHE_MAX = 64
+  GZIP_LOCK = Mutex.new
+  @gzip_bodies = Hash.new("")
+
+  def self.gzip_cached(raw)
+    gz = ""
+    GZIP_LOCK.synchronize do
+      hit = @gzip_bodies[raw]
+      if hit.length > 0
+        gz = hit
+      else
+        if @gzip_bodies.size >= GZIP_CACHE_MAX
+          @gzip_bodies = Hash.new("")
+        end
+        gz = Zlib.gzip(raw)
+        @gzip_bodies[raw] = gz
+      end
+    end
+    gz
+  end
+
   # Honour Accept-Encoding: gzip the way campfire's `use Rack::Deflater`
   # does on CRuby. Inline bodies only — sendfile/streaming/websocket stay
   # as they are. Mutates res.body and stamps Content-Encoding + Vary.
@@ -118,10 +145,10 @@ module Tep
               ct.start_with?("application/zip") ||
               ct.start_with?("application/gzip") ||
               ct.start_with?("application/wasm")
-    # DEFAULT_COMPRESSION matches Rack::Deflater. Level 1 was measured
-    # and did not recover uncompressed throughput — the cost is gzip
-    # itself, not Huffman tables (room page 1984 → ~700 req/s either way).
-    res.body = Zlib.gzip(res.body)
+    # DEFAULT_COMPRESSION matches Rack::Deflater. The cache is what
+    # recovers the uncompressed cliff: gzip itself is the cost, not
+    # Huffman tables (level 1 was measured, same ~700 req/s uncached).
+    res.body = Tep.gzip_cached(res.body)
     res.headers["Content-Encoding"] = "gzip"
     vary = res.headers["Vary"]
     if vary.length == 0

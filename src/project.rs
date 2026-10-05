@@ -7226,7 +7226,7 @@ mod tests {
         assert!(out.contains("Db.with_connection { Main.run_rack(env) }"));
         assert!(out.contains("run app"));
         assert!(
-            out.contains("Rack::Deflater"),
+            out.contains("GzipCache"),
             "campfire's config.ru gzips; the overlay must too"
         );
         // A config.ru missing the markers errors loudly instead of
