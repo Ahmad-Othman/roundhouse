@@ -1,4 +1,4 @@
--- wrk script: authenticated POST /rooms/:id/messages, DHH loadgen shape.
+-- wrk script: authenticated POST /rooms/:id/messages.
 --
 --   BENCH_COOKIE     session Cookie header
 --   BENCH_CSRF       raw authenticity token (X-CSRF-Token header)

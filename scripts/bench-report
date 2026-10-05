@@ -95,7 +95,7 @@ ENDPOINT_ORDER = %w[
   /articles /articles/1 /articles/new /articles.json /articles/1.json
   /rooms/1 /rooms/1/messages /users/me/sidebar /searches?q=coffee
 ]
-# Seed-resolved DHH leftovers (`/rooms/N/messages?before=ID`,
+# Seed-resolved leftovers (`/rooms/N/messages?before=ID`,
 # `POST:/rooms/N/messages`) are not in the hint — their ids move with
 # the seed. `order_first` sorts those after the named rooms routes.
 

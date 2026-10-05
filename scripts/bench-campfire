@@ -154,21 +154,19 @@
 #   --runs N          repeated runs per cell (default 3)
 #   --endpoint PATH   URL to bench, repeatable. Default: /rooms/1 and
 #                     /rooms/1/messages, the two pages the app exists for.
-#                     Prefix POST: for a write (see --dhh-http).
-#   --gzip            send Accept-Encoding: gzip, matching DHH's public-
-#                     server comparison (once-campfire-rust bench/loadgen
-#                     default). Off by default: wrk historically sent no
-#                     encoding header, so uncompressed cells stay
-#                     comparable to older runs. On: CRuby wraps run_rack
-#                     in Rack::Deflater and Spinel tep gzips HTML; CSS/JS
-#                     stay identity. A gzip run measures what the lane
-#                     actually serves.
-#   --dhh-http        time DHH's five HTTP workloads (tweet table, 2026-10-04):
-#                     room page, messages?before=, sidebar, searches?q=coffee,
-#                     POST a message into a second room so the measured
-#                     room stays put. Replaces the default two GETs unless
-#                     --endpoint was also given. Resolved against the
-#                     seeded sqlite after prepare.
+#                     Prefix POST: for a write (see --http-suite).
+#   --gzip            send Accept-Encoding: gzip. Off by default: wrk
+#                     historically sent no encoding header, so uncompressed
+#                     cells stay comparable to older runs. On: CRuby wraps
+#                     run_rack in Rack::Deflater and Spinel tep gzips HTML;
+#                     CSS/JS stay identity. A gzip run measures what the
+#                     lane actually serves.
+#   --http-suite      time five signed-in HTTP workloads: room page,
+#                     messages?before=, sidebar, searches?q=coffee, POST a
+#                     message into a second room so the measured room stays
+#                     put. Replaces the default two GETs unless --endpoint
+#                     was also given. Resolved against the seeded sqlite
+#                     after prepare.
 #   --port N          base port (default 4300; lanes get N, N+1, …)
 #   --out DIR         results dir (default bench/results/campfire-<stamp>)
 #   --users N / --rooms N / --messages N   seed size, passed to
@@ -191,12 +189,10 @@
 #                     already on disk
 #   --keep            leave servers running on exit
 #
-# DHH HTTP (once-campfire-elixir bench/results/ruby-elixir-go-rust-20261004):
-# production public server, gzip, 16 concurrent clients, signed in, the
+# --http-suite: signed-in HTTP, optional gzip, 16 concurrent clients, the
 # five routes above. Named rust/go/elixir lanes boot the native
-# once-campfire-* binaries on this box (not their Docker images) against
-# the same sqlite file. Default lanes stay Rails vs the emit. Does not
-# pin four cores.
+# once-campfire-* binaries on this box against the same sqlite file.
+# Default lanes stay Rails vs the emit.
 #
 # WHY 16 CONNECTIONS AND NOT 64. A campfire room page is ~400 KB and
 # takes single-digit milliseconds to build; at 64 connections against one
@@ -290,7 +286,7 @@ SOCKET_COOKIES=""
 SOCKET_PER_ROOM=50
 APP="$HOME/git/once-campfire"
 GZIP=0
-DHH_HTTP=0
+HTTP_SUITE=0
 USER_ENDPOINTS=0
 
 while [[ $# -gt 0 ]]; do
@@ -304,7 +300,7 @@ while [[ $# -gt 0 ]]; do
         --runs)        RUNS="$2"; shift 2 ;;
         --endpoint)    ENDPOINTS+=("$2"); USER_ENDPOINTS=1; shift 2 ;;
         --gzip)        GZIP=1; shift ;;
-        --dhh-http)    DHH_HTTP=1; shift ;;
+        --http-suite)  HTTP_SUITE=1; shift ;;
         --port)        BASE_PORT="$2"; shift 2 ;;
         --out)         OUT_DIR="$2"; shift 2 ;;
         --users)       USERS="$2"; shift 2 ;;
@@ -738,12 +734,12 @@ if wants_lane rails-truffleruby; then
     fi
 fi
 
-# DHH's five HTTP workloads, resolved against THIS seed. Writes go to a
-# second room so the measured room page stays the same size across POST
-# cells, matching once-campfire-rust/bench/run (watercooler vs hq).
+# Five signed-in HTTP workloads, resolved against THIS seed. Writes go
+# to a second room so the measured room page stays the same size across
+# POST cells.
 SEED_DB="$ORACLE/storage/db/production.sqlite3"
 [[ -f "$SEED_DB" ]] || die "no seeded production DB at $ORACLE — run without --skip-prepare"
-resolve_dhh_http() {
+resolve_http_suite() {
     local db="$1"
     [[ -f "$db" ]] || die "no seed database at $db"
     python3 - "$db" <<'PY'
@@ -755,7 +751,7 @@ if not rooms:
 room = rooms[0]
 write_room = rooms[1] if len(rooms) > 1 else rooms[0]
 n = db.execute("select count(*) from messages where room_id=?", (room,)).fetchone()[0]
-# Mid-history page, same idea as loadgen's messages.busy_060.
+# Mid-history page so paging is not the newest 40.
 off = max(n // 2, 1)
 row = db.execute(
     "select id from messages where room_id=? order by created_at, id limit 1 offset ?",
@@ -774,17 +770,17 @@ print(f"POST:/rooms/{write_room}/messages")
 PY
 }
 
-if (( DHH_HTTP )); then
+if (( HTTP_SUITE )); then
     if (( USER_ENDPOINTS == 0 )); then
-        local_routes="$(resolve_dhh_http "$SEED_DB")" || die "could not resolve DHH HTTP routes from $SEED_DB"
+        local_routes="$(resolve_http_suite "$SEED_DB")" || die "could not resolve HTTP suite routes from $SEED_DB"
         mapfile -t ENDPOINTS <<< "$local_routes"
-        (( ${#ENDPOINTS[@]} >= 5 )) || die "DHH HTTP resolution returned ${#ENDPOINTS[@]} routes: ${ENDPOINTS[*]}"
+        (( ${#ENDPOINTS[@]} >= 5 )) || die "HTTP suite resolution returned ${#ENDPOINTS[@]} routes: ${ENDPOINTS[*]}"
     fi
-    # The tweet table is HTTP only. Cable stays behind --sockets.
+    # HTTP only. Cable stays behind --sockets.
     if (( SOCKETS_SET == 0 )); then
         SOCKETS=0
     fi
-    step "DHH HTTP routes: ${ENDPOINTS[*]}"
+    step "HTTP suite routes: ${ENDPOINTS[*]}"
 fi
 
 ep_is_post() { [[ "$1" == POST:* ]]; }
@@ -1120,7 +1116,7 @@ parse_wrk() {
     p50="$(awk '/Latency Distribution/{f=1;next} f && /^[[:space:]]*50%/{print $2; exit}' "$out")"
     p99="$(awk '/Latency Distribution/{f=1;next} f && /^[[:space:]]*99%/{print $2; exit}' "$out")"
     # A 422 error page is cheap to serve. Counting it as throughput is
-    # how the first DHH POST cells reported ~9k req/s of rejected writes.
+    # how the first POST cells reported thousands of rejected writes.
     non2xx="$(grep -E 'Non-2xx or 3xx responses:' "$out" | awk '{print $NF}')"
     if [[ -n "$non2xx" && "$non2xx" != "0" ]]; then
         req_sec=null
@@ -1277,11 +1273,10 @@ for lane in "${LANES[@]}"; do
     }
     ok "$lane up and signed in"
 
-    # CSRF for POST cells: DHH's loadgen scrapes the meta tag. Identity
-    # encoding: with --gzip the overlay/tep compress HTML, and a gzip
-    # scrape would not match the token regex. Empty is fine for a
-    # GET-only run; a POST cell without a token is a 422 and is not a
-    # measurement of the write path.
+    # CSRF for POST cells: scrape the meta tag. Identity encoding: with
+    # --gzip the overlay/tep compress HTML, and a gzip scrape would not
+    # match the token regex. Empty is fine for a GET-only run; a POST
+    # cell without a token is a 422 and is not a write measurement.
     csrf=""
     csrf_enc=""
     csrf_html="$LOG_DIR/csrf-$lane.html"
@@ -1406,9 +1401,9 @@ for lane in "${LANES[@]}"; do
     # container does not empty the cache its own Procfile keeps in a
     # separate process, so a warm Redis is what their restart actually
     # sees. Rep 1 still pays a cold render for anything the load did not
-    # touch. Skipped on --dhh-http: that flag is the tweet's HTTP table,
-    # not a second copy of the cold-start section.
-    if (( DHH_HTTP == 0 )); then
+    # touch. Skipped on --http-suite: that flag is the HTTP table, not a
+    # second copy of the cold-start section.
+    if (( HTTP_SUITE == 0 )); then
         step "cold start $lane (3 boots)"
         cold_start "$lane" "$port" "$LOG_DIR/jar-$lane.txt" 3
     fi

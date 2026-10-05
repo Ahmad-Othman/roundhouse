@@ -1,6 +1,6 @@
 -- wrk script: authenticated GET, optional gzip.
 -- Cookie / Accept-Encoding come from the environment so the same file
--- covers every DHH HTTP route without regenerating Lua per cell.
+-- covers every HTTP-suite route without regenerating Lua per cell.
 --
 --   BENCH_COOKIE   the lane's session Cookie header value
 --   BENCH_GZIP     "1" -> Accept-Encoding: gzip, else identity
