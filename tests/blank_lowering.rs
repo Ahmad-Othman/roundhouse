@@ -265,3 +265,47 @@ end
     assert!(!out.contains("strip"), "no String-shaped grounding on a params read:\n{out}");
     assert!(diags.is_empty(), "{diags:?}");
 }
+
+/// `{ host:, protocol: }.compact_blank` — ActiveSupport rejects on the
+/// VALUE. campfire's `SetCurrentRequest#default_url_options` is this
+/// Hash of nilable Strings; leaving it as a send is an AOT refusal.
+#[test]
+fn hash_compact_blank_rejects_on_the_value() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Url
+  def options(host, protocol)
+    { host: host, protocol: protocol }.compact_blank
+  end
+end
+"#,
+    );
+    assert!(!out.contains("compact_blank"), "Hash compact_blank must ground:\n{out}");
+    assert!(out.contains("reject"), "expected a reject over the values:\n{out}");
+    assert!(out.contains("_k") || out.contains("|k,"), "Hash reject keeps the key:\n{out}");
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+/// An Array whose element is still an inference var used to file
+/// residue and keep the send. The reject body now calls
+/// `ActiveSupport.blank?`, the same runtime predicate an untyped
+/// `blank?` already takes — campfire's helper
+/// `[ author.name, author.bio ].compact_blank` is this shape.
+#[test]
+fn untyped_array_compact_blank_uses_the_runtime_predicate() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Titles
+  def of(author)
+    [ author.name, author.bio ].compact_blank.join(" – ")
+  end
+end
+"#,
+    );
+    assert!(!out.contains("compact_blank"), "must not keep the send:\n{out}");
+    assert!(
+        out.contains("ActiveSupport.blank?") || out.contains("reject"),
+        "expected a reject through the runtime predicate:\n{out}"
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+}
