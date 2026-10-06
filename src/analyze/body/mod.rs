@@ -2172,7 +2172,7 @@ fn push_union_variants(t: Ty, out: &mut Vec<Ty>) {
     }
 }
 
-pub(crate) fn union_many(tys: Vec<Ty>) -> Ty {
+pub(super) fn union_many(tys: Vec<Ty>) -> Ty {
     // Fold through `union_of` so the same Bottom-filtering, structural
     // container join, and flatten/dedup normalization applies.
     let mut iter = tys.into_iter().filter(|t| !matches!(t, Ty::Bottom));
