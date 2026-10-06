@@ -336,6 +336,47 @@ fn recv_is_array(r: &Expr) -> bool {
             if matches!(instance_prop_ty(name.as_str()), Some(crate::ty::Ty::Array { .. })))
 }
 
+/// Elem type of an Array-typed receiver, peeling a nullable outer `Array[T]?`.
+fn array_elem_ty(r: &Expr) -> Option<crate::ty::Ty> {
+    let from_prop = match &*r.node {
+        ExprNode::Ivar { name } | ExprNode::Var { name, .. } => instance_prop_ty(name.as_str()),
+        _ => None,
+    };
+    let array_ty = from_prop.as_ref().or(r.ty.as_ref());
+    match array_ty {
+        Some(crate::ty::Ty::Array { elem }) => Some((**elem).clone()),
+        Some(crate::ty::Ty::Union { variants }) => variants.iter().find_map(|t| match t {
+            crate::ty::Ty::Array { elem } => Some((**elem).clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// `string?` into `List<string>` (HeaderStore `@vals << value` after the
+/// nil-rejecting header_value_ok? guard). With `<Nullable>enable</Nullable>`,
+/// CS8604 fails the write; coalesce to `""`.
+fn coerce_list_elem_arg(recv: &Expr, arg: &Expr, arg_s: &str) -> String {
+    let Some(elem) = array_elem_ty(recv) else {
+        return arg_s.to_string();
+    };
+    let elem_is_plain_str = matches!(elem, crate::ty::Ty::Str | crate::ty::Ty::Sym);
+    let arg_nilable_str = matches!(
+        arg.ty.as_ref(),
+        Some(crate::ty::Ty::Union { variants })
+            if variants.len() == 2
+                && variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+                && variants
+                    .iter()
+                    .any(|v| matches!(v, crate::ty::Ty::Str | crate::ty::Ty::Sym))
+    );
+    if elem_is_plain_str && arg_nilable_str {
+        format!("({arg_s} ?? \"\")")
+    } else {
+        arg_s.to_string()
+    }
+}
+
 fn is_instance_method_of(class_name: &str, method: &str) -> bool {
     let cm = camel(method);
     let mut cur = Some(class_name.to_string());
@@ -1386,7 +1427,8 @@ fn emit_send(
                 return format!("{} {} {}", emit_expr(r), op, args_s[0]);
             }
             crate::emit::shared::ops::BinopCase::Append => {
-                return format!("{}.Add({})", emit_expr(r), args_s[0]);
+                let arg = coerce_list_elem_arg(r, &args[0], &args_s[0]);
+                return format!("{}.Add({})", emit_expr(r), arg);
             }
             crate::emit::shared::ops::BinopCase::NotBinop => {}
         }
@@ -1411,7 +1453,12 @@ fn emit_send(
             } else {
                 args_s[0].clone()
             };
-            return format!("{}[{}] = {}", emit_expr(r), idx, args_s[1]);
+            let val = if recv_is_hash(r) {
+                args_s[1].clone()
+            } else {
+                coerce_list_elem_arg(r, &args[1], &args_s[1])
+            };
+            return format!("{}[{}] = {}", emit_expr(r), idx, val);
         }
         if method == "fetch" {
             return format!("({}.GetValueOrDefault({}, {}))", emit_expr(r), args_s[0], args_s[1]);
@@ -1820,7 +1867,12 @@ fn emit_case_stmt(scrutinee: &Expr, arms: &[Arm]) -> String {
 }
 
 fn emit_assign(target: &LValue, value: &Expr) -> String {
-    let val = emit_expr(value);
+    let val = match target {
+        LValue::Index { recv, .. } if !recv_is_hash(recv) => {
+            coerce_list_elem_arg(recv, value, &emit_expr(value))
+        }
+        _ => emit_expr(value),
+    };
     match target {
         LValue::Var { name, .. } => {
             let n = camel(name.as_str());
