@@ -423,15 +423,31 @@ module ActiveRecord
       a <=> b
     end
 
+    # The value is a request param as often as a literal
+    # (`limit(params[:per_page])`), and it is spliced into the SQL, so
+    # both pass through Rails' own casts here: `limit` is
+    # `sanitize_limit` (`Integer()`, which raises on anything that is
+    # not an integer) and `offset` is `build_arel`'s `to_i`. nil clears
+    # either, as in Rails.
     def limit(n)
       @records = nil
-      @limit = n
+      # Split rather than `n.nil? ? nil : sql_limit(n)`: Spinel cannot
+      # unify nil with Integer in a conditional expression.
+      if n.nil?
+        @limit = nil
+      else
+        @limit = sql_limit(n)
+      end
       self
     end
 
     def offset(n)
       @records = nil
-      @offset = n
+      if n.nil?
+        @offset = nil
+      else
+        @offset = n.to_i
+      end
       self
     end
 
@@ -1120,6 +1136,7 @@ module ActiveRecord
     # left memoized. Otherwise a relation that is paged and then
     # counted carries the page size into the count.
     def first_n(n)
+      n = sql_limit(n)
       prior = @limit
       @limit = n
       rows = to_a
@@ -1132,6 +1149,7 @@ module ActiveRecord
     # Unloaded and unwindowed: reverse ORDER BY, LIMIT n, reverse rows.
     # Loaded or already LIMIT/OFFSET: in-memory tail of that window.
     def last_n(n)
+      n = sql_limit(n)
       loaded = @records
       unless loaded.nil?
         return loaded_tail(loaded, n)
@@ -1820,15 +1838,26 @@ module ActiveRecord
       end
     end
 
-    # Replace `?` placeholders in a raw fragment with escaped args, in
-    # order. A fragment with no `?` returns unchanged. Each `sub` rewrites
-    # the leftmost remaining `?`, so iterating the args consumes them in
-    # order.
+    # For positional binds, split only the original `?` placeholders,
+    # keeping escaped values verbatim. Preserve trailing empty parts so
+    # missing binds leave their `?` intact. (`String#sub` used to search
+    # already-inserted values, so a `?` or backslash in a bind leaked
+    # into the next placeholder.)
     def substitute_binds(sql, args)
       first = args[0]
       return substitute_named_binds(sql, first) if args.length == 1 && first.is_a?(Hash)
-      result = sql
-      args.each { |a| result = result.sub("?", ActiveRecord.adapter.escape_value(a)) }
+      parts = sql.split("?", -1)
+      result = parts[0].to_s
+      index = 0
+      while index < parts.length - 1
+        if index < args.length
+          result = result + ActiveRecord.adapter.escape_value(args[index])
+        else
+          result = result + "?"
+        end
+        result = result + parts[index + 1].to_s
+        index += 1
+      end
       result
     end
 
@@ -1880,17 +1909,87 @@ module ActiveRecord
       out.join(", ")
     end
 
+    # Rails' `sanitize_limit`: `Integer(n)`. An integer, or a String
+    # spelling one (surrounding space allowed), is that integer; a Float
+    # truncates; anything else is the ArgumentError `Integer()` raises —
+    # never text in the LIMIT clause.
+    def sql_limit(n)
+      return n.to_i if n.is_a?(Float)
+      text = n.to_s.strip
+      unless text.match?(/\A[+-]?\d+\z/)
+        raise ArgumentError, "invalid value for Integer(): \"" + n.to_s + "\""
+      end
+      text.to_i
+    end
+
+    # An `order` hash's direction: Rails' `VALID_DIRECTIONS`, else the
+    # ArgumentError `validate_order_args` raises.
+    def order_direction(dir)
+      d = dir.to_s
+      return d.upcase if d == "asc" || d == "desc" || d == "ASC" || d == "DESC"
+      raise ArgumentError, "Direction \"" + d + "\" is invalid. Valid directions are: " \
+        "[:asc, :desc, :ASC, :DESC, \"asc\", \"desc\", \"ASC\", \"DESC\"]"
+    end
+
+    # An identifier written into SQL: `col` or `table.col`. This runtime
+    # writes names bare, so anything else is ArgumentError rather than a
+    # fragment.
+    def sql_ident(name)
+      c = name.to_s
+      unless c.match?(/\A[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?\z/)
+        raise ArgumentError, "SQL identifier \"" + c + "\" is not a column name"
+      end
+      c
+    end
+
+    # An `order` hash's KEY. Same allowlist as `sql_ident`.
+    def order_hash_column(col)
+      sql_ident(col)
+    end
+
+    # Developer SQL like campfire's `order("LOWER(name)")` /
+    # `order("LOWER(rooms.name)")`, plus the documented zero-arg
+    # `RANDOM()` / `random()`. A request-steered fragment such as
+    # `(SELECT 1)` or `SLEEP()` does not match.
+    def order_fn_term?(c)
+      return true if c == "RANDOM()" || c == "random()"
+      c.match?(/\A[A-Za-z_][A-Za-z0-9_]*\([A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?\)\z/)
+    end
+
+    # A string `order` argument: comma-separated `col` / `table.col`
+    # with optional ASC/DESC. Static corpus strings (`"id desc"`,
+    # `"category asc, tags.tag asc"`) pass; `order(params[:sort])` with
+    # SQL does not.
+    def order_string(s)
+      bits = s.split(",")
+      raise ArgumentError, "Order \"" + s + "\" is not a column name" if bits.length == 0
+      parts = []
+      bits.each do |bit|
+        words = bit.strip.split(/\s+/)
+        if words.length == 0 || words.length > 2
+          raise ArgumentError, "Order \"" + s + "\" is not a column name"
+        end
+        col = words[0]
+        term = order_fn_term?(col) ? col : order_hash_column(col)
+        if words.length == 2
+          parts << "#{term} #{order_direction(words[1])}"
+        else
+          parts << term
+        end
+      end
+      parts.join(", ")
+    end
+
     # `order(:col)` / `order("col DESC")` / `order(col: :desc)` /
     # `order(rooms: { updated_at: :desc })` — Rails' nested-hash form
     # for a table-qualified column (campfire's direct-room sidebar).
-    # A nested value that is itself a Hash is `table.col DIR`, not the
-    # Hash's `to_s` (which reached SQLite as `rooms {UPDATED_AT: :DESC}`
-    # and raised `unrecognized token: "{"`).
+    # Nested values go through `sql_ident` + `order_direction` so a
+    # request-steered hash cannot splice SQL.
     def order_term(p)
       if p.is_a?(Hash)
         format_order_hash(p)
       else
-        p.to_s
+        order_string(p.to_s)
       end
     end
 
@@ -1902,9 +2001,9 @@ module ActiveRecord
       h.each do |col, dir|
         if dir.is_a?(Hash)
           inner_col = dir.keys[0]
-          parts << "#{col}.#{inner_col} #{dir[inner_col].to_s.upcase}"
+          parts << "#{sql_ident(col)}.#{sql_ident(inner_col)} #{order_direction(dir[inner_col])}"
         else
-          parts << "#{col} #{dir.to_s.upcase}"
+          parts << "#{sql_ident(col)} #{order_direction(dir)}"
         end
       end
       parts.join(", ")

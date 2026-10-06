@@ -1816,6 +1816,13 @@ module RequestDispatch
     @__cookies = ActionController::CookieJar.new(
       accept_cookies(cookies.to_h, controller.cookies.pending)
     )
+    copied_headers = {}
+    hi = 0
+    hn = controller.headers.size
+    while hi < hn
+      copied_headers[controller.headers.key_at(hi)] = controller.headers.val_at(hi)
+      hi += 1
+    end
     @__response = ActionResponse.new(
       status:   controller.status,
       body:     controller.body,
@@ -1825,7 +1832,7 @@ module RequestDispatch
       content_type: controller.content_type,
       cache_control_max_age: controller.cache_control_max_age,
       cache_control_public: controller.cache_control_public,
-      headers:  controller.headers,
+      headers:  copied_headers,
     )
     # Rails' OWN names, alongside the `__`-prefixed ones the harness
     # methods read. An integration test writes `@response.body` and

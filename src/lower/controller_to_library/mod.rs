@@ -1601,15 +1601,12 @@ fn build_filter_preamble(
     // bot_key?` sees who signed in); the default then yields to it.
     // ActionController::API does not include the module.
     //
-    // OFF, the `allow_browser` generator form's posture and for its
-    // reason: the default would put the call into every app, real-blog
-    // included, and real-blog is emitted for twelve targets of which
-    // only the ruby family defines `verify_authenticity_token` (the
-    // strict emitters compiled neither the method nor the dispatcher's
-    // call to it). An app that WRITES the macro — campfire — reaches
-    // only the ruby lanes and is protected; one that relies on the
-    // default is not, which the guide's security posture states. This
-    // is the switch when the strict runtimes carry the method.
+    // OFF: a bare `protect_from_forgery` is `:null_session` (lobsters)
+    // and is not modeled as 422. Implicit `:exception` would turn those
+    // requests into failures. Apps that write `with: :exception`
+    // (campfire) get the filter; `verify_authenticity_token` now lives
+    // on shared Base. Residual vs Rails: an app that relies on the
+    // implicit default is still CSRF-open until it writes the macro.
     const IMPLICIT_DEFAULT: bool = false;
     let root_parent = chain.first().copied().unwrap_or(controller).parent.as_ref();
     let redeclared = chain.iter().copied().chain(std::iter::once(controller)).any(|c| {

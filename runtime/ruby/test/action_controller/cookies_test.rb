@@ -110,8 +110,29 @@ class ActionControllerCookiesTest < Minitest::Test
     # `cookies.signed.permanent[:k] = {value:, httponly:, same_site:}`
     # — how campfire's Authentication concern writes the session.
     jar = ActionController::CookieJar.new({})
-    jar.signed.permanent[:session_token] = { value: "tok", httponly: true, same_site: :lax }
+    jar.signed.permanent[:session_token] = { value: "tok", httponly: true, same_site: :lax, secure: true }
     assert_equal "tok", jar.signed[:session_token]
+    assert jar.flag_httponly?(:session_token)
+    assert_equal "Lax", jar.flag_samesite(:session_token)
+    assert jar.flag_secure?(:session_token)
+  end
+
+  def test_bare_writes_default_httponly_and_honor_an_explicit_opt_out
+    jar = ActionController::CookieJar.new({})
+    jar[:last_room] = 7
+    jar.signed[:session_token] = "abc123"
+    assert jar.flag_httponly?(:last_room), "unsigned bare write keeps the HttpOnly default"
+    assert jar.flag_httponly?(:session_token), "signed bare write keeps the HttpOnly default"
+    jar.signed[:open_token] = { value: "tok", httponly: false }
+    refute jar.flag_httponly?(:open_token)
+    refute jar.flag_secure?(:last_room)
+    jar.signed[:cross] = { value: "tok", same_site: :none, secure: true }
+    assert_equal "None", jar.flag_samesite(:cross)
+    assert jar.flag_secure?(:cross)
+    assert jar.flag_httponly?(:cross), "options hash without httponly keeps the default"
+    jar.signed[:strict] = { value: "tok", same_site: :strict }
+    assert_equal "Strict", jar.flag_samesite(:strict)
+    assert jar.flag_httponly?(:strict)
   end
 
   # NIL, as Rails answers — the signed read is the one nullable read in
