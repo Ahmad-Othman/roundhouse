@@ -1360,7 +1360,7 @@ fn emit_send(
                 if let ExprNode::Range { begin, end, exclusive } = &*args[0].node {
                     return emit_slice_range(&rs, begin.as_ref(), end.as_ref(), *exclusive);
                 }
-                if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Array { .. })) {
+                if recv_is_array(r) {
                     return format!("{rs}[(int)({})]", args_s[0]);
                 }
                 // Ruby `Hash#[]` returns nil for a missing key; C#'s Dictionary
@@ -1406,7 +1406,12 @@ fn emit_send(
     }
     if let (Some(r), 2) = (recv, args.len()) {
         if method == "[]=" {
-            return format!("{}[{}] = {}", emit_expr(r), args_s[0], args_s[1]);
+            let idx = if list_index_needs_int_cast(r, &args[0]) {
+                format!("(int)({})", args_s[0])
+            } else {
+                args_s[0].clone()
+            };
+            return format!("{}[{}] = {}", emit_expr(r), idx, args_s[1]);
         }
         if method == "fetch" {
             return format!("({}.GetValueOrDefault({}, {}))", emit_expr(r), args_s[0], args_s[1]);
@@ -1878,9 +1883,25 @@ fn lvalue_ref(target: &LValue) -> String {
         LValue::Var { name, .. } => camel(name.as_str()),
         LValue::Ivar { name } => format!("this.{}", ivar_name(name.as_str())),
         LValue::Attr { recv, name } => format!("{}.{}", emit_expr(recv), pascal(name.as_str())),
-        LValue::Index { recv, index } => format!("{}[{}]", emit_expr(recv), emit_expr(index)),
+        LValue::Index { recv, index } => {
+            let idx = if list_index_needs_int_cast(recv, index) {
+                format!("(int)({})", emit_expr(index))
+            } else {
+                emit_expr(index)
+            };
+            format!("{}[{}]", emit_expr(recv), idx)
+        }
         LValue::Const { path } => path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("."),
     }
+}
+
+/// True when `recv[index]` is a List/Array access (not a Dictionary)
+/// that needs a C# `(int)` cast from the IR's `long` index.
+fn list_index_needs_int_cast(recv: &Expr, index: &Expr) -> bool {
+    if recv_is_hash(recv) {
+        return false;
+    }
+    recv_is_array(recv) || matches!(index.ty.as_ref(), Some(crate::ty::Ty::Int))
 }
 
 fn emit_op_assign(target: &LValue, op: OpAssignOp, value: &Expr) -> String {
