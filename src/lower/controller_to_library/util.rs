@@ -405,24 +405,3 @@ where
     });
     changed
 }
-
-/// Bottom-up in-place twin of [`map_expr`]. Recurse children first,
-/// then replace the current node, matching the clone walk. Returns
-/// whether any node changed so callers can skip a follow-up type.
-pub fn map_expr_mut_post<F>(expr: &mut Expr, f: &F) -> bool
-where
-    F: Fn(&Expr) -> Option<Expr>,
-{
-    let mut changed = false;
-    expr.node.for_each_child_mut(&mut |c| {
-        if map_expr_mut_post(c, f) {
-            changed = true;
-        }
-    });
-    if let Some(replacement) = f(expr) {
-        *expr = replacement;
-        true
-    } else {
-        changed
-    }
-}

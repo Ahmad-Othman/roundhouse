@@ -251,6 +251,7 @@ pub fn lower_test_modules_with_inner(
                 .collect()
         })
         .collect();
+    let mut lifted_sigs_per_module = vec![false; all_lcs.len()];
     for (idx, lc) in all_lcs.iter_mut().enumerate() {
         let synthesized = &synthesized_per_module[idx];
         if synthesized.is_empty() {
@@ -273,6 +274,7 @@ pub fn lower_test_modules_with_inner(
                 lifted.push((method.name.clone(), sig.clone()));
             }
         }
+        lifted_sigs_per_module[idx] = !lifted.is_empty();
         if let Some(info) = classes.get_mut(&lc.name) {
             for (name, sig) in lifted {
                 info.instance_methods.insert(name, sig);
@@ -287,11 +289,13 @@ pub fn lower_test_modules_with_inner(
 
     for (idx, mut lc) in all_lcs.into_iter().enumerate() {
         let synthesized = &synthesized_per_module[idx];
+        let lifted_sigs = lifted_sigs_per_module[idx];
         for method in &mut lc.methods {
             // Helpers with no declared signature were typed in the lift
-            // pass above. Skip that first empty-ivar type so a helper
-            // whose later rewrites are no-ops is not typed 3–4 times.
-            if !synthesized.contains(&method.name) {
+            // pass above, before sibling returns were in the registry.
+            // Retype them once those signatures exist. Skip the extra
+            // type only when this module lifted nothing.
+            if !synthesized.contains(&method.name) || lifted_sigs {
                 crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
             }
             // Harvest from this first typed pass, before the rewrites.

@@ -118,6 +118,14 @@ fn rewrite_fused(
         unwrap_config_tap(expr);
         if rewrite_write_here(expr, lifted) {
             super::symbolize_keys::rewrite_node(expr);
+            // rewrite_write_here only config-rewrites the value. Cable,
+            // credentials, and nested symbolize_keys used to reach it
+            // on their own walks; apply them to the new arguments.
+            if let ExprNode::Send { args, .. } = &mut *expr.node {
+                for arg in args {
+                    rewrite_fused(arg, Some(lifted), cable_and_credentials);
+                }
+            }
             return;
         }
         if rewrite_here(expr, lifted) {

@@ -27,7 +27,9 @@ fn parse(source: &str) -> Expr {
 fn same_ty(a: &Ty, b: &Ty) -> bool {
     match (a, b) {
         (Ty::Union { variants: av }, Ty::Union { variants: bv }) => {
-            av.len() == bv.len() && av.iter().all(|v| bv.iter().any(|w| same_ty(v, w)))
+            av.len() == bv.len()
+                && av.iter().all(|v| bv.iter().any(|w| same_ty(v, w)))
+                && bv.iter().all(|v| av.iter().any(|w| same_ty(v, w)))
         }
         (Ty::Array { elem: a }, Ty::Array { elem: b }) => same_ty(a, b),
         (Ty::Hash { key: ak, value: av }, Ty::Hash { key: bk, value: bv }) => {

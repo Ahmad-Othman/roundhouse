@@ -13,7 +13,7 @@ use crate::span::Span;
 use crate::ty::Ty;
 
 use super::params::{ParamsSpec, ParamsSpecs};
-use super::util::{map_expr, map_expr_mut_post};
+use super::util::{map_expr, map_expr_mut};
 
 // ---------------------------------------------------------------------------
 // Render-template-as-Views-call rewrite. Spinel doesn't have Rails'
@@ -2531,7 +2531,7 @@ pub fn project_route_helper_ids(expr: &Expr) -> Expr {
 /// In-place twin. Returns whether any argument was projected so the
 /// test lowerer can skip a follow-up typing pass.
 pub fn project_route_helper_ids_in_place(expr: &mut Expr) -> bool {
-    map_expr_mut_post(expr, &project_route_helper_ids_node)
+    map_expr_mut(expr, &project_route_helper_ids_node)
 }
 
 fn project_route_helper_ids_node(e: &Expr) -> Option<Expr> {

@@ -85,7 +85,7 @@ pub fn rewrite_arel_in_expr_with_assocs(
     // there is something to hoist into it.
     if !matches!(&*expr.node, ExprNode::Seq { .. }) {
         let mut hoisted = Vec::new();
-        hoist_value_seqs(expr, &mut hoisted);
+        let replaced = hoist_value_seqs(expr, &mut hoisted);
         if !hoisted.is_empty() {
             let span = expr.span;
             let placeholder = Expr::new(
@@ -94,6 +94,8 @@ pub fn rewrite_arel_in_expr_with_assocs(
             );
             hoisted.push(std::mem::replace(expr, placeholder));
             *expr = Expr::new(span, ExprNode::Seq { exprs: hoisted });
+            changed = true;
+        } else if replaced {
             changed = true;
         }
     }
@@ -303,8 +305,11 @@ fn hoist_value_seqs_in_stmts(stmts: &mut Vec<Expr>) -> bool {
     let mut i = 0;
     while i < stmts.len() {
         let mut hoisted = Vec::new();
-        hoist_value_seqs(&mut stmts[i], &mut hoisted);
+        let replaced = hoist_value_seqs(&mut stmts[i], &mut hoisted);
         if hoisted.is_empty() {
+            if replaced {
+                changed = true;
+            }
             i += 1;
             continue;
         }
@@ -328,59 +333,61 @@ fn hoist_value_seqs_in_stmts(stmts: &mut Vec<Expr>) -> bool {
 /// visitor's fixed `stmt`/`results` locals and collide; that multi-query-
 /// per-statement case is a pre-existing visitor-naming limitation, not
 /// introduced here (every recognized site uses the same var names).
-fn hoist_value_seqs(e: &mut Expr, hoisted: &mut Vec<Expr>) {
+fn hoist_value_seqs(e: &mut Expr, hoisted: &mut Vec<Expr>) -> bool {
+    let mut changed = false;
     match &mut *e.node {
         ExprNode::Send { recv, args, .. } => {
             if let Some(r) = recv {
-                hoist_value_child(r, hoisted);
+                changed |= hoist_value_child(r, hoisted);
             }
             for a in args {
-                hoist_value_child(a, hoisted);
+                changed |= hoist_value_child(a, hoisted);
             }
         }
         ExprNode::Apply { fun, args, .. } => {
-            hoist_value_child(fun, hoisted);
+            changed |= hoist_value_child(fun, hoisted);
             for a in args {
-                hoist_value_child(a, hoisted);
+                changed |= hoist_value_child(a, hoisted);
             }
         }
         ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => {
-            hoist_value_child(value, hoisted);
+            changed |= hoist_value_child(value, hoisted);
         }
         ExprNode::BoolOp { left, right, .. } => {
-            hoist_value_child(left, hoisted);
-            hoist_value_child(right, hoisted);
+            changed |= hoist_value_child(left, hoisted);
+            changed |= hoist_value_child(right, hoisted);
         }
         ExprNode::Array { elements, .. } => {
             for el in elements {
-                hoist_value_child(el, hoisted);
+                changed |= hoist_value_child(el, hoisted);
             }
         }
         ExprNode::Hash { entries, .. } => {
             for (_, v) in entries {
-                hoist_value_child(v, hoisted);
+                changed |= hoist_value_child(v, hoisted);
             }
         }
         ExprNode::Return { value }
         | ExprNode::Raise { value }
         | ExprNode::Splat { value }
         | ExprNode::KeywordSplat { value } => {
-            hoist_value_child(value, hoisted);
+            changed |= hoist_value_child(value, hoisted);
         }
         ExprNode::Yield { args } => {
             for a in args {
-                hoist_value_child(a, hoisted);
+                changed |= hoist_value_child(a, hoisted);
             }
         }
         _ => {}
     }
+    changed
 }
 
 /// Process one value-position child: recurse into its own value
 /// positions, then — if the child is itself a Seq — move its leading
 /// statements into `hoisted` and collapse it to its final expression.
-fn hoist_value_child(child: &mut Expr, hoisted: &mut Vec<Expr>) {
-    hoist_value_seqs(child, hoisted);
+fn hoist_value_child(child: &mut Expr, hoisted: &mut Vec<Expr>) -> bool {
+    let mut changed = hoist_value_seqs(child, hoisted);
     if matches!(&*child.node, ExprNode::Seq { .. }) {
         let placeholder = Expr::new(
             crate::span::Span::synthetic(),
@@ -395,7 +402,11 @@ fn hoist_value_child(child: &mut Expr, hoisted: &mut Vec<Expr>) {
             }
             // Empty Seq → keep the nil placeholder.
         }
+        // Replacement itself is a tree change even when nothing is
+        // hoisted (empty `begin; end` → nil). Callers retype on this.
+        changed = true;
     }
+    changed
 }
 
 /// Mutable visitor for every direct sub-Expr of `expr`. Caller
@@ -657,5 +668,22 @@ mod tests {
         assert_eq!(stmts.len(), 3);
         let ExprNode::Assign { value, .. } = &*stmts[2].node else { panic!() };
         assert!(matches!(&*value.node, ExprNode::Var { .. }), "binds to the results var");
+    }
+
+    #[test]
+    fn empty_value_seq_replacement_is_a_change() {
+        // `x = begin; end` is an empty Seq in value position. Hoisting
+        // replaces it with nil and adds no statements; that still has
+        // to count as a rewrite so the controller retypes the body.
+        let mut stmts = vec![assign("x", seq_node(vec![]))];
+        assert!(
+            hoist_value_seqs_in_stmts(&mut stmts),
+            "Seq-to-nil must set changed even with an empty hoist list"
+        );
+        let ExprNode::Assign { value, .. } = &*stmts[0].node else { panic!("expected assign") };
+        assert!(
+            matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }),
+            "empty Seq collapsed to nil"
+        );
     }
 }

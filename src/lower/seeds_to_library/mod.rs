@@ -92,7 +92,7 @@ pub fn rewrite_assoc_create_with_models_in_place(
     expr: &mut Expr,
     models: &[crate::dialect::Model],
 ) -> bool {
-    crate::lower::controller_to_library::util::map_expr_mut_post(expr, &|e| {
+    crate::lower::controller_to_library::util::map_expr_mut(expr, &|e| {
         assoc_create_rewrite(e, models)
     })
 }

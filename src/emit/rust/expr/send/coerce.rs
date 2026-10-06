@@ -68,7 +68,7 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
             if target_ty.is_stringish() {
                 if json_value_arg_for_string_param(value) {
                     let inner_raw = emit_expr(value);
-                    return format!("({inner_raw}).as_str().unwrap()");
+                    return json_value_as_str(inner_raw, value);
                 }
                 // Class-method Sends can be IR-Untyped while rust emits
                 // `String`. Borrow rather than calling Value::as_str.
@@ -84,7 +84,7 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         // narrow with `as_str()`; see `json_value_arg_for_string_param`.
         if target_ty.is_stringish() && json_value_arg_for_string_param(value) {
             let inner_raw = emit_expr(value);
-            return format!("({inner_raw}).as_str().unwrap()");
+            return json_value_as_str(inner_raw, value);
         }
     }
     let raw = emit_expr(arg);
@@ -422,7 +422,7 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         // in IR while rust emits `String`/`&str`, and wrapping that
         // in `.as_str().unwrap()` is E0599.
         if json_value_arg_for_string_param(arg) {
-            return format!("({raw}).as_str().unwrap()");
+            return json_value_as_str(raw, arg);
         }
         // Peek through `Cast` wrappers — the model lowerer wraps row
         // accessors in `Cast { Send(row.col), col_ty }` to bridge
@@ -669,7 +669,9 @@ fn json_value_arg_for_string_param(arg: &Expr) -> bool {
     };
     match &*inner.node {
         ExprNode::Var { .. } | ExprNode::Ivar { .. } => {
-            inner.ty.as_ref().is_some_and(value_shaped)
+            // `Union<Untyped, Nil>` rust-emits `Option<Value>`. Peel
+            // would call that a Value and emit `.as_str()` on Option.
+            inner.ty.as_ref().is_some_and(|t| !is_option_ty(t) && value_shaped(t))
         }
         ExprNode::Send { method, recv, .. } => {
             if !matches!(method.as_str(), "[]" | "fetch" | "get") {
@@ -688,6 +690,31 @@ fn json_value_arg_for_string_param(arg: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// `.as_str()` needs an owned `Value`. HashMap#get rust-emits
+/// `Option<&Value>`; materialize Null-on-miss first.
+fn json_value_as_str(raw: String, arg: &Expr) -> String {
+    let inner = if let ExprNode::Cast { value, .. } = &*arg.node {
+        value
+    } else {
+        arg
+    };
+    let owned = if let ExprNode::Send { method, recv, .. } = &*inner.node {
+        if method.as_str() == "get"
+            && matches!(
+                recv.as_ref().and_then(|r| r.ty.as_ref()).map(peel_nil),
+                Some(crate::ty::Ty::Hash { .. })
+            )
+        {
+            format!("{raw}.cloned().unwrap_or(serde_json::Value::Null)")
+        } else {
+            raw
+        }
+    } else {
+        raw
+    };
+    format!("({owned}).as_str().unwrap()")
 }
 
 /// serde_json accessor that yields `Option<T>` directly — the nullable

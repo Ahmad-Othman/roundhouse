@@ -81,17 +81,17 @@ impl super::Analyzer {
                 by_key.insert((lc.name.clone(), method.name.clone()), method.effects.clone());
             }
         }
+        let parents: HashMap<ClassId, Option<ClassId>> = app
+            .controllers
+            .iter()
+            .map(|c| (c.name.clone(), c.parent.clone()))
+            .collect();
         for resolution in app.controller_resolutions.values_mut() {
             for rf in &mut resolution.filter_chain {
                 if rf.filter.kind.is_skip() {
                     continue;
                 }
-                let target = &rf.filter.target;
-                rf.effects = by_key
-                    .get(&(rf.included_via.clone(), target.clone()))
-                    .or_else(|| by_key.get(&(rf.defined_in.clone(), target.clone())))
-                    .cloned()
-                    .unwrap_or_default();
+                rf.effects = lookup_filter_effects(&by_key, &parents, rf);
             }
         }
     }
@@ -399,4 +399,36 @@ impl super::Analyzer {
             }
         }
     }
+}
+
+/// Filter-target effects follow Ruby method lookup: the class that
+/// carried the filter into the chain, then its parent controllers
+/// nearest-first, then `defined_in` (concern modules). A subclass
+/// `before_action :load_room` whose method lives on the parent would
+/// miss both `(included_via, target)` and `(defined_in, target)` —
+/// those names are the subclass, where the method was never stamped.
+fn lookup_filter_effects(
+    by_key: &HashMap<(ClassId, Symbol), EffectSet>,
+    parents: &HashMap<ClassId, Option<ClassId>>,
+    rf: &crate::app::ResolvedFilter,
+) -> EffectSet {
+    let target = &rf.filter.target;
+    if let Some(effects) = by_key.get(&(rf.included_via.clone(), target.clone())) {
+        return effects.clone();
+    }
+    let mut current = rf.included_via.clone();
+    let mut seen = std::collections::HashSet::new();
+    while seen.insert(current.clone()) {
+        let Some(parent) = parents.get(&current).and_then(|p| p.clone()) else {
+            break;
+        };
+        if let Some(effects) = by_key.get(&(parent.clone(), target.clone())) {
+            return effects.clone();
+        }
+        current = parent;
+    }
+    by_key
+        .get(&(rf.defined_in.clone(), target.clone()))
+        .cloned()
+        .unwrap_or_default()
 }
