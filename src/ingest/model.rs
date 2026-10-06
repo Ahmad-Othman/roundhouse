@@ -798,6 +798,10 @@ struct EnumDeclaration<'pr> {
     /// column default. Computed here because only this parse sees the
     /// options hash.
     default_label: Option<String>,
+    /// Rails `scopes:` / `instance_methods:` (default true). Named
+    /// fields so a new option cannot vanish the way `default:` did.
+    scopes: bool,
+    instance_methods: bool,
 }
 
 fn enum_declaration<'pr>(call: &ruby_prism::CallNode<'pr>) -> Option<EnumDeclaration<'pr>> {
@@ -812,31 +816,54 @@ fn enum_declaration<'pr>(call: &ruby_prism::CallNode<'pr>) -> Option<EnumDeclara
     // Two spellings: `enum :status, <mapping>, **opts` (Rails 7) and the
     // older `enum status: <mapping>, **opts`, where the column and its
     // mapping are the first pair of one keyword hash.
-    let (column, mapping_node, prefix, suffix, default_label) = match symbol_value(&first) {
-        Some(col) => {
-            let column: String = col;
-            let mapping = iter.next();
-            let opts = iter.next();
-            let (prefix, suffix, default_label) = match opts.as_ref().and_then(|o| o.as_keyword_hash_node()) {
-                Some(kh) => {
-                    let (p, s) = enum_affixes(&kh.elements(), &column);
-                    (p, s, enum_default_label(&kh.elements()))
+    let (column, mapping_node, prefix, suffix, default_label, scopes, instance_methods) =
+        match symbol_value(&first) {
+            Some(col) => {
+                let column: String = col;
+                let mapping = iter.next();
+                let opts = iter.next();
+                match opts.as_ref().and_then(|o| o.as_keyword_hash_node()) {
+                    Some(kh) => {
+                        let (p, s) = enum_affixes(&kh.elements(), &column);
+                        (
+                            column,
+                            mapping,
+                            p,
+                            s,
+                            enum_default_label(&kh.elements()),
+                            enum_bool_option(&kh.elements(), "scopes", true),
+                            enum_bool_option(&kh.elements(), "instance_methods", true),
+                        )
+                    }
+                    None => (column, mapping, String::new(), String::new(), None, true, true),
                 }
-                None => (String::new(), String::new(), None),
-            };
-            (column, mapping, prefix, suffix, default_label)
-        }
-        None => {
-            let kh = first.as_keyword_hash_node()?;
-            let elements = kh.elements();
-            let pair = elements.iter().next()?.as_assoc_node()?;
-            let column = symbol_value(&pair.key())?;
-            let (prefix, suffix) = enum_affixes(&elements, &column);
-            let default_label = enum_default_label(&elements);
-            (column, Some(pair.value()), prefix, suffix, default_label)
-        }
-    };
-    Some(EnumDeclaration { column, mapping: mapping_node?, prefix, suffix, default_label })
+            }
+            None => {
+                let kh = first.as_keyword_hash_node()?;
+                let elements = kh.elements();
+                let pair = elements.iter().next()?.as_assoc_node()?;
+                let column = symbol_value(&pair.key())?;
+                let (prefix, suffix) = enum_affixes(&elements, &column);
+                (
+                    column,
+                    Some(pair.value()),
+                    prefix,
+                    suffix,
+                    enum_default_label(&elements),
+                    enum_bool_option(&elements, "scopes", true),
+                    enum_bool_option(&elements, "instance_methods", true),
+                )
+            }
+        };
+    Some(EnumDeclaration {
+        column,
+        mapping: mapping_node?,
+        prefix,
+        suffix,
+        default_label,
+        scopes,
+        instance_methods,
+    })
 }
 
 fn enum_mapping_error(file: &str, column: &str) -> IngestError {
@@ -887,9 +914,18 @@ pub(super) fn expand_enum_decl(
     use crate::dialect::{MethodDef, MethodReceiver, Scope};
     use crate::effect::EffectSet;
 
-    let Some(EnumDeclaration { column, mapping: mapping_node, prefix, suffix, default_label }) =
-        enum_declaration(call)
-        else { return Ok(None) };
+    let Some(EnumDeclaration {
+        column,
+        mapping: mapping_node,
+        prefix,
+        suffix,
+        default_label,
+        scopes,
+        instance_methods,
+    }) = enum_declaration(call)
+    else {
+        return Ok(None)
+    };
     // `enum :status, STATUSES` — the mapping named by a constant the class
     // body assigned above (`STATUSES = %i[…].freeze`) — and everything
     // else `enum_label_values` resolves, now including a computed
@@ -952,81 +988,106 @@ pub(super) fn expand_enum_decl(
                 },
             )
         };
-        let method_def = |name: String, body: Expr| ModelBodyItem::Method {
-            method: MethodDef {
-                name_span: crate::span::Span::synthetic(),
-                name: Symbol::from(name),
-                receiver: MethodReceiver::Instance,
-                visibility: crate::dialect::MethodVisibility::Public,
-                params: Vec::new(),
-                unsupported_formals: None,
-                has_anonymous_block: false,
-                block_param: None,
-                body,
-                signature: None,
-                effects: EffectSet::pure(),
-                enclosing_class: None,
-                kind: crate::dialect::AccessorKind::Method,
-                is_async: false,
-                mutates_self: false,
-            },
-            leading_comments: Vec::new(),
-            leading_blank_line: false,
+        let method_def = |name: String, body: Expr, comments: Vec<crate::dialect::Comment>| {
+            ModelBodyItem::Method {
+                method: MethodDef {
+                    name_span: crate::span::Span::synthetic(),
+                    name: Symbol::from(name),
+                    receiver: MethodReceiver::Instance,
+                    visibility: crate::dialect::MethodVisibility::Public,
+                    params: Vec::new(),
+                    unsupported_formals: None,
+                    has_anonymous_block: false,
+                    block_param: None,
+                    body,
+                    signature: None,
+                    effects: EffectSet::pure(),
+                    enclosing_class: None,
+                    kind: crate::dialect::AccessorKind::Method,
+                    is_async: false,
+                    mutates_self: false,
+                },
+                leading_comments: comments,
+                leading_blank_line: false,
+            }
         };
 
-        items.push(ModelBodyItem::Scope {
-            scope: Scope {
-                name: Symbol::from(base.as_str()),
-                params: Vec::new(),
-                body: call_with_pair("where"),
-            },
-            // The declaration's own comments ride the first item it
-            // expands to, so a documented `enum` keeps its docs.
-            leading_comments: if items.is_empty() {
-                leading_comments.to_vec()
-            } else {
-                Vec::new()
-            },
-            leading_blank_line: false,
-        });
-        // `not_published`: Rails generates the negative scope beside each positive one.
-        let where_not = Expr::new(
-            span,
-            ExprNode::Send {
-                recv: Some(Expr::new(
-                    span,
-                    ExprNode::Send { recv: None, method: Symbol::from("where"), args: vec![], block: None, parenthesized: false },
-                )),
-                method: Symbol::from("not"),
-                args: vec![pair.clone()],
-                block: None,
-                parenthesized: true,
-            },
-        );
-        items.push(ModelBodyItem::Scope {
-            scope: Scope { name: Symbol::from(format!("not_{base}")), params: Vec::new(), body: where_not },
-            leading_comments: Vec::new(),
-            leading_blank_line: false,
-        });
-        items.push(method_def(
-            format!("{base}?"),
-            Expr::new(
+        if scopes {
+            items.push(ModelBodyItem::Scope {
+                scope: Scope {
+                    name: Symbol::from(base.as_str()),
+                    params: Vec::new(),
+                    body: call_with_pair("where"),
+                },
+                // The declaration's own comments ride the first item it
+                // expands to, so a documented `enum` keeps its docs.
+                leading_comments: if items.is_empty() {
+                    leading_comments.to_vec()
+                } else {
+                    Vec::new()
+                },
+                leading_blank_line: false,
+            });
+            // `not_published`: Rails generates the negative scope beside each positive one.
+            let where_not = Expr::new(
                 span,
                 ExprNode::Send {
-                    recv: Some(column_read()),
-                    method: Symbol::from("=="),
-                    args: vec![Expr::new(
+                    recv: Some(Expr::new(
                         span,
-                        ExprNode::Lit {
-                            value: if reads_label { Literal::Str { value: all_labels.iter().find(|(_, stored)| stored == &value).map(|(canonical, _)| canonical.clone()).unwrap_or_else(|| label.clone()) } } else { value },
-                        },
-                    )],
+                        ExprNode::Send { recv: None, method: Symbol::from("where"), args: vec![], block: None, parenthesized: false },
+                    )),
+                    method: Symbol::from("not"),
+                    args: vec![pair.clone()],
                     block: None,
-                    parenthesized: false,
+                    parenthesized: true,
                 },
-            ),
-        ));
-        items.push(method_def(format!("{base}!"), call_with_pair("update!")));
+            );
+            items.push(ModelBodyItem::Scope {
+                scope: Scope { name: Symbol::from(format!("not_{base}")), params: Vec::new(), body: where_not },
+                leading_comments: Vec::new(),
+                leading_blank_line: false,
+            });
+        }
+        if instance_methods {
+            items.push(method_def(
+                format!("{base}?"),
+                Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(column_read()),
+                        method: Symbol::from("=="),
+                        args: vec![Expr::new(
+                            span,
+                            ExprNode::Lit {
+                                value: if reads_label {
+                                    Literal::Str {
+                                        value: all_labels
+                                            .iter()
+                                            .find(|(_, stored)| stored == &value)
+                                            .map(|(canonical, _)| canonical.clone())
+                                            .unwrap_or_else(|| label.clone()),
+                                    }
+                                } else {
+                                    value
+                                },
+                            },
+                        )],
+                        block: None,
+                        parenthesized: false,
+                    },
+                ),
+                if items.is_empty() {
+                    leading_comments.to_vec()
+                } else {
+                    Vec::new()
+                },
+            ));
+            items.push(method_def(
+                format!("{base}!"),
+                call_with_pair("update!"),
+                Vec::new(),
+            ));
+        }
     }
     // `Model.statuses`: every label, identifier or not, keyed by String as Rails' mapping is.
     let mapping_hash = Expr::new(
@@ -1044,6 +1105,11 @@ pub(super) fn expand_enum_decl(
             kwargs: false,
         },
     );
+    let mapping_comments = if items.is_empty() {
+        leading_comments.to_vec()
+    } else {
+        Vec::new()
+    };
     items.push(ModelBodyItem::Method {
         method: MethodDef {
             name_span: crate::span::Span::synthetic(),
@@ -1062,7 +1128,7 @@ pub(super) fn expand_enum_decl(
             is_async: false,
             mutates_self: false,
         },
-        leading_comments: Vec::new(),
+        leading_comments: mapping_comments,
         leading_blank_line: false,
     });
     Ok(Some(EnumExpansion { column: Symbol::from(column.as_str()), mapping: labels, default, items }))
@@ -1267,10 +1333,26 @@ fn enum_label_pairs<'a>(
         .collect()
 }
 
-/// `prefix:`/`suffix:` from an `enum`'s option hash. `true` means "use
-/// the column name" (Rails' own convention); a symbol or string names
-/// the affix directly. Returns the strings to splice around each label,
-/// already carrying their separating underscore.
+/// Rails `scopes:` / `instance_methods:` — only the unprefixed
+/// spellings; `_scopes` / `_instance_methods` are rejected by Rails 7+.
+fn enum_bool_option(elements: &ruby_prism::NodeList<'_>, name: &str, default: bool) -> bool {
+    for el in elements.iter() {
+        let Some(assoc) = el.as_assoc_node() else { continue };
+        let Some(key) = symbol_value(&assoc.key()) else { continue };
+        if key != name {
+            continue;
+        }
+        let value = assoc.value();
+        if value.as_false_node().is_some() {
+            return false;
+        }
+        if value.as_true_node().is_some() {
+            return true;
+        }
+    }
+    default
+}
+
 // `_default:` is the pre-Rails-7 spelling, as `_prefix:` is.
 fn enum_default_label(elements: &ruby_prism::NodeList<'_>) -> Option<String> {
     elements.iter().find_map(|el| {
@@ -1283,6 +1365,10 @@ fn enum_default_label(elements: &ruby_prism::NodeList<'_>) -> Option<String> {
     })
 }
 
+/// `prefix:`/`suffix:` from an `enum`'s option hash. `true` means "use
+/// the column name" (Rails' own convention); a symbol or string names
+/// the affix directly. Returns the strings to splice around each label,
+/// already carrying their separating underscore.
 fn enum_affixes(elements: &ruby_prism::NodeList<'_>, column: &str) -> (String, String) {
     let mut prefix = String::new();
     let mut suffix = String::new();
