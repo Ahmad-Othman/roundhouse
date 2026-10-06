@@ -4,20 +4,21 @@
 #
 # Rack::Deflater compresses every response. A campfire room page is the
 # same ~420 KB HTML for every wrk GET that shares a session, so that is
-# the same deflate over and over. Key by the identity bytes: MRI's
-# string hash of a 420 KB body is cheaper than SHA-256 of the same
-# bytes (measured: digest-keyed cache dropped /rooms/1 from ~1725 to
-# ~1140 req/s). The Spinel twin keys by digest because its Hash hashes
-# the whole key under the lock and has no GVL.
+# the same deflate over and over.
 #
-# Gzip itself runs outside the lock. Holding Mutex across Zlib.gzip
-# serialized every miss onto one core. Two threads that miss the same
-# body both gzip and one write wins — a duplicate deflate, not a
-# wrong body.
+# Hit path, measured on 420 KB identity HTML:
+#   * `join_body` of Rack `[body]` must not `join` (that copied 420 KB).
+#   * Last-identity compare (`bytesize` then `==`) is ~7 µs; MRI string
+#     hash of a fresh 420 KB body is ~294 µs. wrk hammers one URL, so
+#     the last-hit wins.
+#   * The Hash fallback keys by SHA-256 hex of the body (64 chars), not
+#     the identity bytes and not CRC32. Holding 64 × 420 KB strings as
+#     Hash keys was the RSS cost; CRC32+size could return another body's
+#     gzip on a collision. Digest keys keep the store small and refuse
+#     wrong-body hits. SHA-256 runs only when last-hit misses.
 #
-# HTML only, same skips as tep: 1xx/204/304, HEAD, already-encoded,
-# small, listed binary types. Wraps run_rack only so /cable's hijack
-# tuple never enters here.
+# Gzip itself runs outside the lock. HTML only, same skips as tep.
+require "digest"
 require "zlib"
 
 module GzipCache
@@ -25,6 +26,8 @@ module GzipCache
 
   @store = {}
   @mutex = Mutex.new
+  @last_raw = nil
+  @last_gz = nil
 
   def self.wrap(app)
     lambda { |env| call(app, env) }
@@ -58,20 +61,46 @@ module GzipCache
   end
 
   def self.compress(raw)
+    @mutex.synchronize do
+      lr = @last_raw
+      if !lr.nil? && lr.bytesize == raw.bytesize && lr == raw
+        return @last_gz
+      end
+    end
+    dig = Digest::SHA256.hexdigest(raw)
     hit = nil
-    @mutex.synchronize { hit = @store[raw] }
+    @mutex.synchronize do
+      hit = @store[dig]
+    end
     return hit unless hit.nil?
     gz = Zlib.gzip(raw)
     @mutex.synchronize do
       if @store.size >= MAX_ENTRIES
         @store.clear
       end
-      @store[raw] = gz
+      @store[dig] = gz
+      # Snapshot: the Rack body string can be reused and mutated
+      # between requests. Sharing it would make last-hit `==` match
+      # the mutated bytes while `@last_gz` is still the old gzip.
+      @last_raw = raw.dup
+      @last_gz = gz
     end
     gz
   end
 
   def self.join_body(body)
+    if body.is_a?(Array)
+      n = body.length
+      if n == 0
+        body.close if body.respond_to?(:close)
+        return ""
+      end
+      if n == 1
+        s = body[0].to_s
+        body.close if body.respond_to?(:close)
+        return s
+      end
+    end
     parts = []
     body.each { |part| parts << part.to_s }
     body.close if body.respond_to?(:close)
