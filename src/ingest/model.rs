@@ -229,10 +229,19 @@ pub(super) fn ingest_model_with_enum_constants(
             // scope + predicate + bang writer per label, so it expands
             // in the walk loop for the same reason `class << self` does.
             if let Some(call) = stmt.as_call_node() {
-                match expand_enum_decl(&call, file, &leading, &class_consts, &resolve_constant) {
-                    Ok(Some(expanded)) => {
-                        if let Some(default) = expanded.default {
-                            enum_defaults.insert(expanded.column.clone(), default);
+                match expand_class_body_dsl(&call, file, &leading, &class_consts, &resolve_constant) {
+                    Ok(Some(ClassBodyExpansion::DelegatedType(expanded))) => {
+                        let mut blank = leading_blank;
+                        for mut item in expanded {
+                            item.set_leading_blank_line(std::mem::take(&mut blank));
+                            body.push(item);
+                        }
+                        prev_end = Some(stmt.location().end_offset());
+                        continue;
+                    }
+                    Ok(Some(ClassBodyExpansion::Enum(expanded))) => {
+                        if let Some(d) = expanded.default {
+                            enum_defaults.insert(expanded.column.clone(), d);
                         }
                         if let Some(mapping) = expanded.mapping {
                             enums.insert(expanded.column, mapping);
@@ -793,6 +802,41 @@ pub(super) struct EnumExpansion {
     pub items: Vec<ModelBodyItem>,
 }
 
+/// Table payload of [`EnumExpansion`] without the generated items.
+/// Captured from a concern `included do` so the splice can fold the
+/// mapping into each includer's `enums` / `enum_defaults`.
+#[derive(Clone, Debug)]
+pub struct ConcernEnumDecl {
+    pub column: Symbol,
+    pub mapping: Vec<(String, Literal)>,
+    pub default: Option<Literal>,
+}
+
+/// One class-body DSL expansion — `delegated_type` then `enum`. Both
+/// ingest walks call [`expand_class_body_dsl`] instead of growing a
+/// third parallel `match`.
+pub(super) enum ClassBodyExpansion {
+    DelegatedType(Vec<ModelBodyItem>),
+    Enum(EnumExpansion),
+}
+
+pub(super) fn expand_class_body_dsl(
+    call: &ruby_prism::CallNode<'_>,
+    file: &str,
+    leading_comments: &[Comment],
+    class_consts: &ClassConsts,
+    resolve_constant: &impl Fn(&Node<'_>) -> Option<Vec<(String, Literal)>>,
+) -> IngestResult<Option<ClassBodyExpansion>> {
+    match super::delegated_type::expand_delegated_type_decl(call, file, leading_comments)? {
+        Some(items) => return Ok(Some(ClassBodyExpansion::DelegatedType(items))),
+        None => {}
+    }
+    match expand_enum_decl(call, file, leading_comments, class_consts, resolve_constant)? {
+        Some(exp) => Ok(Some(ClassBodyExpansion::Enum(exp))),
+        None => Ok(None),
+    }
+}
+
 /// The same syntax contract serves expansion and post-ingest validation.
 /// Validation reads declarations only, never reconstructs model IR.
 struct EnumDeclaration<'pr> {
@@ -804,7 +848,10 @@ struct EnumDeclaration<'pr> {
     /// column default. Computed here because only this parse sees the
     /// options hash.
     default_label: Option<String>,
-    generate: EnumGenerate,
+    /// Rails `scopes:` / `instance_methods:` (default true). Named
+    /// fields so a new option cannot vanish the way `default:` did.
+    scopes: bool,
+    instance_methods: bool,
 }
 
 fn enum_declaration<'pr>(call: &ruby_prism::CallNode<'pr>) -> Option<EnumDeclaration<'pr>> {
@@ -819,33 +866,54 @@ fn enum_declaration<'pr>(call: &ruby_prism::CallNode<'pr>) -> Option<EnumDeclara
     // Two spellings: `enum :status, <mapping>, **opts` (Rails 7) and the
     // older `enum status: <mapping>, **opts`, where the column and its
     // mapping are the first pair of one keyword hash.
-    let (column, mapping_node, prefix, suffix, generate, default_label) = match symbol_value(&first) {
-        Some(col) => {
-            let column: String = col;
-            let mapping = iter.next();
-            let opts = iter.next();
-            let (prefix, suffix, generate, default_label) = match opts.as_ref().and_then(|o| o.as_keyword_hash_node()) {
-                Some(kh) => {
-                    let els = kh.elements();
-                    let (p, s) = enum_affixes(&els, &column);
-                    (p, s, EnumGenerate::from_options(&els), enum_default_label(&els))
+    let (column, mapping_node, prefix, suffix, default_label, scopes, instance_methods) =
+        match symbol_value(&first) {
+            Some(col) => {
+                let column: String = col;
+                let mapping = iter.next();
+                let opts = iter.next();
+                match opts.as_ref().and_then(|o| o.as_keyword_hash_node()) {
+                    Some(kh) => {
+                        let (p, s) = enum_affixes(&kh.elements(), &column);
+                        (
+                            column,
+                            mapping,
+                            p,
+                            s,
+                            enum_default_label(&kh.elements()),
+                            enum_bool_option(&kh.elements(), "scopes", true),
+                            enum_bool_option(&kh.elements(), "instance_methods", true),
+                        )
+                    }
+                    None => (column, mapping, String::new(), String::new(), None, true, true),
                 }
-                None => (String::new(), String::new(), EnumGenerate::default(), None),
-            };
-            (column, mapping, prefix, suffix, generate, default_label)
-        }
-        None => {
-            let kh = first.as_keyword_hash_node()?;
-            let elements = kh.elements();
-            let pair = elements.iter().next()?.as_assoc_node()?;
-            let column = symbol_value(&pair.key())?;
-            let (prefix, suffix) = enum_affixes(&elements, &column);
-            let generate = EnumGenerate::from_options(&elements);
-            let default_label = enum_default_label(&elements);
-            (column, Some(pair.value()), prefix, suffix, generate, default_label)
-        }
-    };
-    Some(EnumDeclaration { column, mapping: mapping_node?, prefix, suffix, default_label, generate })
+            }
+            None => {
+                let kh = first.as_keyword_hash_node()?;
+                let elements = kh.elements();
+                let pair = elements.iter().next()?.as_assoc_node()?;
+                let column = symbol_value(&pair.key())?;
+                let (prefix, suffix) = enum_affixes(&elements, &column);
+                (
+                    column,
+                    Some(pair.value()),
+                    prefix,
+                    suffix,
+                    enum_default_label(&elements),
+                    enum_bool_option(&elements, "scopes", true),
+                    enum_bool_option(&elements, "instance_methods", true),
+                )
+            }
+        };
+    Some(EnumDeclaration {
+        column,
+        mapping: mapping_node?,
+        prefix,
+        suffix,
+        default_label,
+        scopes,
+        instance_methods,
+    })
 }
 
 fn enum_mapping_error(file: &str, column: &str) -> IngestError {
@@ -897,9 +965,18 @@ pub(super) fn expand_enum_decl(
     use crate::dialect::{MethodDef, MethodReceiver, Scope};
     use crate::effect::EffectSet;
 
-    let Some(EnumDeclaration { column, mapping: mapping_node, prefix, suffix, default_label, generate }) =
-        enum_declaration(call)
-        else { return Ok(None) };
+    let Some(EnumDeclaration {
+        column,
+        mapping: mapping_node,
+        prefix,
+        suffix,
+        default_label,
+        scopes,
+        instance_methods,
+    }) = enum_declaration(call)
+    else {
+        return Ok(None)
+    };
     // `enum :status, STATUSES` — the mapping named by a constant the class
     // body assigned above (`STATUSES = %i[…].freeze`).
     let labels = if let Some(receiver) = serialized_enum_receiver(&mapping_node) {
@@ -975,29 +1052,31 @@ pub(super) fn expand_enum_decl(
                 },
             )
         };
-        let method_def = |name: String, body: Expr| ModelBodyItem::Method {
-            method: MethodDef {
-                name_span: crate::span::Span::synthetic(),
-                name: Symbol::from(name),
-                receiver: MethodReceiver::Instance,
-                visibility: crate::dialect::MethodVisibility::Public,
-                params: Vec::new(),
-                unsupported_formals: None,
-                has_anonymous_block: false,
-                block_param: None,
-                body,
-                signature: None,
-                effects: EffectSet::pure(),
-                enclosing_class: None,
-                kind: crate::dialect::AccessorKind::Method,
-                is_async: false,
-                mutates_self: false,
-            },
-            leading_comments: Vec::new(),
-            leading_blank_line: false,
+        let method_def = |name: String, body: Expr, comments: Vec<crate::dialect::Comment>| {
+            ModelBodyItem::Method {
+                method: MethodDef {
+                    name_span: crate::span::Span::synthetic(),
+                    name: Symbol::from(name),
+                    receiver: MethodReceiver::Instance,
+                    visibility: crate::dialect::MethodVisibility::Public,
+                    params: Vec::new(),
+                    unsupported_formals: None,
+                    has_anonymous_block: false,
+                    block_param: None,
+                    body,
+                    signature: None,
+                    effects: EffectSet::pure(),
+                    enclosing_class: None,
+                    kind: crate::dialect::AccessorKind::Method,
+                    is_async: false,
+                    mutates_self: false,
+                },
+                leading_comments: comments,
+                leading_blank_line: false,
+            }
         };
 
-        if generate.scopes {
+        if scopes {
             items.push(ModelBodyItem::Scope {
                 scope: Scope {
                     name: Symbol::from(base.as_str()),
@@ -1012,19 +1091,28 @@ pub(super) fn expand_enum_decl(
                     Vec::new()
                 },
                 leading_blank_line: false,
-    });
-    let where_not = Expr::new(span, ExprNode::Send {
-        recv: Some(Expr::new(span, ExprNode::Send {
-            recv: None, method: Symbol::from("where"), args: vec![], block: None, parenthesized: false,
-        })),
-        method: Symbol::from("not"), args: vec![pair.clone()], block: None, parenthesized: true,
-    });
-    items.push(ModelBodyItem::Scope {
-        scope: Scope { name: Symbol::from(format!("not_{base}")), params: Vec::new(), body: where_not },
-        leading_comments: Vec::new(), leading_blank_line: false,
-    });
-}
-if generate.instance_methods {
+            });
+            // `not_published`: Rails generates the negative scope beside each positive one.
+            let where_not = Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        span,
+                        ExprNode::Send { recv: None, method: Symbol::from("where"), args: vec![], block: None, parenthesized: false },
+                    )),
+                    method: Symbol::from("not"),
+                    args: vec![pair.clone()],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            items.push(ModelBodyItem::Scope {
+                scope: Scope { name: Symbol::from(format!("not_{base}")), params: Vec::new(), body: where_not },
+                leading_comments: Vec::new(),
+                leading_blank_line: false,
+            });
+        }
+        if instance_methods {
             // Aliases share their stored value and therefore their
             // canonical reader label. Every alias predicate is true
             // for that value, even though the reader names only the first.
@@ -1032,7 +1120,7 @@ if generate.instance_methods {
                 let EnumStored::Lit(value) = &stored else { return None };
                 mapping.iter().find(|(_, v)| v == value).map(|(label, _)| label.clone())
             }).unwrap_or_else(|| label.clone());
-            let mut predicate = method_def(
+            items.push(method_def(
                 format!("{base}?"),
                 Expr::new(
                     span,
@@ -1046,14 +1134,17 @@ if generate.instance_methods {
                         parenthesized: false,
                     },
                 ),
-            );
-            if items.is_empty() {
-                if let ModelBodyItem::Method { leading_comments: lc, .. } = &mut predicate {
-                    *lc = leading_comments.to_vec();
-                }
-            }
-            items.push(predicate);
-            items.push(method_def(format!("{base}!"), call_with_pair("update!")));
+                if items.is_empty() {
+                    leading_comments.to_vec()
+                } else {
+                    Vec::new()
+                },
+            ));
+            items.push(method_def(
+                format!("{base}!"),
+                call_with_pair("update!"),
+                Vec::new(),
+            ));
         }
     }
     // `Model.statuses`: every label, identifier or not, keyed by String as Rails' mapping is.
@@ -1072,6 +1163,11 @@ if generate.instance_methods {
             kwargs: false,
         },
     );
+    let mapping_comments = if items.is_empty() {
+        leading_comments.to_vec()
+    } else {
+        Vec::new()
+    };
     items.push(ModelBodyItem::Method {
         method: MethodDef {
             name_span: crate::span::Span::synthetic(),
@@ -1090,7 +1186,7 @@ if generate.instance_methods {
             is_async: false,
             mutates_self: false,
         },
-        leading_comments: Vec::new(),
+        leading_comments: mapping_comments,
         leading_blank_line: false,
     });
     let mapping = all_labels
@@ -1101,41 +1197,6 @@ if generate.instance_methods {
         })
         .collect::<Option<Vec<_>>>();
     Ok(Some(EnumExpansion { column: Symbol::from(column.as_str()), mapping, default, items }))
-}
-
-/// Whether an `enum` declaration generates its scopes and its
-/// predicate/bang-writer methods. Rails' `scopes: false` and
-/// `instance_methods: false` (and the pre-7 `_scopes:` /
-/// `_instance_methods:` spellings) switch each family off; both are on
-/// by default.
-struct EnumGenerate {
-    scopes: bool,
-    instance_methods: bool,
-}
-
-impl Default for EnumGenerate {
-    fn default() -> Self {
-        EnumGenerate { scopes: true, instance_methods: true }
-    }
-}
-
-impl EnumGenerate {
-    fn from_options(elements: &ruby_prism::NodeList<'_>) -> Self {
-        let mut out = EnumGenerate::default();
-        for el in elements.iter() {
-            let Some(assoc) = el.as_assoc_node() else { continue };
-            let Some(key) = symbol_value(&assoc.key()) else { continue };
-            if assoc.value().as_false_node().is_none() {
-                continue;
-            }
-            match key.trim_start_matches('_') {
-                "scopes" => out.scopes = false,
-                "instance_methods" => out.instance_methods = false,
-                _ => {}
-            }
-        }
-        out
-    }
 }
 
 /// The stored value of one enum label. A literal is what Rails' own
@@ -1456,10 +1517,27 @@ fn enum_label_pairs<'a>(
     Ok(Some(out))
 }
 
-/// `prefix:`/`suffix:` from an `enum`'s option hash. `true` means "use
-/// the column name" (Rails' own convention); a symbol or string names
-/// the affix directly. Returns the strings to splice around each label,
-/// already carrying their separating underscore.
+/// Rails `scopes:` / `instance_methods:` — only the unprefixed
+/// spellings; `_scopes` / `_instance_methods` are rejected by Rails 7+.
+fn enum_bool_option(elements: &ruby_prism::NodeList<'_>, name: &str, default: bool) -> bool {
+    for el in elements.iter() {
+        let Some(assoc) = el.as_assoc_node() else { continue };
+        let Some(key) = symbol_value(&assoc.key()) else { continue };
+        // `_scopes:` / `_instance_methods:` are the pre-Rails-7 spellings.
+        if key.trim_start_matches('_') != name {
+            continue;
+        }
+        let value = assoc.value();
+        if value.as_false_node().is_some() {
+            return false;
+        }
+        if value.as_true_node().is_some() {
+            return true;
+        }
+    }
+    default
+}
+
 // `_default:` is the pre-Rails-7 spelling, as `_prefix:` is.
 fn enum_default_label(elements: &ruby_prism::NodeList<'_>) -> Option<String> {
     elements.iter().find_map(|el| {
@@ -1472,6 +1550,10 @@ fn enum_default_label(elements: &ruby_prism::NodeList<'_>) -> Option<String> {
     })
 }
 
+/// `prefix:`/`suffix:` from an `enum`'s option hash. `true` means "use
+/// the column name" (Rails' own convention); a symbol or string names
+/// the affix directly. Returns the strings to splice around each label,
+/// already carrying their separating underscore.
 fn enum_affixes(elements: &ruby_prism::NodeList<'_>, column: &str) -> (String, String) {
     let mut prefix = String::new();
     let mut suffix = String::new();
@@ -2385,6 +2467,8 @@ fn parse_association(
             polymorphic_targets: Vec::new(),
             default: belongs_to_default,
             touch,
+            foreign_type: None,
+            primary_key: None,
         }),
         "has_and_belongs_to_many" => Some(Association::HasAndBelongsToMany {
             name: name.clone(),
@@ -2491,7 +2575,7 @@ fn parse_table_name_decl(body: Node<'_>, file: &str) -> IngestResult<Option<(Str
     }
 }
 
-fn dependent_from_sym(s: &str) -> Option<crate::dialect::Dependent> {
+pub(crate) fn dependent_from_sym(s: &str) -> Option<crate::dialect::Dependent> {
     use crate::dialect::Dependent;
     Some(match s {
         "destroy" => Dependent::Destroy,

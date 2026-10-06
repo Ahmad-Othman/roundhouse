@@ -334,6 +334,15 @@ pub enum Association {
         /// ([[feedback_self_describing_ir]]).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         touch: Option<Touch>,
+        /// `belongs_to`/`delegated_type` `foreign_type:` — column that
+        /// stores the associated class name. `None` means `<name>_type`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        foreign_type: Option<Symbol>,
+        /// Associated record's key used for lookup and for delegated
+        /// convenience names (`message_uuid` when `primary_key: :uuid`).
+        /// `None` means `id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        primary_key: Option<Symbol>,
     },
     HasMany {
         name: Symbol,

@@ -166,6 +166,8 @@ pub fn synthesize_record_model(app: &mut App) {
             polymorphic_targets: Vec::new(),
             default: None,
             touch: None,
+            foreign_type: None,
+            primary_key: None,
         },
         leading_comments: Vec::new(),
         leading_blank_line: false,

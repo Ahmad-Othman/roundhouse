@@ -274,6 +274,8 @@ fn parse_sequel_association(
             // Sequel has no `touch:` on the association; its equivalent
             // is the `touch` plugin, declared on the model.
             touch: None,
+            foreign_type: None,
+            primary_key: None,
         },
         "many_to_many" => Association::HasAndBelongsToMany {
             name: name.clone(),

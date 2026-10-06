@@ -1252,13 +1252,43 @@ module ActiveRecord
     # terminal to this method, so the scalar `count` keeps its
     # Integer return (no polymorphic count). Single group expression
     # (the corpus shape); Rails' multi-group array keys would need a
-    # composite key here first.
+    # composite key here first. HAVING and DISTINCT ride the same SQL
+    # as `to_sql` so the Hash only contains surviving groups, and a
+    # distinct projection counts distinct values per group (#343).
     def group_count
       key = @groups.join(", ")
-      sql = "SELECT #{key} AS k, COUNT(*) AS n FROM #{@table}"
-      sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
-      sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
-      sql = "#{sql} GROUP BY #{key}"
+      # DISTINCT uses a subquery so a multi-column / aliased `select`
+      # never lands inside SQLite's one-expression COUNT(DISTINCT …).
+      # HAVING filters groups on the original grouped relation first
+      # (source columns and aggregates), then distinct-count rows that
+      # belong to survivors. Non-distinct keeps `@select_sql` so HAVING
+      # can name selected aliases, matching `count_sql`.
+      sql = if @distinct
+        inner = append_join_where(
+          "#{cte_prefix}SELECT DISTINCT #{distinct_count_columns}, #{key} AS k FROM #{from_source}"
+        )
+        if @havings.length > 0
+          survivors = append_group_having(
+            append_join_where("#{cte_prefix}SELECT #{key} AS __rh_k FROM #{from_source}")
+          )
+          clause = "#{key} IN (SELECT __rh_k FROM (#{survivors}) AS __rh_surv)"
+          inner = if @wheres.length > 0
+            "#{inner} AND #{clause}"
+          else
+            "#{inner} WHERE #{clause}"
+          end
+        end
+        "SELECT k, COUNT(*) AS n FROM (#{inner}) AS __rh_gc GROUP BY k"
+      else
+        proj = if @select_sql.nil?
+          "#{key} AS k, COUNT(*) AS n"
+        else
+          "#{@select_sql}, #{key} AS k, COUNT(*) AS n"
+        end
+        append_group_having(
+          append_join_where("#{cte_prefix}SELECT #{proj} FROM #{from_source}")
+        )
+      end
       h = {}
       rows = ActiveRecord.adapter.select_rows(sql)
       rows.each { |row| h[row["k"]] = row["n"].to_i }
@@ -1735,9 +1765,10 @@ module ActiveRecord
 
     def count_sql
       # DISTINCT / GROUP BY must count the result-set shape, not the
-      # underlying rows (#343). Mirror exists_sql's DISTINCT-pk
-      # discipline; scalar `count` on a grouped relation counts groups
-      # (Hash form is `group_count`). LIMIT/OFFSET stay off total_count.
+      # underlying rows (#343). Scalar `count` on a grouped relation
+      # counts groups; the Hash form is `group_count`. LIMIT/OFFSET
+      # stay off this SQL so a windowed relation still answers the
+      # unwindowed total.
       if !@groups.empty?
         # Keep an explicit projection so HAVING can name selected
         # aliases (`select("COUNT(*) AS n").having("n > 1")`).
@@ -1749,26 +1780,29 @@ module ActiveRecord
         return "SELECT COUNT(*) AS n FROM (#{inner}) AS __rh_count"
       end
       if @distinct
-        # `select(:title).distinct.count` counts distinct titles, not pks.
-        # When `from(...)` replaces the model table, drop the model-table
-        # qualifier so the key projects from the active FROM source.
-        cols = if !@select_sql.nil?
-          @select_sql
-        elsif @from.nil?
-          "#{@table}.#{@model.primary_key}"
-        elsif @joins.length > 0
-          # Bare pk is ambiguous once another joined table also has
-          # that column (`from("parents").joins(...).distinct.count`).
-          "#{from_source}.#{@model.primary_key}"
-        else
-          @model.primary_key.to_s
-        end
         inner = append_join_where(
-          "#{cte_prefix}SELECT DISTINCT #{cols} FROM #{from_source}"
+          "#{cte_prefix}SELECT DISTINCT #{distinct_count_columns} FROM #{from_source}"
         )
         return "SELECT COUNT(*) AS n FROM (#{inner}) AS __rh_count"
       end
       append_join_where("#{cte_prefix}SELECT COUNT(*) AS n FROM #{from_source}")
+    end
+
+    # Projection COUNT(DISTINCT …) / `SELECT DISTINCT` use for a
+    # distinct relation: an explicit `select` list when present, else
+    # the primary key, qualified against the active FROM source.
+    def distinct_count_columns
+      if !@select_sql.nil?
+        @select_sql
+      elsif @from.nil?
+        "#{@table}.#{@model.primary_key}"
+      elsif @joins.length > 0
+        # Bare pk is ambiguous once another joined table also has
+        # that column (`from("parents").joins(...).distinct.count`).
+        "#{from_source}.#{@model.primary_key}"
+      else
+        @model.primary_key.to_s
+      end
     end
 
     # `SELECT 1 AS one … LIMIT n` for existence probes. Drops ORDER BY

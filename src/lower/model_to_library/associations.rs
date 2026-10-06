@@ -249,20 +249,29 @@ pub(super) fn push_association_methods(
             }
             Association::BelongsTo {
                 name,
-                target,
                 foreign_key,
                 polymorphic: true,
                 polymorphic_targets,
+                foreign_type,
+                primary_key,
                 ..
             } if !polymorphic_targets.is_empty() => {
-                // Polymorphic: the reader dispatches on the `<name>_type`
-                // column across the resolved implementor set; the writer
+                // Polymorphic: the reader dispatches on the type column
+                // across the resolved implementor set; the writer
                 // stores both halves of the (type, id) pair.
+                let type_col = foreign_type
+                    .clone()
+                    .unwrap_or_else(|| Symbol::from(format!("{}_type", name.as_str())));
+                let assoc_pk = primary_key
+                    .clone()
+                    .unwrap_or_else(|| Symbol::from("id"));
                 methods.push(synth_polymorphic_reader(
                     owner,
                     name,
                     polymorphic_targets,
                     foreign_key,
+                    &type_col,
+                    &assoc_pk,
                 ));
                 let sentinel = fk_sentinel(model, foreign_key);
                 let writer_name = Symbol::from(format!("{}=", name.as_str()));
@@ -276,6 +285,8 @@ pub(super) fn push_association_methods(
                         name,
                         polymorphic_targets,
                         foreign_key,
+                        &type_col,
+                        &assoc_pk,
                         sentinel,
                     ));
                 }
@@ -1054,6 +1065,8 @@ fn synth_polymorphic_reader(
     name: &Symbol,
     targets: &[ClassId],
     foreign_key: &Symbol,
+    type_col: &Symbol,
+    assoc_pk: &Symbol,
 ) -> MethodDef {
     // def notifiable
     //   case @notifiable_type
@@ -1063,9 +1076,8 @@ fn synth_polymorphic_reader(
     //   end
     // end
     //
-    // Rails stores the implementor's class name in `<name>_type`; the
-    // target set was resolved at ingest from the inverse `as:` decls.
-    let type_col = Symbol::from(format!("{}_type", name.as_str()));
+    // Rails stores the implementor's class name in the type column; the
+    // target set was resolved at ingest from `types:` / inverse `as:`.
     let find_by = |t: &ClassId| {
         Expr::new(
             Span::synthetic(),
@@ -1076,7 +1088,7 @@ fn synth_polymorphic_reader(
                     Span::synthetic(),
                     ExprNode::Hash {
                         entries: vec![(
-                            lit_sym(Symbol::from("id")),
+                            lit_sym(assoc_pk.clone()),
                             Expr::new(
                                 Span::synthetic(),
                                 ExprNode::Ivar { name: foreign_key.clone() },
@@ -1108,7 +1120,7 @@ fn synth_polymorphic_reader(
     let body = Expr::new(
         Span::synthetic(),
         ExprNode::Case {
-            scrutinee: Expr::new(Span::synthetic(), ExprNode::Ivar { name: type_col }),
+            scrutinee: Expr::new(Span::synthetic(), ExprNode::Ivar { name: type_col.clone() }),
             arms,
         },
     );
@@ -1142,6 +1154,8 @@ fn synth_polymorphic_writer(
     name: &Symbol,
     targets: &[ClassId],
     foreign_key: &Symbol,
+    type_col: &Symbol,
+    assoc_pk: &Symbol,
     sentinel: Expr,
 ) -> MethodDef {
     // def notifiable=(value)
@@ -1161,7 +1175,7 @@ fn synth_polymorphic_writer(
     // `@fk == 0` nil sentinel. The class-pattern `when` keeps the type
     // string a compile-time constant per arm (no `.class.name`).
     let value = Symbol::from("value");
-    let type_col = Symbol::from(format!("{}_type", name.as_str()));
+    let type_col = type_col.clone();
     let assign = |target_ivar: &Symbol, v: Expr| {
         Expr::new(
             Span::synthetic(),
@@ -1192,7 +1206,7 @@ fn synth_polymorphic_writer(
         Span::synthetic(),
         ExprNode::Send {
             recv: Some(var_ref(value.clone())),
-            method: Symbol::from("id"),
+            method: assoc_pk.clone(),
             args: vec![],
             block: None,
             parenthesized: false,
