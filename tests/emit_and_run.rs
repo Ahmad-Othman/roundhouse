@@ -6360,3 +6360,141 @@ raise "constructor consumer" unless FactoryConsumer.label == "CUSTOM"
 "#)
         .assert_passes();
 }
+
+/// Unlike a hash pattern with keys, `{}` requires the hash to be empty.
+/// A bare `is_a?(Hash)` check silently chose the wrong case arm for
+/// every nonempty hash. `**` explicitly permits the remaining keys.
+#[test]
+fn an_empty_hash_pattern_rejects_extra_keys() {
+    emit_and_run::real_blog()
+        .write(
+            "app/helpers/hash_pattern_probe.rb",
+            r#"class HashPatternProbe
+  #: (Hash[Symbol, Integer]) -> bool
+  def self.empty_match(value)
+    case value
+    in {}
+      true
+    else
+      false
+    end
+  end
+
+  #: (Hash[Symbol, Integer]) -> bool
+  def self.open_match(value)
+    case value
+    in { ** }
+      true
+    else
+      false
+    end
+  end
+
+  #: (Hash[Symbol, Integer]) -> bool
+  def self.key_match(value)
+    case value
+    in { x: 1 }
+      true
+    else
+      false
+    end
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"raise "empty hash did not match" unless HashPatternProbe.empty_match({})
+raise "nonempty hash incorrectly matched {}" if HashPatternProbe.empty_match({ x: 1 })
+raise "open hash pattern rejected extra keys" unless HashPatternProbe.open_match({ x: 1 })
+raise "keyed pattern rejected extra keys" unless HashPatternProbe.key_match({ x: 1, y: 2 })
+raise "keyed pattern accepted a missing key" if HashPatternProbe.key_match({ y: 2 })
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn model_rest_and_block_parameters_run_with_their_source_arity() {
+    emit_and_run::real_blog()
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", r#"class Article < ApplicationRecord
+  def tagged(*labels)
+    labels.join(",")
+  end
+  def pair(first, *rest, last)
+    [first, rest.join(","), last].join("|")
+  end
+  def each_title(&blk)
+    [title, "tail"].each(&blk)
+  end
+  def forward_titles(...)
+    each_title(...)
+  end
+  def both(*args, **opts)
+    [args.join(","), opts[:tag]].join("|")
+  end
+"#)
+        .write("app/services/rest_control.rb", r#"class RestControl
+  def tagged(*labels)
+    labels.join(",")
+  end
+end
+"#)
+        .run_ruby(r#"
+article = Article.new(title: "source")
+control = RestControl.new
+raise "model rest" unless article.tagged("x", "y") == "x,y"
+raise "empty rest" unless article.tagged == ""
+raise "library control" unless control.tagged("x", "y") == article.tagged("x", "y")
+raise "post parameter" unless article.pair("head", "a", "b", "last") == "head|a,b|last"
+raise "empty post rest" unless article.pair("head", "last") == "head||last"
+seen = []
+result = article.each_title { |value| seen << value.upcase }
+raise "block values" unless seen == ["SOURCE", "TAIL"]
+raise "block return" unless result == ["source", "tail"]
+forwarded = []
+article.forward_titles { |value| forwarded << value.upcase }
+raise "forwarded block preservation" unless forwarded == seen
+raise "rest with keywords" unless article.both("x", "y", tag: "z") == "x,y|z"
+raise "empty positional rest" unless article.both(tag: "z") == "|z"
+"#).assert_passes();
+}
+
+#[test]
+fn duplicate_route_only_options_use_the_last_value_at_runtime() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "resources :articles do",
+            "resources :articles, only: [], only: [:index, :show, :new, :create, :edit, :update, :destroy] do",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn duplicate_route_except_options_use_the_last_value_at_runtime() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "resources :articles do",
+            "resources :articles, except: [:show], except: [] do",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn rubydex_qualified_value_constants_survive_shared_lowerings() {
+    emit_and_run::real_blog()
+        .write("app/services/collection_constants.rb", r#"
+class CollectionConstants
+  WORDS = ["a", "bb"]
+  LENGTHS = WORDS.index_by(&:length)
+  def self.values
+    [LENGTHS[2], "a".in?(WORDS)]
+  end
+end
+"#)
+        .run_ruby("raise 'qualified lowered constants' unless CollectionConstants.values == ['bb', true]")
+        .assert_passes();
+}
