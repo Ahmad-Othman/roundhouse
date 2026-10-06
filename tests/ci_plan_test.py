@@ -351,7 +351,12 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(
                     ci.select([path])["spinel_tests"],
-                    ["spinel_db_lease", "param_binds", "spinel_stmt_cache_lru"],
+                    [
+                        "spinel_db_lease",
+                        "param_binds",
+                        "spinel_stmt_cache_lru",
+                        "db_sqlite_concurrency",
+                    ],
                 )
         for path in [
             "README.md",
@@ -405,14 +410,18 @@ class Routing(unittest.TestCase):
             ],
             "tests/spinel_db_lease.rb": ["spinel_db_lease"],
             "tests/spinel_stmt_cache_lru.rb": ["spinel_stmt_cache_lru"],
+            "tests/support/db_concurrency_spinel.rb": ["db_sqlite_concurrency"],
             "runtime/spinel/db.rb": [
-                "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru"
+                "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru",
+                "db_sqlite_concurrency",
             ],
             "runtime/spinel/sqlite_adapter.rb": [
-                "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru"
+                "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru",
+                "db_sqlite_concurrency",
             ],
             "runtime/spinel/active_support_time_parsing.rb": [
-                "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru"
+                "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru",
+                "db_sqlite_concurrency",
             ],
             "tests/params_vectors/canon.rb": ["spinel_param_builder"],
             "tests/rails_compat_vectors.rb": ["rails_compat_vectors_spinel"],
@@ -448,6 +457,7 @@ class Routing(unittest.TestCase):
                 "spinel_db_lease",
                 "param_binds",
                 "spinel_stmt_cache_lru",
+                "db_sqlite_concurrency",
             ],
         )
 

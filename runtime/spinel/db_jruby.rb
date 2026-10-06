@@ -348,7 +348,8 @@ module Db
   end
 
   # The request read snapshot and background checkpoints are
-  # implemented in the CRuby shim (db_cruby.rb) only so far. Here they
+  # implemented in the CRuby and Spinel shims (db_cruby.rb, db.rb), not
+  # yet in this one. Here they
   # are accepted and do nothing, so the shared dispatcher and test
   # harness call them unconditionally; this lane still reads in
   # autocommit and checkpoints inside COMMIT.

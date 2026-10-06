@@ -688,6 +688,10 @@ if port <= 0 || port > 65535
   exit(1)
 end
 Main.configure_default_adapter!
+# Serving, so WAL checkpoints move off the request path: a background
+# thread runs them instead of some request's COMMIT
+# (Db.checkpoint_in_background!).
+Db.checkpoint_in_background!
 # Wire model after-commit Turbo Stream broadcasts to the live WebSocket
 # fan-out. Without this, broadcasts only land in the in-memory log.
 Broadcasts.set_transport(Cable::Transport.new)

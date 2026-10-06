@@ -328,6 +328,11 @@ module Db
   # `@write_permit_timeout` seconds a writer stops queueing and goes
   # straight to SQLite, which is exactly the old behaviour: it waits in
   # the busy handler and, if the lock never frees, raises BUSY.
+  # Tests shorten the bound to exercise the timeout path quickly.
+  def self.write_permit_timeout=(seconds)
+    @write_permit_timeout = seconds
+  end
+
   def self.acquire_permit
     fiber = Fiber.current
     @permit_lock.synchronize do

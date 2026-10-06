@@ -43,6 +43,7 @@ SPINEL_TESTS = [
     "spinel_db_lease",
     "param_binds",
     "spinel_stmt_cache_lru",
+    "db_sqlite_concurrency",
     "spinel_param_builder",
     "rails_compat_vectors_spinel",
 ]
@@ -90,6 +91,7 @@ def native_coverage(path):
         or path == "src/emit/ruby.rs"
         or (path.startswith("tests/spinel") and path.endswith((".rs", ".rb")))
         or path in {f"tests/{name}.rs" for name in SPINEL_TESTS}
+        or path == "tests/support/db_concurrency_spinel.rb"
     ) and not interpreter_only
     suites = set()
     if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):
@@ -97,6 +99,8 @@ def native_coverage(path):
     focused = re.fullmatch(r"tests/([^/]+)\.(?:rs|rb)", path)
     if focused and focused[1] in SPINEL_TESTS:
         suites.add(focused[1])
+    if path == "tests/support/db_concurrency_spinel.rb":
+        suites.add("db_sqlite_concurrency")
     if path in {
         "tests/param_binds_emit.rb",
         "tests/param_binds_runtime.rb",
@@ -123,8 +127,16 @@ def native_coverage(path):
         if any(
             word in path for word in ("/db", "sqlite", "active_support_time_parsing")
         ):
-            # Shared database inputs own lease/ownership, binds, and cache recency.
-            owned_tests.update(("spinel_db_lease", "param_binds", "spinel_stmt_cache_lru"))
+            # Shared database inputs own lease/ownership, binds, cache recency,
+            # and the snapshot / write-permit / checkpoint policy.
+            owned_tests.update(
+                (
+                    "spinel_db_lease",
+                    "param_binds",
+                    "spinel_stmt_cache_lru",
+                    "db_sqlite_concurrency",
+                )
+            )
         if any(word in name for word in ("param", "multipart", "request")):
             owned_tests.add("spinel_param_builder")
         if (

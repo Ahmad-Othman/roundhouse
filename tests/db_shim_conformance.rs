@@ -391,9 +391,10 @@ fn the_rbs_contract_declares_the_nullable_seam() {
 
 /// The request-lifecycle hooks the Ruby-family dispatcher and test
 /// harness call unconditionally (runtime/spinel/scaffold/ruby_overlay/
-/// main.rb, config.ru, test/test_helper.rb). The CRuby shim implements
-/// them (tests/db_sqlite_concurrency.rs); a shim that has not yet must
-/// still define them as no-ops, or every request on that lane raises
+/// main.rb, config.ru, test/test_helper.rb, tep/app.rb). The CRuby and
+/// Spinel shims implement them (tests/db_sqlite_concurrency.rs); a shim
+/// that has not yet (JDBC) must still define them as no-ops, or every
+/// request on that lane raises
 /// NoMethodError. Strict targets have no such dispatcher, so only the
 /// Ruby family is held to this.
 const RUBY_FAMILY_LIFECYCLE: &[&str] = &[

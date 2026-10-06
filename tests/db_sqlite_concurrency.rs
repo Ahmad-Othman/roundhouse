@@ -261,3 +261,53 @@ check("without waiting out the timeout",
 "#,
     );
 }
+
+/// The same policy in the Spinel shim (runtime/spinel/db.rb), compiled
+/// by spinel: tests/support/db_concurrency_spinel.rb carries the checks
+/// above in the subset spinel compiles.
+///
+/// SPINEL=/path/to/spinel cargo test --test db_sqlite_concurrency -- --ignored
+#[test]
+#[ignore = "requires Spinel (SPINEL=/path/to/spinel)"]
+fn spinel_shim_policy() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let base = option_env!("CARGO_TARGET_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join(format!("roundhouse-db-concurrency-{}-spinel", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["db.rb", "active_support_time_parsing.rb"] {
+        std::fs::copy(root.join("runtime/spinel").join(name), dir.join(name)).unwrap();
+    }
+    std::fs::copy(
+        root.join("tests/support/db_concurrency_spinel.rb"),
+        dir.join("check.rb"),
+    )
+    .unwrap();
+    let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
+    let compiled = std::process::Command::new(&compiler)
+        .args(["check.rb", "-o", "check"])
+        .current_dir(&dir)
+        .output()
+        .expect("spawn spinel");
+    assert!(
+        compiled.status.success(),
+        "spinel failed ({}):\n{}{}",
+        dir.display(),
+        String::from_utf8_lossy(&compiled.stdout),
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let out = std::process::Command::new(dir.join("check"))
+        .arg(dir.join("test.sqlite3"))
+        .current_dir(&dir)
+        .output()
+        .expect("run check");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && stdout.trim_end().ends_with("OK"),
+        "spinel check ({}):\n=== stdout ===\n{stdout}\n=== stderr ===\n{}",
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
