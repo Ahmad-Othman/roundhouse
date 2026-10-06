@@ -140,6 +140,17 @@ struct InferenceSig {
     params: HashMap<(ClassId, Symbol), Vec<Ty>>,
 }
 
+/// Which call-site trees `unify_params_from_call_sites` walks.
+/// Production rounds skip views/tests/seeds: those trees are still
+/// ingest-shaped until after the production fixpoint (wave 12).
+/// Test sites are overlaid separately so later test-only rounds can
+/// reuse a production+view param snapshot.
+#[derive(Clone, Copy)]
+enum UnifyScope {
+    Production,
+    WithViews,
+}
+
 impl Analyzer {
     /// Build an analyzer with the default database adapter
     /// (`SqliteAdapter`). Matches pre-adapter-refactor behavior —
@@ -914,8 +925,12 @@ impl Analyzer {
         // settles on round 9.
         let mut prev_sig = self.capture_inference_sig();
         for round in 0..FIXPOINT_CAP {
-            crate::timings::phase(format_args!("round {round}: harvest returns"), || self.harvest_returns_to_registry(app));
-            crate::timings::phase(format_args!("round {round}: unify params"), || self.unify_params_from_call_sites(app));
+            crate::timings::phase(format_args!("round {round}: harvest returns"), || {
+                self.harvest_returns_to_registry(app, false)
+            });
+            crate::timings::phase(format_args!("round {round}: unify params"), || {
+                self.unify_params_from_call_sites(app, UnifyScope::Production)
+            });
             if self.inference_matches(&prev_sig) {
                 break;
             }
@@ -937,15 +952,15 @@ impl Analyzer {
         }
 
         // Intermediate rounds skip views/tests: production does not
-        // read test helper returns, and typing views against the empty
-        // first registry just to unify from those trees for seven
-        // rounds was wasted work. After production converges, type
-        // views once and then harvest/unify/retype *tests* until helper
-        // chains and default-parameter seeds settle — one pass cannot
-        // establish caller-before-callee test helpers. Views stay out
-        // of those extra rounds. If view/test sites moved a production
-        // param, one production-only pass absorbs it.
+        // read test helper returns, and unifying from still-untyped view
+        // trees for seven rounds was wasted work. After production
+        // converges, type views once and then harvest/unify/retype
+        // *tests* until helper chains settle. Later test rounds reuse
+        // the production+view param snapshot instead of re-walking
+        // those trees. If view/test sites moved a production param, one
+        // production-only pass absorbs it.
         let production_sig = prev_sig.clone();
+        let mut production_view_params = None;
         for round in 0..FIXPOINT_CAP {
             crate::timings::phase(
                 if round == 0 {
@@ -969,14 +984,22 @@ impl Analyzer {
                     }
                 },
             );
-            self.harvest_returns_to_registry(app);
+            self.harvest_returns_to_registry(app, true);
             crate::timings::phase(
                 if round == 0 {
                     "unify params (after views)".to_string()
                 } else {
                     format!("round {round}: unify params (tests)")
                 },
-                || self.unify_params_from_call_sites(app),
+                || {
+                    if round == 0 {
+                        self.unify_params_from_call_sites(app, UnifyScope::WithViews);
+                        production_view_params = Some(self.inferred_params.clone());
+                        self.overlay_test_params(app);
+                    } else if let Some(snapshot) = production_view_params.as_ref() {
+                        self.unify_test_params_onto(app, snapshot);
+                    }
+                },
             );
             if self.inference_matches(&prev_sig) {
                 break;
@@ -995,7 +1018,7 @@ impl Analyzer {
                     false,
                 )
             });
-            self.harvest_returns_to_registry(app);
+            self.harvest_returns_to_registry(app, true);
         }
         // Effects are a function of the converged typed trees, not of
         // the fixpoint. Collecting inside every typing round walked
@@ -3413,8 +3436,8 @@ impl Analyzer {
     /// RBS-derived `Ty::Fn` is preserved — its return is already what
     /// dispatch resolves to via `unwrap_fn_ret`). Skip methods whose
     /// body is `Ty::Var` (no information gained).
-    fn harvest_returns_to_registry(&mut self, app: &App) {
-        self.harvest_method_returns(app);
+    fn harvest_returns_to_registry(&mut self, app: &App, harvest_tests: bool) {
+        self.harvest_method_returns(app, harvest_tests);
         // Rails' `helper_method :name` makes a controller (or concern)
         // method callable from templates. The names were ingested from
         // both spellings (`App::view_visible_controller_methods`); the
@@ -3503,7 +3526,7 @@ impl Analyzer {
         }
     }
 
-    fn harvest_method_returns(&mut self, app: &App) {
+    fn harvest_method_returns(&mut self, app: &App, harvest_tests: bool) {
         for model in &app.models {
             self.harvest_one_model(model);
         }
@@ -3528,15 +3551,17 @@ impl Analyzer {
                 Self::register_method_return(target, &method.name, ret.as_ref());
             }
         }
-        for module in &app.test_modules {
-            for method in &module.helpers {
-                let ret = self.method_return_ty(&module.name, method);
-                let class = self.classes.entry(module.name.clone()).or_default();
-                let table = match method.receiver {
-                    crate::dialect::MethodReceiver::Instance => &mut class.instance_methods,
-                    crate::dialect::MethodReceiver::Class => &mut class.class_methods,
-                };
-                Self::register_method_return(table, &method.name, ret.as_ref());
+        if harvest_tests {
+            for module in &app.test_modules {
+                for method in &module.helpers {
+                    let ret = self.method_return_ty(&module.name, method);
+                    let class = self.classes.entry(module.name.clone()).or_default();
+                    let table = match method.receiver {
+                        crate::dialect::MethodReceiver::Instance => &mut class.instance_methods,
+                        crate::dialect::MethodReceiver::Class => &mut class.class_methods,
+                    };
+                    Self::register_method_return(table, &method.name, ret.as_ref());
+                }
             }
         }
         // Controllers: harvest each action/helper method's return type so a
@@ -4003,7 +4028,7 @@ impl Analyzer {
     /// at a higher level — we work with structured `Ty` values rather
     /// than string fingerprints, so unification is direct: same type →
     /// keep; nil + T → T?; otherwise → union widen.
-    fn unify_params_from_call_sites(&mut self, app: &App) {
+    fn unify_params_from_call_sites(&mut self, app: &App, scope: UnifyScope) {
         // Rebuilt from scratch every fixpoint round. The table is pure
         // derived state — a function of the types the last typing pass
         // wrote onto the call-site argument expressions — and carrying
@@ -4032,8 +4057,8 @@ impl Analyzer {
             for method in model.methods() {
                 self.collect_send_sites(&method.body, Some(&model.name), helpers, &mut sites);
             }
-            for scope in model.scopes() {
-                self.collect_send_sites(&scope.body, Some(&model.name), helpers, &mut sites);
+            for scope_item in model.scopes() {
+                self.collect_send_sites(&scope_item.body, Some(&model.name), helpers, &mut sites);
             }
         }
         for lc in &app.library_classes {
@@ -4041,6 +4066,55 @@ impl Analyzer {
                 self.collect_send_sites(&method.body, Some(&lc.name), helpers, &mut sites);
             }
         }
+        for controller in &app.controllers {
+            for action in controller.actions() {
+                self.collect_send_sites(&action.body, Some(&controller.name), helpers, &mut sites);
+            }
+            for method in controller.class_methods() {
+                self.collect_send_sites(&method.body, Some(&controller.name), helpers, &mut sites);
+            }
+        }
+        if matches!(scope, UnifyScope::WithViews) {
+            for view in &app.views {
+                self.collect_send_sites(&view.body, None, helpers, &mut sites);
+            }
+            if let Some(seeds) = &app.seeds {
+                self.collect_send_sites(seeds, None, helpers, &mut sites);
+            }
+        }
+
+        self.apply_param_sites(sites, &params_by_method, &defined);
+        // Production signatures keep their production callers' shape.
+        // Fold before adding test-owned observations: a same-named test
+        // helper must not feed an included production concern either.
+        self.fold_concern_param_sites(app);
+    }
+
+    /// Replay production+view param observations, then overlay typed
+    /// test call sites. Test-only retype rounds do not walk view trees
+    /// again — those bodies did not change.
+    fn unify_test_params_onto(
+        &mut self,
+        app: &App,
+        snapshot: &HashMap<(ClassId, Symbol), Vec<Ty>>,
+    ) {
+        self.inferred_params.clone_from(snapshot);
+        self.overlay_test_params(app);
+    }
+
+    fn overlay_test_params(&mut self, app: &App) {
+        let helpers = &app.helper_method_index;
+        let params_by_method = Self::param_shapes(app);
+        let defined = Self::defined_methods(app);
+        let test_sites = self.collect_test_param_sites(app, helpers);
+        self.apply_param_sites(test_sites, &params_by_method, &defined);
+    }
+
+    fn collect_test_param_sites(
+        &self,
+        app: &App,
+        helpers: &HashMap<Symbol, ClassId>,
+    ) -> Vec<(ClassId, Symbol, Vec<Ty>, SiteKeywords)> {
         let mut test_sites = Vec::new();
         for module in &app.test_modules {
             if let Some(setup) = &module.setup {
@@ -4054,57 +4128,35 @@ impl Analyzer {
                 self.collect_send_sites(body, Some(&module.name), helpers, &mut test_sites);
             }
         }
-        let test_sites = test_sites.into_iter().filter_map(|(class, method, args, kwargs)| {
+        test_sites.into_iter().filter_map(|(class, method, args, kwargs)| {
             self.test_helper_owner(app, &class, &method)
                 .map(|owner| (owner, method, args, kwargs))
-        }).collect();
-        for controller in &app.controllers {
-            for action in controller.actions() {
-                self.collect_send_sites(&action.body, Some(&controller.name), helpers, &mut sites);
-            }
-            for method in controller.class_methods() {
-                self.collect_send_sites(&method.body, Some(&controller.name), helpers, &mut sites);
-            }
-        }
-        for view in &app.views {
-            self.collect_send_sites(&view.body, None, helpers, &mut sites);
-        }
-        if let Some(seeds) = &app.seeds {
-            self.collect_send_sites(seeds, None, helpers, &mut sites);
-        }
+        }).collect()
+    }
 
-        for (phase, sites) in [sites, test_sites].into_iter().enumerate() {
-            if phase == 1 {
-                // Production signatures keep their production callers' shape.
-                // Fold before adding test-owned observations: a same-named test
-                // helper must not feed an included production concern either.
-                self.fold_concern_param_sites(app);
+    fn apply_param_sites(
+        &mut self,
+        sites: Vec<(ClassId, Symbol, Vec<Ty>, SiteKeywords)>,
+        params_by_method: &HashMap<(ClassId, Symbol), ParamShape>,
+        defined: &BTreeSet<(ClassId, Symbol)>,
+    ) {
+        for (class_id, method, arg_tys, kw_tys) in sites {
+            let class_id = self.inherited_param_owner(defined, class_id, &method);
+            let arg_tys = Self::place_keyword_args(
+                params_by_method.get(&(class_id.clone(), method.clone())),
+                arg_tys,
+                kw_tys,
+            );
+            let arity = arg_tys.len();
+            let entry = self
+                .inferred_params
+                .entry((class_id.clone(), method.clone()))
+                .or_insert_with(|| (0..arity).map(|_| Ty::Var { var: crate::ident::TyVar(0) }).collect());
+            if entry.len() < arity {
+                entry.resize(arity, Ty::Var { var: crate::ident::TyVar(0) });
             }
-            for (class_id, method, arg_tys, kw_tys) in sites {
-                // Before the keywords are placed: the callee's shape is
-                // keyed to the class that defines it.
-                let class_id = self.inherited_param_owner(&defined, class_id, &method);
-                let arg_tys = Self::place_keyword_args(
-                    params_by_method.get(&(class_id.clone(), method.clone())),
-                    arg_tys,
-                    kw_tys,
-                );
-                // Cross-reference against MethodDef.params to know the
-                // arity. If the called method's params can't be located,
-                // still accumulate up to arg count under the same key —
-                // RBS-only methods don't have a MethodDef but do have an
-                // Fn signature, and inferred_params can extend either way.
-                let arity = arg_tys.len();
-                let entry = self
-                    .inferred_params
-                    .entry((class_id.clone(), method.clone()))
-                    .or_insert_with(|| (0..arity).map(|_| Ty::Var { var: crate::ident::TyVar(0) }).collect());
-                if entry.len() < arity {
-                    entry.resize(arity, Ty::Var { var: crate::ident::TyVar(0) });
-                }
-                for (slot, observed) in entry.iter_mut().zip(arg_tys.into_iter()) {
-                    *slot = unify_param_ty(slot.clone(), observed);
-                }
+            for (slot, observed) in entry.iter_mut().zip(arg_tys.into_iter()) {
+                *slot = unify_param_ty(slot.clone(), observed);
             }
         }
     }
