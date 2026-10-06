@@ -6368,15 +6368,6 @@ fn emit_library_class_decl_inner(
         }
     }
 
-    // Finite class-side initialization is lowered IR, not replay of a
-    // framework DSL. Each assignment runs once on this class object;
-    // unset subclasses deliberately keep their ivar absent.
-    for init in &lc.class_ivar_initializers {
-        for line in super::emit_expr(init).lines() {
-            writeln!(s, "{body_pad}{line}").unwrap();
-        }
-    }
-
     let mut first = true;
     for m in &lc.methods {
         if !first {
@@ -6413,6 +6404,19 @@ fn emit_library_class_decl_inner(
         };
         if let Some(directive) = directive {
             writeln!(s, "{body_pad}{directive} :{}", m.name).unwrap();
+        }
+    }
+
+    // Finite class-side initialization is lowered IR, not replay of a
+    // framework DSL. Each statement runs once on this class object, after
+    // the class methods it may call (a Concern macro writing its
+    // `class_attribute`); unset subclasses keep their ivar absent.
+    if !lc.class_ivar_initializers.is_empty() && !lc.methods.is_empty() {
+        writeln!(s).unwrap();
+    }
+    for init in &lc.class_ivar_initializers {
+        for line in super::emit_expr(init).lines() {
+            writeln!(s, "{body_pad}{line}").unwrap();
         }
     }
 

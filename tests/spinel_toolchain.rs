@@ -33,6 +33,8 @@ use roundhouse::ingest::ingest_app;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/class_attribute.rs"]
+mod class_attribute;
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
 #[path = "support/rails_root_join.rs"]
@@ -49,6 +51,15 @@ fn finite_concern_class_configuration_runs_natively() {
         run.assert_passes();
         assert!(run.stdout.contains("finite class configuration contract passed"));
     }
+}
+
+/// The native half of `emit_and_run::concern_class_attribute_macros_run_at_class_load`.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn concern_class_attribute_macros_run_at_class_load_natively() {
+    let run = class_attribute::overlay().run_spinel(class_attribute::ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("class_attribute contract passed"));
 }
 
 /// The native half of `emit_and_run::rails_root_join_takes_any_number_of_parts`:

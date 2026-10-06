@@ -1122,12 +1122,15 @@ impl Controller {
     }
 }
 
-/// The two method forms admitted by finite class configuration.
+/// The two method forms admitted by finite class configuration, plus
+/// `ClassAttribute`: a Concern class method copied onto its includer
+/// that reads or writes a `class_attribute` (`ingest::class_attribute`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClassConfigurationRole {
     Writer,
     Reader,
+    ClassAttribute,
 }
 
 /// One statement inside a controller class body, in source order.

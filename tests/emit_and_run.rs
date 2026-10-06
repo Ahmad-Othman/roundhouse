@@ -7,6 +7,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/class_attribute.rs"]
+mod class_attribute;
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
 #[path = "support/data_factory.rs"]
@@ -109,6 +111,15 @@ fn finite_concern_class_configuration_runs_without_replaying_rails() {
         run.assert_passes();
         assert!(run.stdout.contains("finite class configuration contract passed"));
     }
+}
+
+/// A Concern macro that writes a `class_attribute` runs when the
+/// includer loads, rather than being evaluated at compile time.
+#[test]
+fn concern_class_attribute_macros_run_at_class_load() {
+    let run = class_attribute::overlay().run_ruby(class_attribute::ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("class_attribute contract passed"));
 }
 
 /// The harness itself: the unedited blog emits and its controller
