@@ -509,16 +509,16 @@ class BaseTest < Minitest::Test
   end
 
   def test_group_count_distinct_counts_distinct_ids_per_group
-    2.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    2.times { it = Item.new; it.title = "T0"; it.save() }
     rel = ActiveRecord::Relation.new(Item)
       .joins("INNER JOIN items AS copies ON copies.title = items.title")
       .group("items.title")
-    assert_equal 2, rel.group_count["T0"]
+    assert_equal 4, rel.group_count["T0"]
     distinct = ActiveRecord::Relation.new(Item)
       .joins("INNER JOIN items AS copies ON copies.title = items.title")
       .group("items.title")
       .distinct
-    assert_equal 1, distinct.group_count["T0"]
+    assert_equal 2, distinct.group_count["T0"]
   end
 
   def test_scalar_count_on_grouped_relation_counts_groups
