@@ -395,8 +395,9 @@ pub enum Association {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<Expr>,
         /// `autosave: true` — persist a built/assigned child after the
-        /// owner saves. Default false, matching Rails. Carried on IR;
-        /// has_one autosave lowering is still a separate claim.
+        /// owner saves. Default false, matching Rails. When true, the
+        /// shared lowerer stashes via the writer and folds an
+        /// `after_save` that stamps the FK (and `as:` type) then saves.
         #[serde(default, skip_serializing_if = "is_false")]
         autosave: bool,
     },

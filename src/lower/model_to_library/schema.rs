@@ -2782,13 +2782,38 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
         stmts.push(guard_unless_nil(lookup, assign));
     }
 
-    // has_many eager-load cache fields (issue #27): initialize each
-    // `@<assoc>_cache = [] of <Target>` + `@<assoc>_loaded = false` so
-    // the cache-aware reader's `@cache` reads/returns are non-nilable in
-    // strict targets (Crystal types an ivar nilable unless it's assigned
-    // in every initialize path). Harmless on dynamic targets. Mirrors the
-    // ivar names in `associations::cache_ivar` / `loaded_ivar`.
+    // has_many / has_one eager-load cache fields (issue #27): initialize
+    // each `@<assoc>_cache` + `@<assoc>_loaded = false` so the
+    // cache-aware reader's `@cache` reads are assigned on every
+    // initialize path (Crystal). has_many gets `[] of <Target>`;
+    // has_one gets `nil` (single record or absent). Harmless on dynamic
+    // targets. Mirrors `associations::cache_ivar` / `loaded_ivar`.
     for assoc in model.associations() {
+        if let Association::HasOne { name, .. } = assoc {
+            stmts.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: LValue::Ivar { name: Symbol::from(format!("{}_cache", name.as_str())) },
+                    value: with_ty(nil_lit(), Ty::Nil),
+                },
+            ));
+            let false_lit = {
+                let mut e = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Bool { value: false } },
+                );
+                e.ty = Some(Ty::Bool);
+                e
+            };
+            stmts.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: LValue::Ivar { name: Symbol::from(format!("{}_loaded", name.as_str())) },
+                    value: false_lit,
+                },
+            ));
+            continue;
+        }
         if let Association::HasMany { name, target, through, .. } = assoc {
             // `has_many :through` collection writers stage into the
             // cache and flag the join rows stale — init the flag on
