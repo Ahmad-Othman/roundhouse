@@ -499,6 +499,179 @@ fn named_binds_reach_the_query_on_spinel() {
     named_binds_app().run_spinel(&script).assert_passes();
 }
 
+/// `sanitize_sql_array` is the documented array-form entry point (#400).
+fn sanitize_sql_array_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def self.quoted(value)
+    ActiveRecord::Base.sanitize_sql_array(["SELECT ? AS v", value])
+  end
+end
+"#,
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/widgets\", to: \"widgets#index\"\nend\n",
+        )
+        .write(
+            "app/controllers/widgets_controller.rb",
+            r##"class WidgetsController < ApplicationController
+  def index
+    render plain: Widget.quoted(1)
+  end
+end
+"##,
+        )
+}
+
+#[test]
+fn sanitize_sql_array_is_supported() {
+    sanitize_sql_array_app()
+        .run_ruby(
+            r#"
+require_relative "app/controllers/widgets_controller"
+sql = Widget.quoted(1)
+raise "sanitize_sql_array: #{sql.inspect}" unless sql == "SELECT 1 AS v"
+controller = WidgetsController.new
+controller.process_action(:index)
+raise "controller: #{controller.body}" unless controller.body == "SELECT 1 AS v"
+puts "sanitize_sql_array passed"
+"#,
+        )
+        .assert_passes();
+}
+
+/// Relation#ids must preserve uuid / named string keys (#310).
+fn relation_ids_uuid_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "widgets", id: :uuid, force: :cascade do |t|
+    t.string "name"
+    t.boolean "active", default: true
+  end
+end
+"#,
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/widget_ids\", to: \"widgets#ids\"\nend\n",
+        )
+        .write(
+            "app/controllers/widgets_controller.rb",
+            r##"class WidgetsController < ApplicationController
+  def ids
+    render plain: Widget.where(active: true).ids.join(",")
+  end
+end
+"##,
+        )
+}
+
+#[test]
+fn relation_ids_preserves_uuid_keys() {
+    relation_ids_uuid_app()
+        .run_ruby(
+            r#"
+require_relative "app/controllers/widgets_controller"
+uid = "44444444-4444-4444-8444-444444444441"
+Widget.create!(id: uid, name: "a", active: true)
+controller = WidgetsController.new
+controller.process_action(:ids)
+raise "uuid ids: #{controller.body.inspect}" unless controller.body == uid
+puts "relation ids uuid passed"
+"#,
+        )
+        .assert_passes();
+}
+
+/// Writebook-shaped `ActionText::Markdown < Record` under `module ActionText`
+/// in `lib/` is an ordinary model (table `action_text_markdowns`, attr
+/// `content`). Storage-only — does not claim `has_markdown`.
+#[test]
+fn action_text_markdown_saves_and_reloads_content() {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define(version: 1) do
+  create_table "action_text_markdowns", force: :cascade do |t|
+    t.text "content"
+    t.string "name", null: false
+    t.bigint "record_id", null: false
+    t.string "record_type", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+  end
+end
+"#,
+        )
+        .write(
+            "lib/rails_ext/action_text_markdown.rb",
+            r#"module ActionText
+  class Markdown < Record
+    belongs_to :record, polymorphic: true
+  end
+end
+"#,
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        )
+        .run_ruby(
+            r##"
+m = ActionText::Markdown.new
+m.content = "# Hello"
+m.name = "body"
+m.record_type = "Article"
+m.record_id = 1
+m.save!
+reloaded = ActionText::Markdown.find(m.id)
+raise "content lost: #{reloaded.content.inspect}" unless reloaded.content == "# Hello"
+raise "name lost: #{reloaded.name.inspect}" unless reloaded.name == "body"
+puts "action_text markdown storage passed"
+"##,
+        )
+        .assert_passes();
+}
+
 /// Rails 7.2's query assertions and the notification they are built on,
 /// over the runtime's statement capture, with `connection.select_rows`
 /// answering Arrays: campfire's tests count queries, assert none match a

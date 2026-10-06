@@ -57,7 +57,12 @@ module ActiveRecord
     def with_recursive(ctes)
       @records = nil
       ctes.each do |name, parts|
-        @ctes << "#{name} AS (#{parts.map { |p| p.to_sql }.join(" UNION ALL ")})"
+        # Build the UNION list with pushes rather than `map.join`: the
+        # body typer's Array#map still returns Untyped, so the join
+        # terminal would stay Ty::Var under RBS-seeded typing.
+        sql_parts = []
+        parts.each { |p| sql_parts << p.to_sql }
+        @ctes << "#{name} AS (#{sql_parts.join(" UNION ALL ")})"
       end
       self
     end
@@ -818,7 +823,7 @@ module ActiveRecord
     # projection `select(*specs)` above monomorphic.
     def filter
       out = []
-      to_a.each { |x| out << x if yield x }
+      loaded_records.each { |x| out << x if yield x }
       out
     end
 
@@ -910,7 +915,7 @@ module ActiveRecord
     # contract; lobsters keys tag filters by id).
     def index_by
       h = {}
-      to_a.each { |x| h[yield x] = x }
+      loaded_records.each { |x| h[yield x] = x }
       h
     end
 
@@ -928,8 +933,11 @@ module ActiveRecord
       self
     end
 
+    # Via loaded_records (not to_a): no shallow Array copy of the
+    # memoized rows. to_a keeps its Rails dup contract for callers that
+    # mutate the returned array.
     def map
-      to_a.map { |x| yield x }
+      loaded_records.map { |x| yield x }
     end
 
     # `collect` is Enumerable's second name for `map`, and Rails
@@ -940,7 +948,7 @@ module ActiveRecord
     # definition, not an alias, and a body forwarding to `map` would
     # have to forward the block too.
     def collect
-      to_a.map { |x| yield x }
+      loaded_records.map { |x| yield x }
     end
 
     # `group_by { |rec| key }` — Enumerable's grouping over the
@@ -950,7 +958,7 @@ module ActiveRecord
     # `[]=`-chaining on a maybe-missing key.
     def group_by
       out = {}
-      to_a.each do |rec|
+      loaded_records.each do |rec|
         k = yield rec
         arr = out.fetch(k, nil)
         if arr.nil?
@@ -967,7 +975,7 @@ module ActiveRecord
     # writes `@administrators, @members = users.partition(&:administrator?)`
     # straight off a `User.where(...)`.
     def partition
-      to_a.partition { |x| yield x }
+      loaded_records.partition { |x| yield x }
     end
 
     # `detect { |r| … }` — Enumerable's first match, nil when none.
@@ -1203,7 +1211,7 @@ module ActiveRecord
     # call-sites treat it as the array Rails hands back).
     def all?
       ok = true
-      to_a.each { |x| ok = false unless yield x }
+      loaded_records.each { |x| ok = false unless yield x }
       ok
     end
 
@@ -1247,7 +1255,7 @@ module ActiveRecord
     end
 
     def length
-      to_a.length
+      loaded_records.length
     end
 
     # Rails' `Relation#size`: length when loaded; COUNT when unloaded
@@ -1407,13 +1415,16 @@ module ActiveRecord
       rows.length == 0 ? nil : rows[0]
     end
 
-    # `ids` — primary keys, as integers.
+    # `ids` — primary keys, cast through the model's key type. Reads
+    # `@model.primary_key` (not a hard-coded `id` column) and casts the
+    # way `find` does, so uuid / string keys survive (#310).
     def ids
       prior = @select_sql
-      @select_sql = "#{@table}.id AS v"
+      key = @model.primary_key
+      @select_sql = "#{@table}.#{key} AS v"
       rows = ActiveRecord.adapter.select_rows(to_sql)
       @select_sql = prior
-      rows.map { |row| row["v"].to_i }
+      rows.map { |row| @model._cast_primary_key(row["v"]) }
     end
 
     # `find(id)` — the row with that primary key, RAISING
@@ -1605,11 +1616,56 @@ module ActiveRecord
       sql
     end
 
-    def count_sql
-      sql = "#{cte_prefix}SELECT COUNT(*) AS n FROM #{from_source}"
+    # JOIN + WHERE only — shared by count_sql / exists_sql so DISTINCT
+    # and GROUP arms do not re-paste the ladder.
+    def append_join_where(sql)
       sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
       sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
       sql
+    end
+
+    def append_group_having(sql)
+      sql = "#{sql} GROUP BY #{@groups.join(", ")}" if @groups.length > 0
+      sql = "#{sql} HAVING #{@havings.join(" AND ")}" if @havings.length > 0
+      sql
+    end
+
+    def count_sql
+      # DISTINCT / GROUP BY must count the result-set shape, not the
+      # underlying rows (#343). Mirror exists_sql's DISTINCT-pk
+      # discipline; scalar `count` on a grouped relation counts groups
+      # (Hash form is `group_count`). LIMIT/OFFSET stay off total_count.
+      if !@groups.empty?
+        # Keep an explicit projection so HAVING can name selected
+        # aliases (`select("COUNT(*) AS n").having("n > 1")`).
+        cols = @select_sql.nil? ? "1 AS one" : @select_sql
+        dist = @distinct ? "DISTINCT " : ""
+        inner = append_group_having(
+          append_join_where("#{cte_prefix}SELECT #{dist}#{cols} FROM #{from_source}")
+        )
+        return "SELECT COUNT(*) AS n FROM (#{inner}) AS __rh_count"
+      end
+      if @distinct
+        # `select(:title).distinct.count` counts distinct titles, not pks.
+        # When `from(...)` replaces the model table, drop the model-table
+        # qualifier so the key projects from the active FROM source.
+        cols = if !@select_sql.nil?
+          @select_sql
+        elsif @from.nil?
+          "#{@table}.#{@model.primary_key}"
+        elsif @joins.length > 0
+          # Bare pk is ambiguous once another joined table also has
+          # that column (`from("parents").joins(...).distinct.count`).
+          "#{from_source}.#{@model.primary_key}"
+        else
+          @model.primary_key.to_s
+        end
+        inner = append_join_where(
+          "#{cte_prefix}SELECT DISTINCT #{cols} FROM #{from_source}"
+        )
+        return "SELECT COUNT(*) AS n FROM (#{inner}) AS __rh_count"
+      end
+      append_join_where("#{cte_prefix}SELECT COUNT(*) AS n FROM #{from_source}")
     end
 
     # `SELECT 1 AS one … LIMIT n` for existence probes. Drops ORDER BY
@@ -1623,11 +1679,9 @@ module ActiveRecord
       else
         "1 AS one"
       end
-      sql = "#{cte_prefix}SELECT #{cols} FROM #{from_source}"
-      sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
-      sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
-      sql = "#{sql} GROUP BY #{@groups.join(", ")}" if @groups.length > 0
-      sql = "#{sql} HAVING #{@havings.join(" AND ")}" if @havings.length > 0
+      sql = append_group_having(
+        append_join_where("#{cte_prefix}SELECT #{cols} FROM #{from_source}")
+      )
       # Respect an existing relation LIMIT: many?/one? on limit(1) must
       # not look past the window.
       lim = n

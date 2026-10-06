@@ -403,6 +403,93 @@ class BaseTest < Minitest::Test
     assert ActiveRecord::Relation.new(Item).where(title: "T0").distinct.one?
   end
 
+  def test_relation_distinct_count_counts_distinct_pks
+    5.times { |i| it = Item.new; it.title = "T#{i % 2}"; it.save() }
+    # Five rows, two title values. Distinct on primary key is still 5 —
+    # count_sql must not answer the underlying non-distinct row total
+    # via a bare COUNT(*) that ignores DISTINCT (#343).
+    assert_equal 5, ActiveRecord::Relation.new(Item).distinct.count
+    sql = ActiveRecord::Relation.new(Item).distinct.count_sql
+    assert_match(/DISTINCT/, sql)
+    assert_match(/__rh_count/, sql)
+  end
+
+  def test_relation_select_distinct_count_uses_projection
+    5.times { |i| it = Item.new; it.title = "T#{i % 2}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item).select("title").distinct
+    assert_equal 2, rel.count
+    sql = rel.count_sql
+    assert_match(/DISTINCT/, sql)
+    assert_match(/title/, sql)
+  end
+
+  def test_relation_grouped_count_sql_counts_groups
+    4.times { |i| it = Item.new; it.title = "T#{i % 2}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item).group("title")
+    sql = rel.count_sql
+    assert_match(/GROUP BY/, sql)
+    assert_match(/__rh_count/, sql)
+    assert_equal 2, rel.count
+  end
+
+  def test_relation_grouped_count_sql_keeps_select_aliases
+    rel = ActiveRecord::Relation.new(Item)
+      .select("title, COUNT(*) AS n")
+      .group("title")
+      .having("n > 1")
+    sql = rel.count_sql
+    assert_match(/COUNT\(\*\) AS n/, sql)
+    assert_match(/HAVING/, sql)
+  end
+
+  def test_sanitize_sql_preserves_question_marks_in_quotes
+    sql = ActiveRecord::Base.sanitize_sql_array(
+      ["SELECT '?' AS marker, ? AS value", 42]
+    )
+    assert_equal "SELECT '?' AS marker, 42 AS value", sql
+  end
+
+  def test_sanitize_sql_backslash_is_literal_in_sqlite_quotes
+    # SQLite: backslash does not escape; the second `'` closes the string.
+    sql = ActiveRecord::Base.sanitize_sql_array(
+      ["SELECT '\\' AS slash, ? AS value", 42]
+    )
+    assert_equal "SELECT '\\' AS slash, 42 AS value", sql
+  end
+
+  def test_relation_grouped_distinct_count_sql_keeps_distinct
+    rel = ActiveRecord::Relation.new(Item)
+      .select("title")
+      .group("title")
+      .distinct
+    sql = rel.count_sql
+    assert_match(/DISTINCT/, sql)
+    assert_match(/GROUP BY/, sql)
+  end
+
+  def test_relation_from_distinct_count_sql_uses_bare_primary_key
+    rel = ActiveRecord::Relation.new(Item).from("parents").distinct
+    sql = rel.count_sql
+    assert_match(/FROM parents/, sql)
+    refute_match(/items\.id/, sql)
+    assert_match(/DISTINCT id/, sql)
+  end
+
+  def test_relation_from_joined_distinct_count_qualifies_primary_key
+    Db.exec("CREATE TABLE parents (id INTEGER PRIMARY KEY, title TEXT)")
+    Db.exec("CREATE TABLE children (id INTEGER PRIMARY KEY, parent_id INTEGER, title TEXT)")
+    Db.exec("INSERT INTO parents (id, title) VALUES (1, 'P')")
+    Db.exec("INSERT INTO children (id, parent_id, title) VALUES (10, 1, 'C')")
+    rel = ActiveRecord::Relation.new(Item)
+      .from("parents")
+      .joins("INNER JOIN children ON children.parent_id = parents.id")
+      .distinct
+    sql = rel.count_sql
+    assert_match(/DISTINCT parents\.id/, sql)
+    refute_match(/DISTINCT id FROM/, sql)
+    assert_equal 1, rel.count
+  end
+
   def test_relation_each_does_not_rehydrate_and_returns_self
     it = Item.new; it.title = "A"; it.save()
     rel = ActiveRecord::Relation.new(Item)

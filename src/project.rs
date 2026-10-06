@@ -674,6 +674,80 @@ fn widen_key_contract(app: &App, files: &mut [(String, String)]) -> Result<(), S
         }
         *text = text.replace(narrow, wide);
     }
+    // Relation#ids reads the primary key; string/uuid apps need the
+    // same widened element type Spinel sees on Base#id (#310).
+    let Some((_, relation)) =
+        files.iter_mut().find(|(p, _)| p == "sig/runtime/active_record/relation.rbs")
+    else {
+        return Err(
+            "widen_key_contract: sig/runtime/active_record/relation.rbs not in the tree".into(),
+        );
+    };
+    let ids_narrow = "    def ids: () -> Array[Integer]\n";
+    let ids_wide = "    def ids: () -> Array[Integer | String]\n";
+    if !relation.contains(ids_narrow) {
+        return Err(format!(
+            "widen_key_contract: relation.rbs no longer declares {ids_narrow:?}"
+        ));
+    }
+    *relation = relation.replace(ids_narrow, ids_wide);
+    Ok(())
+}
+
+/// Spinel treats RBS `Base` as an *instance* (`sp_ActiveRecord__Base *`).
+/// Shared `relation.rbs` uses `Base` in two places Roundhouse needs for
+/// Bar A/B; both are rewritten on the Spinel tree only:
+///
+/// 1. `initialize: (Base model)` — callers pass a **class** (`User`,
+///    `self` in a class method). Spinel rejects that as a Base instance.
+/// 2. Terminals (`first` / `find_by` / …) returning `Base` / `Base?` —
+///    callers expect a concrete model (`User*`); Spinel will not convert
+///    Base → User.
+fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<(), String> {
+    let idx = files
+        .iter()
+        .position(|(p, _)| {
+            p == "sig/runtime/active_record/relation.rbs"
+                || p == "runtime/active_record/relation.rbs"
+        })
+        .ok_or_else(|| {
+            "spinel_relation_model_handle: active_record/relation.rbs not in the tree".to_string()
+        })?;
+    let relation = &mut files[idx].1;
+    let replacements = [
+        (
+            "    def initialize: (Base model) -> void\n",
+            "    def initialize: (untyped model) -> void\n",
+        ),
+        ("    def first: () -> Base?\n", "    def first: () -> untyped\n"),
+        ("    def take: () -> Base?\n", "    def take: () -> untyped\n"),
+        ("    def first!: () -> Base\n", "    def first!: () -> untyped\n"),
+        ("    def last: () -> Base?\n", "    def last: () -> untyped\n"),
+        (
+            "    def find_by: (untyped conditions) -> Base?\n",
+            "    def find_by: (untyped conditions) -> untyped\n",
+        ),
+        (
+            "    def find_by!: (untyped conditions) -> Base\n",
+            "    def find_by!: (untyped conditions) -> untyped\n",
+        ),
+        (
+            "    def first_or_initialize: () -> Base\n",
+            "    def first_or_initialize: () -> untyped\n",
+        ),
+        (
+            "    def find_or_create_by: (Hash[Symbol, untyped] conditions) -> Base\n",
+            "    def find_or_create_by: (Hash[Symbol, untyped] conditions) -> untyped\n",
+        ),
+    ];
+    for (narrow, wide) in replacements {
+        if !relation.contains(narrow) {
+            return Err(format!(
+                "spinel_relation_model_handle: relation.rbs no longer declares {narrow:?}"
+            ));
+        }
+        *relation = relation.replace(narrow, wide);
+    }
     Ok(())
 }
 
@@ -1106,7 +1180,10 @@ pub fn target_files(
     }
     let files = crate::timings::phase(format_args!("emit {}: assemble", target.as_str()), || match target {
         BuildTarget::Blog => blog_files(fixture),
-        BuildTarget::Spinel => spinel_files(app, fixture).and_then(|(files, _)| spin_shape(files)),
+        BuildTarget::Spinel => spinel_files(app, fixture).and_then(|(mut files, _)| {
+            spinel_relation_model_handle(&mut files)?;
+            spin_shape(files)
+        }),
         // The ruby family gets the bundled-library requires too: the
         // table used to live inside `spin_shape` and so reached only
         // the spinel tree, which cost campfire two test files on a
@@ -3586,6 +3663,7 @@ pub fn spinel_base_files(app: &App, fixture: &Path) -> Result<Vec<(String, Strin
     // same code. Idempotent: the gap scan skips a file that already
     // requires the library, so `spin_shape` running it again is inert.
     let (mut files, _) = spinel_files(app, fixture)?;
+    spinel_relation_model_handle(&mut files)?;
 
     write_bundled_requires(&mut files);
     Ok(files)
@@ -4106,6 +4184,9 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         )?;
     }
     widen_key_contract(app, &mut files)?;
+    // Relation Base→untyped rewrite is Spinel-only (see
+    // `spinel_relation_model_handle` call sites). `ruby_family_runtime_files`
+    // shares this tree and must keep Base for CRuby/JRuby Bar A/B.
     for stem in [
         "rails",
         "active_record",
@@ -8075,6 +8156,59 @@ mod tests {
             "delivered:e \"\"",
             "stderr={}",
             String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Shared relation.rbs types `initialize` / terminals as `Base` for
+    /// Roundhouse Bar A/B; Spinel emit must rewrite those to `untyped`
+    /// or campfire AOT rejects class handles and User* slots.
+    #[test]
+    fn spinel_emit_rewrites_relation_base_handle_to_untyped() {
+        let fixture = Path::new("fixtures/tiny-blog");
+        if !fixture.is_dir() {
+            eprintln!("skip: fixtures/tiny-blog absent");
+            return;
+        }
+        let app = crate::ingest::ingest_app(fixture).expect("ingest tiny-blog");
+        let files = spinel_base_files(&app, fixture).expect("spinel base files");
+        let relation = files
+            .iter()
+            .find(|(p, _)| p.ends_with("active_record/relation.rbs"))
+            .map(|(_, c)| c.as_str())
+            .expect("relation.rbs in spinel tree");
+        assert!(
+            relation.contains("def initialize: (untyped model) -> void"),
+            "Spinel must not keep initialize:(Base): {relation}"
+        );
+        assert!(
+            relation.contains("def first: () -> untyped"),
+            "Spinel must not keep first:()->Base?: {relation}"
+        );
+        assert!(
+            relation.contains("def find_by: (untyped conditions) -> untyped"),
+            "Spinel must not keep find_by:()->Base?: {relation}"
+        );
+        // Shared source still spells Base for Roundhouse Bar B.
+        let shared = crate::runtime_files::read_to_string("runtime/ruby/active_record/relation.rbs")
+            .expect("shared relation.rbs");
+        assert!(
+            shared.contains("def initialize: (Base model) -> void"),
+            "shared relation.rbs must keep Base for Bar A/B"
+        );
+        // CRuby/JRuby share `spinel_files` but must NOT get the rewrite.
+        let ruby = ruby_runtime_files(&app, fixture).expect("ruby runtime files");
+        let ruby_relation = ruby
+            .iter()
+            .find(|(p, _)| p.ends_with("active_record/relation.rbs"))
+            .map(|(_, c)| c.as_str())
+            .expect("relation.rbs in ruby tree");
+        assert!(
+            ruby_relation.contains("def initialize: (Base model) -> void"),
+            "CRuby relation.rbs must keep Base: {ruby_relation}"
+        );
+        assert!(
+            ruby_relation.contains("def first: () -> Base?"),
+            "CRuby relation.rbs must keep first:()->Base?: {ruby_relation}"
         );
     }
 }

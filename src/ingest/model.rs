@@ -83,7 +83,8 @@ pub fn ingest_model(
     let mut constants = EnumConstants::default();
     constants.record(source, file);
     constants.finish();
-    ingest_model_with_enum_constants(source, file, schema, prefixes, &constants)
+    let bases = super::library_class::ModelBases::new();
+    ingest_model_with_enum_constants(source, file, schema, prefixes, &constants, &bases)
 }
 
 pub(super) fn ingest_model_with_enum_constants(
@@ -92,6 +93,7 @@ pub(super) fn ingest_model_with_enum_constants(
     schema: &Schema,
     prefixes: &TablePrefixes,
     enum_constants: &EnumConstants,
+    model_bases: &super::library_class::ModelBases,
 ) -> IngestResult<Option<Model>> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
@@ -114,7 +116,7 @@ pub(super) fn ingest_model_with_enum_constants(
     let enum_owners = enum_constants.nesting
         .get(&(file.to_string(), class.location().start_offset()))
         .cloned().unwrap_or_default();
-    let mut name_path = scope;
+    let mut name_path = scope.clone();
     name_path.extend(class_name_path(&class).ok_or_else(|| IngestError::Unsupported {
         file: file.into(),
         message: "model class name must be a simple constant or path".into(),
@@ -347,7 +349,10 @@ pub(super) fn ingest_model_with_enum_constants(
     }
 
     let parent = class.superclass().and_then(|n| {
-        constant_path_of(&n).map(|p| ClassId(Symbol::from(p.join("::"))))
+        constant_path_of(&n).map(|p| {
+            let resolved = model_bases.resolve_superclass(&scope, &p);
+            ClassId(Symbol::from(model_bases.emit_superclass(&resolved)))
+        })
     });
 
     let class_loc = class.location();
@@ -445,6 +450,105 @@ pub(super) fn ingest_model_body_items(
                         span,
                     })
                     .collect());
+            }
+            // `cattr_*` / `mattr_*` — class-attribute expansion library
+            // ingest already applies. Models that carry class attrs
+            // (Writebook `ActionText::Markdown.mattr_accessor :renderer`)
+            // must synthesize the singleton reader/writer or `to_html`
+            // and inventory resolve as unresolved `renderer`.
+            //
+            // Plain `attr_*` stays Unknown here on purpose: concern
+            // `included` blocks share this walker, and
+            // `concern_accessors::{is_candidate,is_supported}` plus
+            // visibility's `included_has_accessor` gate all match the
+            // raw `attr_accessor` Send — expanding those into Method
+            // items made `included_has_accessor` false (so `private;`
+            // inside `included` hard-failed ingest) and dropped
+            // concern virtual accessors from the splice.
+            if matches!(
+                name.as_str(),
+                "cattr_reader"
+                    | "cattr_writer"
+                    | "cattr_accessor"
+                    | "mattr_reader"
+                    | "mattr_writer"
+                    | "mattr_accessor"
+            ) {
+                let mut names: Vec<Symbol> = Vec::new();
+                let mut has_options = call.block().is_some();
+                if let Some(args) = call.arguments() {
+                    for arg in args.arguments().iter() {
+                        if let Some(s) = symbol_value(&arg) {
+                            names.push(Symbol::from(s));
+                        } else {
+                            // `default:` / other kwargs are not modeled —
+                            // partial expansion would drop the initializer.
+                            has_options = true;
+                        }
+                    }
+                }
+                // Writebook uses `mattr_accessor :renderer, default:` and
+                // `cattr_accessor :preview_renderer do`. Expanding those
+                // would drop the initializer; erroring rewrote inventory
+                // Errors into ingest-gap Infos. Leave the Send unknown.
+                if has_options {
+                    // fall through to ingest_model_body_item
+                } else {
+                let want_reader =
+                    name.ends_with("_reader") || name.ends_with("_accessor");
+                let want_writer =
+                    name.ends_with("_writer") || name.ends_with("_accessor");
+                let mut out = Vec::new();
+                for (i, attr) in names.iter().enumerate() {
+                    let lead = if i == 0 {
+                        leading_comments.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    // mattr/cattr: class accessors plus instance accessors
+                    // that share the same @ivar storage approximation used
+                    // by library ingest (Rails instance copies read the
+                    // class attribute; here both sides use the ivar).
+                    let receivers = [
+                        crate::dialect::MethodReceiver::Class,
+                        crate::dialect::MethodReceiver::Instance,
+                    ];
+                    let mut first_method = true;
+                    for &recv in &receivers {
+                        if want_reader {
+                            out.push(ModelBodyItem::Method {
+                                method: super::library_class::synth_attr_reader(
+                                    owner, attr, recv,
+                                ),
+                                leading_comments: if first_method {
+                                    lead.clone()
+                                } else {
+                                    Vec::new()
+                                },
+                                leading_blank_line: false,
+                            });
+                            first_method = false;
+                        }
+                        if want_writer {
+                            out.push(ModelBodyItem::Method {
+                                method: super::library_class::synth_attr_writer(
+                                    owner, attr, recv,
+                                ),
+                                leading_comments: if first_method {
+                                    lead.clone()
+                                } else {
+                                    Vec::new()
+                                },
+                                leading_blank_line: false,
+                            });
+                            first_method = false;
+                        }
+                    }
+                }
+                if !out.is_empty() {
+                    return Ok(out);
+                }
+                }
             }
         }
     }

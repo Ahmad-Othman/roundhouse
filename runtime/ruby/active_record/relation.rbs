@@ -4,9 +4,23 @@ module ActiveRecord
   # type is `untyped` in v1 — the lowered model methods carry the model
   # identity; per-element typing is a later (generic-Relation) refinement.
   class Relation
-    def initialize: (untyped model) -> void
+    # Model handle is `Base` (class object collapsed onto `Ty::Class{Base}`
+    # in send.rs). Do not spell `Class` — that leaves `@model` as Ty::Var
+    # and breaks Bar A. Spinel's emit rewrites this parameter to
+    # `untyped` (`spinel_relation_model_handle`): Spinel treats `Base` as
+    # an instance (`sp_ActiveRecord__Base *`), so `Relation.new(User)`
+    # would otherwise fail campfire AOT.
+    def initialize: (Base model) -> void
 
     def where: (?untyped condition, *untyped args) -> Relation
+
+    # Query ivars the body reads after builders write them. Declared so
+    # probes / RBS-seeded typing do not freeze on `initialize`'s `nil`
+    # assignment (first-write harvest) and leave `page` / `current_page`
+    # / loaded Enumerable terminals as Ty::Var.
+    @limit: Integer?
+    @offset: Integer?
+    @records: Array[untyped]?
 
     @from: String?
     @ctes: Array[String]
@@ -30,18 +44,19 @@ module ActiveRecord
     def add_condition: (untyped condition, Array[untyped] args, bool negate) -> bool
     def order: (*untyped parts) -> Relation
     # The in-memory sort `order` applies to a LOADED relation (see the
-    # .rb). `sorted` is `untyped` for the same reason `preloaded`'s
-    # `records` is: the body only indexes and assigns into it.
-    def sort_in_place!: (untyped sorted, Array[String] terms) -> bool
+    # .rb). Element type stays untyped until Relation[T]; the array
+    # representation is honest — only index/length/map appear here
+    # (unlike `preloaded`, which must stay bare for Spinel integer seeds).
+    def sort_in_place!: (Array[untyped] sorted, Array[String] terms) -> bool
     def order_column: (String term) -> String?
     def order_descending?: (String term) -> bool
     def reverse_order_term: (String term) -> String
     def reverse_one_order_term: (String term) -> String
-    def loaded_tail: (untyped loaded, Integer n) -> Array[untyped]
+    def loaded_tail: (Array[untyped] loaded, Integer n) -> Array[untyped]
     # The keys are whatever the ordered column holds, and `<=>` on two
     # of them is an Integer or nil -- the only honest spellings.
     def compare_order_keys: (untyped a, untyped b) -> Integer?
-    def order_key_of: (untyped record, String col) -> untyped
+    def order_key_of: (Base record, String col) -> untyped
     def where!: (?untyped condition, *untyped args) -> Relation
     def order!: (*untyped parts) -> Relation
     def reorder: (*untyped parts) -> Relation
@@ -127,7 +142,7 @@ module ActiveRecord
     def operand_ids: (untyped other) -> Array[untyped]
     def ids_of: (Array[untyped] records) -> Array[untyped]
     def id_filter: (Array[untyped] records, Array[untyped] ids, bool keep) -> Array[untyped]
-    def include?: (untyped record) -> bool
+    def include?: (Base? record) -> bool
     def each: () { (untyped) -> void } -> Relation
     def index_by: () { (untyped) -> untyped } -> Hash[untyped, untyped]
     def find_each: () { (untyped) -> void } -> Relation
@@ -145,10 +160,10 @@ module ActiveRecord
     def sort_by: () { (untyped) -> untyped } -> Array[untyped]
     def inject: (untyped initial) { (untyped, untyped) -> untyped } -> untyped
     def each_with_object: (untyped memo) { (untyped, untyped) -> untyped } -> untyped
-    def first: () -> untyped
-    def take: () -> untyped
-    def first!: () -> untyped
-    def last: () -> untyped
+    def first: () -> Base?
+    def take: () -> Base?
+    def first!: () -> Base
+    def last: () -> Base?
     def first_n: (Integer n) -> Array[untyped]
     def last_n: (Integer n) -> Array[untyped]
     def count: () -> Integer
@@ -190,22 +205,24 @@ module ActiveRecord
     #
     # `untyped` is the honest type at this level: the column's type is
     # not knowable from `Relation`. Typing it precisely means the
-    # lowerer monomorphizing per call site from the schema, the way
-    # `ids` below can be Array[Integer] because it only ever reads a
-    # primary key.
+    # lowerer monomorphizing per call site from the schema.
+    # `ids` is Array[Integer] for integer-key apps; string/uuid apps
+    # widen it via `project::widen_key_contract` (#310).
     def pluck: (untyped col) -> Array[untyped]
     def pick: (untyped col) -> untyped
     def ids: () -> Array[Integer]
     def find: (Integer | String | Array[Integer | String] id) -> untyped
     def find_ids: (Array[Integer | String] ids) -> Array[untyped]
-    def find_by: (untyped conditions) -> untyped
-    def find_by!: (untyped conditions) -> untyped
-    def first_or_initialize: () -> untyped
-    def find_or_create_by: (Hash[Symbol, untyped] conditions) -> untyped
+    def find_by: (untyped conditions) -> Base?
+    def find_by!: (untyped conditions) -> Base
+    def first_or_initialize: () -> Base
+    def find_or_create_by: (Hash[Symbol, untyped] conditions) -> Base
 
     def to_sql: () -> String
     def to_subquery_sql: () -> String
     def select_sql_with: (String default_cols) -> String
+    def append_join_where: (String sql) -> String
+    def append_group_having: (String sql) -> String
     def count_sql: () -> String
     def exists_sql: (Integer n) -> String
     def hash_conditions: (untyped hash) -> String
