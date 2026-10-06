@@ -457,9 +457,17 @@ module ActiveRecord
       offset((n - 1) * per_page)
     end
 
-    # Same builder as `page` under the `paginate` spelling.
-    def paginate(num = nil)
-      page(num)
+    # Same builder as `page` under the `paginate` spelling. A
+    # positional page number, or `page:` / `per_page:` keywords.
+    def paginate(num = nil, page: nil, per_page: nil)
+      n = page
+      n = num if n.nil?
+      rel = self.page(n)
+      if per_page.nil?
+        rel
+      else
+        rel.per(per_page)
+      end
     end
 
     # `per(n)`: the same page at `n` rows. A nil, blank or negative `n`

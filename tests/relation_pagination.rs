@@ -30,6 +30,14 @@ const CONTROLLER: &str = r#"class ReportsController < ApplicationController
                   "first=#{reports.first_page?} last=#{reports.last_page?} out=#{reports.out_of_range?} " \
                   "titles=#{reports.map(&:title).join(",")}"
   end
+
+  def by_paginate_kwargs
+    reports = Report.order(:title).paginate(page: params[:page], per_page: params[:per])
+    render plain: "page=#{reports.current_page} per=#{reports.limit_value} total=#{reports.total_count} " \
+                  "pages=#{reports.total_pages} next=#{reports.next_page.inspect} prev=#{reports.prev_page.inspect} " \
+                  "first=#{reports.first_page?} last=#{reports.last_page?} out=#{reports.out_of_range?} " \
+                  "titles=#{reports.map(&:title).join(",")}"
+  end
 end
 "#;
 
@@ -60,7 +68,7 @@ fn app(initializer: Option<&str>) -> emit_and_run::Overlay {
         )
         .write(
             "config/routes.rb",
-            "Rails.application.routes.draw do\n  resources :reports, only: :index\n  get \"unordered\", to: \"reports#unordered\"\n  get \"by_paginate\", to: \"reports#by_paginate\"\nend\n",
+            "Rails.application.routes.draw do\n  resources :reports, only: :index\n  get \"unordered\", to: \"reports#unordered\"\n  get \"by_paginate\", to: \"reports#by_paginate\"\n  get \"by_paginate_kwargs\", to: \"reports#by_paginate_kwargs\"\nend\n",
         )
         .write(
             "db/schema.rb",
@@ -98,6 +106,7 @@ expect("/reports", "page=2&per=", "page=2 per=2 total=5 pages=3 next=3 prev=1 fi
 expect("/reports", "page=9", "page=9 per=2 total=5 pages=3 next=nil prev=nil first=false last=false out=true titles=")
 expect("/unordered", "page=2", "page=2 per=2 titles=c,b")
 expect("/by_paginate", "page=2&per=2", "page=2 per=2 total=5 pages=3 next=3 prev=1 first=false last=false out=false titles=c,d")
+expect("/by_paginate_kwargs", "page=2&per=2", "page=2 per=2 total=5 pages=3 next=3 prev=1 first=false last=false out=false titles=c,d")
 "#
     );
     app(Some(INITIALIZER)).run_ruby(&script).assert_passes();
@@ -135,7 +144,7 @@ expect("/reports", "page=2", "page=2 per=2 total=5 pages=3 next=3 prev=1 first=f
 /// silently paging at the baked-in default of 25.
 #[test]
 fn a_computed_page_size_is_a_survey_gap() {
-    use roundhouse::ingest::{IngestError, ingest_app_from_tree, survey};
+    use roundhouse::ingest::{ingest_app_from_tree, survey, IngestError};
 
     let tree = [
         (

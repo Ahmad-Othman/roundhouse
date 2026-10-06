@@ -328,8 +328,9 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::Builder,
         return_kind: Some(ReturnKind::RelationOfSelf),
     },
-    // `Model.paginate(page: n)` — `page` under another spelling, same
-    // builder shape, same reasoning for living here.
+    // `Model.paginate` — `page` under another spelling. Accepts a
+    // positional page number or `page:` / `per_page:` keywords (the
+    // LIMIT/OFFSET window under the kwargs form).
     CatalogedMethod {
         name: "paginate",
         receiver: ReceiverContext::Class,

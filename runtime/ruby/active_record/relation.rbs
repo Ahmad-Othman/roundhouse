@@ -84,7 +84,7 @@ module ActiveRecord
     # whatever the request handed over (a params String, an Integer or
     # nil) and read it through `to_s`.
     def page: (?(Integer | String | nil) num) -> Relation
-    def paginate: (?untyped num) -> Relation
+    def paginate: (?untyped num, ?page: untyped, ?per_page: untyped) -> Relation
     def per: (Integer | String | nil num) -> Relation
     def limit_value: () -> Integer?
     def offset_value: () -> Integer?

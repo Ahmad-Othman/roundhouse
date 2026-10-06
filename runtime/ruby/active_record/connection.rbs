@@ -43,6 +43,7 @@ module ActiveRecord
     def self.all: () -> Relation
     def self.none: () -> Relation
     def self.page: (?(Integer | String | nil) num) -> Relation
+    def self.paginate: (?untyped num, ?page: untyped, ?per_page: untyped) -> Relation
     def self.any?: () -> bool
     def self.none?: () -> bool
     def _note_hydrated: () -> void
