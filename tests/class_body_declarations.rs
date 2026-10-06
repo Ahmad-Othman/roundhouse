@@ -517,3 +517,55 @@ fn leftover_interpolated_association_does_not_expand() {
         "must not invent readers: {names:?}"
     );
 }
+
+/// Same leftover shape through `on_load(:active_record)` — the Writebook
+/// installer path — without claiming a named-app runtime.
+#[test]
+fn load_hook_leftover_interpolated_association_does_not_expand() {
+    roundhouse::ingest::survey::activate();
+    let app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table :articles do |t|\n    t.string :title\n  end\n  create_table :comments do |t|\n    t.text :body\n    t.bigint :article_id\n  end\nend\n",
+        ),
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        ),
+        (
+            "lib/attach_macro.rb",
+            &format!(
+                "{LEFTOVER_MACRO}\nActiveSupport.on_load :active_record do\n  include AttachMacro\nend\n"
+            ),
+        ),
+        (
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  attached :spotlight\nend\n",
+        ),
+        (
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord\n  belongs_to :article\nend\n",
+        ),
+    ]))
+    .expect("survey ingest");
+    roundhouse::ingest::survey::drain();
+    let article = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Article")
+        .unwrap();
+    assert!(
+        article.body.iter().any(|item| matches!(
+            item,
+            ModelBodyItem::Unknown { expr, .. }
+                if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "attached")
+        )),
+        "load-hook call must stay unexpanded"
+    );
+    let names = instance_names(&app, "Article");
+    assert!(
+        !names.iter().any(|n| n == "spotlight" || n == "spotlight_record"),
+        "must not invent readers: {names:?}"
+    );
+}
+
