@@ -988,7 +988,6 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // connection.rb reopen. last_page? requires non-empty short page.
     // This probe sees the connection reopen's new self-sends.
     const CEILING: usize = 1400;
-
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\

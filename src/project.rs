@@ -720,15 +720,11 @@ fn report_unsupported_keys(app: &App, target: BuildTarget) {
     }
 }
 
-/// The executed Date-only runtime is native Ruby, not the timestamp seam
-/// shared by the other targets (including the unverified JRuby adapter).
-/// Reject before entering their emitters:
-/// dynamic backends may never render a type, so a type-position check
-/// alone would silently emit a String/Time or call an absent intrinsic.
-fn reject_unsupported_dates(app: &App, target: BuildTarget) -> Result<(), String> {
-    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby) {
-        return Ok(());
-    }
+/// True when the app schema or emitted roots mention a date-only value.
+/// Shared by the unsupported-target gate and Spinel's conditional Date
+/// runtime load (matz/spinel#7334: defining `Date#strftime` currently
+/// breaks poly `Time | Date` dispatch for `Time#strftime`).
+fn app_uses_date(app: &App) -> bool {
     fn expr_has_date(e: &crate::expr::Expr) -> bool {
         if e.ty.as_ref().is_some_and(crate::ty::Ty::contains_date)
             || matches!(&*e.node, crate::expr::ExprNode::Cast { target_ty, .. } if target_ty.contains_date())
@@ -803,7 +799,19 @@ fn reject_unsupported_dates(app: &App, target: BuildTarget) -> Result<(), String
     }
     has_date |= app.rbs_signatures.values().flat_map(|methods| methods.values())
         .any(crate::ty::Ty::contains_date);
-    if has_date {
+    has_date
+}
+
+/// The executed Date-only runtime is native Ruby (and now Spinel), not
+/// the timestamp seam shared by the other targets (including the
+/// unverified JRuby adapter). Reject before entering their emitters:
+/// dynamic backends may never render a type, so a type-position check
+/// alone would silently emit a String/Time or call an absent intrinsic.
+fn reject_unsupported_dates(app: &App, target: BuildTarget) -> Result<(), String> {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Spinel) {
+        return Ok(());
+    }
+    if app_uses_date(app) {
         emit::diagnostics::unsupported_date_ty(target.as_str());
         return Err(format!("{}: Date-only values are not supported; use the native Ruby target", target.as_str()));
     }
@@ -3794,6 +3802,8 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
 
     crate::runtime_files::walk_flat("runtime/spinel", &["rb"], "runtime/", &mut files)?;
 
+    let needs_date = app_uses_date(app);
+
     // Temporal-intrinsics sidecar — the flat walk above picks only .rb,
     // and spinel's strict unresolved-call gate needs `parse_db_time`'s
     // `String?` param typed to compile the nil-guard narrow.
@@ -3804,6 +3814,71 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
             "sig/runtime/active_support_time_parsing.rbs".to_string(),
             rbs,
         ));
+    }
+
+    // Program-defined Date package for apps that use date-only values.
+    // Loading Date#strftime into every Spinel tree breaks poly
+    // Time|Date receivers (matz/spinel#7334). Default boot has no Date
+    // requires; when needed we inject the package (class + date parse/
+    // format + date JSON rewrite) after always-on AR serialization.
+    const DATE_PACKAGE_FILES: &[&str] = &[
+        "runtime/date.rb",
+        "runtime/active_support_date_parsing.rb",
+        "runtime/active_record_date_serialization.rb",
+        "sig/runtime/date.rbs",
+        "sig/runtime/active_support_date_parsing.rbs",
+        "sig/runtime/active_record_date_serialization.rbs",
+    ];
+    if needs_date {
+        for (src, dest) in [
+            ("runtime/spinel/date.rbs", "sig/runtime/date.rbs"),
+            (
+                "runtime/spinel/active_support_date_parsing.rbs",
+                "sig/runtime/active_support_date_parsing.rbs",
+            ),
+            (
+                "runtime/spinel/active_record_date_serialization.rbs",
+                "sig/runtime/active_record_date_serialization.rbs",
+            ),
+        ] {
+            let rbs = crate::runtime_files::read_to_string(src)
+                .map_err(|e| format!("read {src}: {e}"))?;
+            files.push((dest.to_string(), rbs));
+        }
+        if let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") {
+            let anchor = "require_relative \"runtime/active_record_serialization\"\n";
+            // Prefer concat! over one escaped multiline string: the CI
+            // planner's project.rs body-scope regex backtracks for minutes
+            // on `\"` + `\` continuations in a single literal this large.
+            let inject = concat!(
+                "# Date package — only when the app uses date-only values (matz/spinel#7334).\n",
+                "require_relative \"runtime/date\"\n",
+                "require_relative \"runtime/active_support_date_parsing\"\n",
+                "require_relative \"runtime/active_record_date_serialization\"\n",
+            );
+            if !boot.contains("require_relative \"runtime/date\"") {
+                if let Some(at) = boot.find(anchor) {
+                    boot.insert_str(at + anchor.len(), inject);
+                } else {
+                    return Err(
+                        "spinel boot.rb missing active_record_serialization require \
+                         (Date package inject anchor)"
+                            .into(),
+                    );
+                }
+            }
+        }
+    } else {
+        files.retain(|(p, _)| !DATE_PACKAGE_FILES.contains(&p.as_str()));
+    }
+
+    // Always-on AR JSON entrypoint signatures (date rewrite RBS is gated above).
+    {
+        let rbs = crate::runtime_files::read_to_string(
+            "runtime/spinel/active_record_serialization.rbs",
+        )
+        .map_err(|e| format!("read runtime/spinel/active_record_serialization.rbs: {e}"))?;
+        files.push(("sig/runtime/active_record_serialization.rbs".to_string(), rbs));
     }
 
     // Schema-less json/jsonb column seam. The flat walk emits the Ruby

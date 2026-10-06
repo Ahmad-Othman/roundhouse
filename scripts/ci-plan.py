@@ -38,6 +38,7 @@ BASE = [
 PUBLICATION = [*BASE, "compare", "browser-smoke-typescript"]
 CORE = ["build-spinel", "toolchain-spinel", "compare-spinel"]
 SPINEL_TESTS = [
+    "date_columns_spinel",
     "framework_tests_spinel",
     "spinel_web_push_crypto",
     "spinel_db_lease",
@@ -139,6 +140,21 @@ def native_coverage(path):
             )
         if any(word in name for word in ("param", "multipart", "request")):
             owned_tests.add("spinel_param_builder")
+        if name in {
+            "date.rb",
+            "date.rbs",
+            "active_support_date_parsing.rb",
+            "active_support_date_parsing.rbs",
+            "active_record_date_serialization.rb",
+            "active_record_date_serialization.rbs",
+            "sqlite_adapter.rb",
+        }:
+            owned_tests.add("date_columns_spinel")
+        if name in {
+            "active_record_date_serialization.rb",
+            "active_record_serialization.rb",
+        }:
+            owned_tests.add("framework_tests_spinel")
         if (
             path.startswith("runtime/spinel/")
             and not path.startswith("runtime/spinel/scaffold/")
@@ -482,7 +498,7 @@ def project_change_scope(before, after):
     return None
 
 
-def changed_inputs(event, event_name, sha):
+def changed_inputs(event, event_name, sha, *, need_project_scope=True):
     if not SHA.fullmatch(sha) or git("rev-parse", "HEAD").decode().strip() != sha:
         raise ValueError("checkout is not the event SHA")
     if event_name == "pull_request":
@@ -516,7 +532,7 @@ def changed_inputs(event, event_name, sha):
         if p
     ]
     scope = None
-    if "src/project.rs" in paths:
+    if need_project_scope and "src/project.rs" in paths:
         entries = [
             git("ls-tree", ref, "--", "src/project.rs").split() for ref in (base, sha)
         ]
@@ -616,8 +632,13 @@ def main():
         full = True
     reason = None
     try:
+        # project_scope only narrows path selection; spinel/full short-circuit
+        # before that, so skip the expensive project.rs body scan there.
         paths, project_scope = changed_inputs(
-            event, event_name, os.environ["GITHUB_SHA"]
+            event,
+            event_name,
+            os.environ["GITHUB_SHA"],
+            need_project_scope=not full and not spinel_lane,
         )
     except (KeyError, ValueError, UnicodeError, subprocess.CalledProcessError) as e:
         paths, project_scope, full, reason = (
