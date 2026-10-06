@@ -8247,6 +8247,18 @@ mod tests {
             "#<SPINEL_SOURCE>real-blog/app/views/articles/_article.html.erb:4",
             "{view}"
         );
+        // The def line itself is marked: Spinel names a --debug
+        // backtrace frame by it (spinel#7658), and unmarked it would
+        // report the previous method's held position.
+        let def = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with("def self.article_into"))
+            .expect("the article_into def");
+        assert_eq!(
+            lines[def - 1],
+            "#<SPINEL_SOURCE>real-blog/app/views/articles/_article.html.erb:1",
+            "{view}"
+        );
         let ruby = ruby_runtime_files(&app, fixture).expect("ruby tree");
         let marked: Vec<&str> = ruby
             .iter()
