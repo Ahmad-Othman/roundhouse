@@ -682,6 +682,7 @@ fn block_of(param: &str, body: Expr) -> Expr {
     )
 }
 
+
 fn self_class() -> Expr {
     Expr::new(Span::synthetic(), ExprNode::SelfRef)
 }
@@ -1562,8 +1563,56 @@ fn walk_decl_body_with_visibility<'pr>(
             if force_class_receiver || module_function_active || extend_self_active {
                 m.receiver = MethodReceiver::Class;
             }
-            direct_def_positions.push(out.methods.len());
-            out.methods.push(m);
+            // A real `def` replaces a synthesized attr_* half of the
+            // same name (Ruby last-definition-wins for
+            // `attr_accessor :x` then `def x; … end`). An earlier real
+            // `def` is kept as duplicate evidence — `initialize` hooks
+            // and visibility tests rely on both surviving ingest. Match
+            // `push_user_methods`: only unsigned bare-ivar attr halves.
+            if let Some(idx) = out
+                .methods
+                .iter()
+                .position(|e| e.name == m.name && e.receiver == m.receiver)
+            {
+                let existing = &out.methods[idx];
+                let existing_is_attr_half = existing.signature.is_none()
+                    && match existing.kind {
+                        crate::dialect::AccessorKind::AttributeReader => {
+                            matches!(
+                                &*existing.body.node,
+                                ExprNode::Ivar { name } if name == &existing.name
+                            )
+                        }
+                        crate::dialect::AccessorKind::AttributeWriter => {
+                            let base = existing
+                                .name
+                                .as_str()
+                                .strip_suffix('=')
+                                .unwrap_or(existing.name.as_str());
+                            matches!(
+                                &*existing.body.node,
+                                ExprNode::Assign {
+                                    target: LValue::Ivar { name },
+                                    ..
+                                } if name.as_str() == base
+                            )
+                        }
+                        crate::dialect::AccessorKind::Method => false,
+                    };
+                if existing_is_attr_half {
+                    out.methods[idx] = m;
+                    if !direct_def_positions.iter().any(|p| *p == idx) {
+                        direct_def_positions.push(idx);
+                    }
+                } else {
+                    // Duplicate real `def` — keep both.
+                    direct_def_positions.push(out.methods.len());
+                    out.methods.push(m);
+                }
+            } else {
+                direct_def_positions.push(out.methods.len());
+                out.methods.push(m);
+            }
             continue;
         }
         // `class << self ... end` — singleton class block. Body
@@ -1723,12 +1772,23 @@ fn walk_decl_body_with_visibility<'pr>(
                             if want_reader {
                                 let mut method = synth_attr_reader(owner, name, recv);
                                 visibility.apply(&statement, &mut method);
-                                out.methods.push(method);
+                                // Skip when a `def` of this name already
+                                // walked (unusual order); a later `def`
+                                // replaces via the push path above.
+                                if !out.methods.iter().any(|e| {
+                                    e.name == method.name && e.receiver == method.receiver
+                                }) {
+                                    out.methods.push(method);
+                                }
                             }
                             if want_writer {
                                 let mut method = synth_attr_writer(owner, name, recv);
                                 visibility.apply(&statement, &mut method);
-                                out.methods.push(method);
+                                if !out.methods.iter().any(|e| {
+                                    e.name == method.name && e.receiver == method.receiver
+                                }) {
+                                    out.methods.push(method);
+                                }
                             }
                         }
                     }

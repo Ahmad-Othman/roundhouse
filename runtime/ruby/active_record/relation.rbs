@@ -12,6 +12,23 @@ module ActiveRecord
     # would otherwise fail campfire AOT.
     def initialize: (Base model) -> void
 
+    # Rails' Relation#spawn — copy query state onto a fresh Relation so
+    # a scope fork cannot mutate its caller's accumulators.
+    def spawn: () -> Relation
+    def take_query_lists: (
+        Array[String] wheres,
+        Array[String] joins,
+        Array[String] orders,
+        Array[String] groups,
+        Array[String] havings,
+        Array[String] ctes,
+        Array[Symbol] includes,
+        Hash[Symbol, untyped] attrs
+      ) -> Relation
+    def copy_string_list: (Array[String] xs) -> Array[String]
+    def copy_symbol_list: (Array[Symbol] xs) -> Array[Symbol]
+    def copy_scope_attributes: (Hash[Symbol, untyped] attrs) -> Hash[Symbol, untyped]
+
     def where: (?untyped condition, *untyped args) -> Relation
 
     # Query ivars the body reads after builders write them. Declared so
@@ -146,6 +163,7 @@ module ActiveRecord
     def each: () { (untyped) -> void } -> Relation
     def index_by: () { (untyped) -> untyped } -> Hash[untyped, untyped]
     def find_each: () { (untyped) -> void } -> Relation
+    def find_in_batches: () { (Array[untyped]) -> void } -> Relation
     # `map`/`collect` return `untyped`, NOT `Array[untyped]`: the result's
     # element type is whatever the BLOCK returns, which this RBS has no
     # type variable to say. `Array[untyped]` is a seed spinel TRUSTS, so
@@ -232,6 +250,7 @@ module ActiveRecord
     def named_bind_start?: (String ch) -> bool
     def named_bind_char?: (String ch) -> bool
     def escape_list: (Array[untyped] vals) -> String
-    def order_term: (untyped p) -> String
+    def order_term: (Hash[Symbol, untyped] | String p) -> String
+    def format_order_hash: (Hash[Symbol, untyped] h) -> String
   end
 end

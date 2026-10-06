@@ -405,13 +405,12 @@ pub(super) fn push_attr_accessor_methods(methods: &mut Vec<MethodDef>, model: &M
         //
         // A `def` of the same name REPLACES the accessor — Ruby's last
         // definition wins, and `attr_accessor :foo` is a definition.
-        // Checking only `methods` is not enough: the user's own bodies
-        // arrive later via `push_user_methods`, which DROPS a name a
-        // synthesizer already claimed. So an accessor pushed here for a
-        // name the model defines silently deletes the app's method and
-        // leaves `def foo; @foo; end` in its place — the ivar the app
-        // memoizes into is then never written and the reader answers nil
-        // forever.
+        // Checking only `methods` is not enough: without yielding here,
+        // an accessor pushed for a name the model defines is later
+        // eligible for replacement by `push_user_methods` only when it
+        // still has the bare-ivar attr_* shape; skipping the push when
+        // `model_defines_instance_method` is the primary gate so the
+        // app's memo body is what `methods` carries.
         //
         // Measured on campfire's `Opengraph::Location`, which declares
         // `attr_accessor :url, :parsed_url` and then memoizes

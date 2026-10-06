@@ -1499,6 +1499,10 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::Terminal,
         return_kind: Some(ReturnKind::Bool),
     },
+    // Rails AssociationProxy `#loaded?` is rewritten by `assoc_loaded`
+    // onto `<assoc>_loaded?`. Do NOT catalog Relation `#loaded?` as
+    // Bool: that would silence residual sites with no runtime method
+    // (invariant 6). Unrewritten `.loaded?` stays a dispatch failure.
     CatalogedMethod {
         name: "more_than?",
         receiver: ReceiverContext::Relation,

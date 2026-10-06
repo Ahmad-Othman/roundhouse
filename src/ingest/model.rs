@@ -1465,24 +1465,38 @@ pub(super) fn ingest_method(
         // Beside a positional `*rest` the flattening does not parse
         // (`def both(*args, options = {})`), so there the slot stays a
         // real `**kwrest`, as the library-class path keeps it.
+        //
+        // Beside an earlier keyword (`def notification(badge: …,
+        // **params)` — campfire preview) flattening to `params = {}`
+        // also does not parse: optional positionals cannot follow
+        // keywords. Keep a real keyword-rest there too (same rule
+        // `library_class` applies when `keeps_keywords`).
         if let Some(krest) = pn.keyword_rest() {
             if let Some(krp) = krest.as_keyword_rest_parameter_node() {
                 if let Some(loc) = krp.name() {
                     let name = Symbol::from(constant_id_str(&loc));
-                    let mut p = if params.iter().any(|p| p.rest) {
+                    let has_keywords = params.iter().any(|p| p.keyword || p.from_keyword);
+                    // Match `library_class`: `from_kwrest` marks the
+                    // *flattened* `params = {}` form only. A real
+                    // keyword-rest kept beside keywords / `*rest` must
+                    // not carry the marker — forwarding analysis treats
+                    // `from_kwrest` as "flattened keyword ABI" and would
+                    // reject valid `**` / full-arg forwards into it.
+                    let p = if params.iter().any(|p| p.rest) || has_keywords {
                         let mut p = crate::dialect::Param::keyword(name, None);
                         p.rest = true;
                         p
                     } else {
-                        crate::dialect::Param::with_default(
+                        let mut p = crate::dialect::Param::with_default(
                             name,
                             Expr::new(
                                 Span::synthetic(),
                                 ExprNode::Hash { entries: vec![], kwargs: false },
                             ),
-                        )
+                        );
+                        p.from_kwrest = true;
+                        p
                     };
-                    p.from_kwrest = true;
                     params.push(p);
                 }
             }
