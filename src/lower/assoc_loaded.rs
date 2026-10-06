@@ -33,14 +33,15 @@ use crate::ty::Ty;
 fn has_many_by_model(app: &App) -> HashMap<ClassId, HashSet<Symbol>> {
     let mut out: HashMap<ClassId, HashSet<Symbol>> = HashMap::new();
     for model in &app.models {
+        // Every model gets a key so `in_model` owner checks don't treat
+        // a has_many-less model (Room) as a view/library class.
+        let entry = out.entry(model.name.clone()).or_default();
         for (_, assoc) in model.spanned_associations() {
             // Only has_many synthesizes `<name>_loaded?` /
             // `<name>_target` (see `model_to_library::associations`).
             // has_one keeps a singular reader with no flat loaded flag.
             if let Association::HasMany { name, .. } = assoc {
-                out.entry(model.name.clone())
-                    .or_default()
-                    .insert(name.clone());
+                entry.insert(name.clone());
             }
         }
     }
@@ -67,10 +68,13 @@ fn association_readers_by_model(app: &App) -> HashMap<ClassId, HashSet<Symbol>> 
 /// Resolve which model owns the association hop.
 ///
 /// Typed explicit receiver wins — including a union, but only when every
-/// class alternative declares `name`. Untyped explicit receivers are left
-/// alone (unrewritten `.loaded?` / `.target` must stay visible). Implicit
-/// self uses the enclosing model, or a concern module's sole model
-/// includer — never a unique-name guess.
+/// class alternative declares `name`. Untyped explicit receivers in a
+/// **model** method are left alone (unrewritten `.loaded?` / `.target`
+/// must stay visible). Views, tests, and other non-model owners still
+/// unique-name: view assigns are untyped, and Campfire ERB is
+/// `message.boosts.loaded?` (view bodies are library classes, so
+/// `enclosing` is Some). Implicit self uses the enclosing model, or a
+/// concern module's sole model includer.
 fn resolve_owner_model(
     recv: Option<&Expr>,
     enclosing: Option<&ClassId>,
@@ -79,7 +83,17 @@ fn resolve_owner_model(
     name: &Symbol,
 ) -> Option<ClassId> {
     if let Some(base) = recv {
-        return owner_from_typed_recv(base, by_model, name);
+        if let Some(id) = owner_from_typed_recv(base, by_model, name) {
+            return Some(id);
+        }
+        // Unique-name for view/test/non-model owners only. Model methods
+        // with an untyped or mixed-union receiver stay unre-written.
+        // View locals are `Ty::Untyped`, not `ty: None`.
+        let in_model = enclosing.is_some_and(|id| by_model.contains_key(id));
+        if !in_model {
+            return unique_model_for_name(by_model, name);
+        }
+        return None;
     }
     let enclosing = enclosing?;
     if by_model.contains_key(enclosing) {
@@ -115,6 +129,22 @@ fn owner_from_typed_recv(
                 .then(|| ids[0].clone())
         }
         _ => None,
+    }
+}
+
+fn unique_model_for_name(
+    by_model: &HashMap<ClassId, HashSet<Symbol>>,
+    name: &Symbol,
+) -> Option<ClassId> {
+    let mut matches = by_model
+        .iter()
+        .filter(|(_, names)| names.contains(name))
+        .map(|(id, _)| id);
+    let first = matches.next().cloned();
+    if matches.next().is_some() {
+        None
+    } else {
+        first
     }
 }
 
