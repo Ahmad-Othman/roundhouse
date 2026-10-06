@@ -238,6 +238,13 @@ fn emit_node(n: &ExprNode) -> String {
                     if e.leading_blank_line {
                         out.push('\n');
                     }
+                    // Not before the first: a value-site Seq renders as
+                    // `(a\nb)`, and the marker must start its line. The
+                    // enclosing statement's or def's marker covers it.
+                    if let Some(m) = super::source_markers::marker_for(&e.span) {
+                        out.push_str(&m);
+                        out.push('\n');
+                    }
                 }
                 out.push_str(&emit_expr(e));
             }
