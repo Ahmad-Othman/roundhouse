@@ -584,7 +584,8 @@ module Main
       copts["HttpOnly"] = +"" if jar.flag_httponly?(cname)
       ss = jar.flag_samesite(cname)
       copts["SameSite"] = ss if ss.length > 0
-      copts["Secure"] = +"" if jar.flag_secure?(cname) || request_obj.ssl?
+      # SameSite=None is ignored by browsers unless Secure is set.
+      copts["Secure"] = +"" if jar.flag_secure?(cname) || request_obj.ssl? || ss == "None"
       res.set_cookie(cname, out_cookies[cname], copts)
       ci += 1
     end
