@@ -224,6 +224,8 @@ struct AttributionCtx<'a> {
     /// a gap file declares. Survey mode may drop such a class wholesale, and
     /// each reference to it then reports an unsupported constant.
     gap_namespaces: HashMap<String, &'a str>,
+    /// Rubydex's answers, to name the declaration a constant reference means.
+    resolver: Option<std::sync::Arc<super::body::ConstResolver>>,
 }
 
 impl<'a> AttributionCtx<'a> {
@@ -323,8 +325,8 @@ impl<'a> AttributionCtx<'a> {
             .copied();
 
         let mut gap_namespaces: HashMap<String, &str> = HashMap::new();
-        if !tainted_files.is_empty() {
-            let resolver = app.const_resolver.for_sources(&app.sources);
+        let resolver = (!tainted_files.is_empty()).then(|| app.const_resolver.for_sources(&app.sources));
+        if let Some(resolver) = &resolver {
             for (file, path) in &tainted_files {
                 for name in resolver.namespaces_declared_in(*file) {
                     gap_namespaces.entry(name.to_string()).or_insert(path);
@@ -340,12 +342,14 @@ impl<'a> AttributionCtx<'a> {
             view_by_file,
             any_controller_tainted,
             gap_namespaces,
+            resolver,
         }
     }
 
     /// The rendered cause for an unsupported constant a gap file declares.
-    /// The written path may be relative (`Slack` inside `module Util`), so a
-    /// suffix match on a qualified declaration also counts.
+    /// The name is the declaration Rubydex resolved the reference to (a
+    /// relative `Slack` inside `module Util` is `Util::Slack`), else the path
+    /// as written. Not a suffix match: `::Article` is not `Admin::Article`.
     fn constant_cause(&self, d: &Diagnostic) -> Option<&String> {
         let DiagnosticKind::Unsupported { construct, detail, .. } = &d.kind else {
             return None;
@@ -354,10 +358,13 @@ impl<'a> AttributionCtx<'a> {
             return None;
         }
         let written = detail.trim_start_matches("::");
-        let suffix = format!("::{written}");
-        let path = self.gap_namespaces.get(written).or_else(|| {
-            self.gap_namespaces.iter().find_map(|(name, path)| name.ends_with(&suffix).then_some(path))
-        })?;
+        let segments: Vec<crate::ident::Symbol> = written.split("::").map(crate::ident::Symbol::from).collect();
+        let resolved = self
+            .resolver
+            .as_ref()
+            .and_then(|resolver| resolver.namespace(d.span, &segments))
+            .map(|id| id.0.as_str().trim_start_matches("::").to_string());
+        let path = self.gap_namespaces.get(resolved.as_deref().unwrap_or(written))?;
         self.gap_by_path.get(*path)
     }
 

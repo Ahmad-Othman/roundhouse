@@ -20,10 +20,11 @@ fn references_to_a_class_dropped_by_an_ingest_gap_are_coverage_notes() {
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
         // `has_role?` is a gem's method: the visibility change refuses the whole model.
         ("app/models/article.rb", "class Article < ApplicationRecord\n  private :has_role?\nend\n"),
+        ("app/models/admin/summary.rb", "class Admin::Summary < ApplicationRecord\n  private :has_role?\nend\n"),
         ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
         (
             "app/controllers/articles_controller.rb",
-            "class ArticlesController < ApplicationController\n  def show\n    @article = Article.find(params[:id])\n    Nope.call\n  end\n\n  def index\n    @headline = latest_article.headline\n  end\n\n  private\n\n  def latest_article\n    nil\n  end\nend\n",
+            "class ArticlesController < ApplicationController\n  def show\n    @article = Article.find(params[:id])\n    Nope.call\n    ::Summary.call\n  end\n\n  def index\n    @headline = latest_article.headline\n  end\n\n  private\n\n  def latest_article\n    nil\n  end\nend\n",
         ),
         // The dropped class still names a type: a value typed `Article?` fails dispatch.
         ("sig/articles_controller.rbs", "class ArticlesController\n  def latest_article: () -> Article?\nend\n"),
@@ -54,6 +55,9 @@ fn references_to_a_class_dropped_by_an_ingest_gap_are_coverage_notes() {
     // Declared by no gap file: an error of its own, not a shadow.
     let nope = line("constant not supported (all targets): Nope");
     assert!(nope.contains("error[unsupported]"), "{nope}");
+    // A gap file declares `Admin::Summary`, which is not the top-level `::Summary`.
+    let summary = line("constant not supported (all targets): Summary");
+    assert!(summary.contains("error[unsupported]"), "{summary}");
 
     std::fs::remove_dir_all(root).unwrap();
 }
