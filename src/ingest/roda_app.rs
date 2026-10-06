@@ -132,6 +132,7 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
         span: Span::synthetic(),
         enums: indexmap::IndexMap::new(),
         enum_defaults: indexmap::IndexMap::new(),
+        class_attr_defaults: indexmap::IndexMap::new(),
         sti_subclass_names: Vec::new(),
     });
     let models_dir = dir.join("models");

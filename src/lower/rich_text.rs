@@ -184,6 +184,7 @@ pub fn synthesize_record_model(app: &mut App) {
         span: Span::synthetic(),
         enums: indexmap::IndexMap::new(),
         enum_defaults: indexmap::IndexMap::new(),
+        class_attr_defaults: indexmap::IndexMap::new(),
     });
 }
 

@@ -86,6 +86,12 @@ pub struct Model {
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub enum_defaults: IndexMap<Symbol, crate::expr::Literal>,
 
+    /// `mattr_accessor :x, default: …` / `cattr_accessor(:x) { … }` —
+    /// class-ivar seeds lowered into `LibraryClass::class_ivar_initializers`.
+    /// Symbol-only mattr/cattr leave this empty (readers start nil).
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub class_attr_defaults: IndexMap<Symbol, crate::expr::Expr>,
+
     /// STI subclass class-ids whose rows live in THIS model's table
     /// (stamped by `lower::sti_scope`, which already derives the
     /// subclass->base map for scoping and `becomes!`). Non-empty turns

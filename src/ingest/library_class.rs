@@ -3137,7 +3137,7 @@ pub(super) fn included_has_accessor(body: ruby_prism::Node<'_>, owner: &ClassId,
     walk_dsl_stmts(body, &mut stmts);
     super::survey::without_recording(|| {
         stmts.iter().any(|stmt| {
-            super::model::ingest_model_body_items(stmt, owner, file, Vec::new())
+            super::model::ingest_model_body_items(stmt, owner, file, Vec::new(), None)
                 .is_ok_and(|items| items.iter().any(super::concern_accessors::is_candidate))
         })
     })
@@ -3230,7 +3230,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
                 // per attribute, and a concern splices ALL of them into
                 // every includer — keeping only the first would fault
                 // one field of several.
-                match super::model::ingest_model_body_items(&inner, &id, file, Vec::new()) {
+                match super::model::ingest_model_body_items(&inner, &id, file, Vec::new(), None) {
                     Ok(parsed) => {
                         for mut item in parsed {
                             match item {
