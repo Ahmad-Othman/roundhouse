@@ -22,6 +22,20 @@ use crate::expr::{Expr, ExprNode, HashRest, LValue, Literal, MatchPattern};
 use crate::ident::{ClassId, Symbol, TyVar};
 use crate::ty::{Row, Ty};
 
+/// A break in a bytes block can replace the method's String result. Nested
+/// lambdas/iterators and while/until loops own their breaks independently.
+fn bytes_block_has_escaping_break(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Break { .. } => true,
+        ExprNode::Lambda { .. } | ExprNode::While { .. } => false,
+        _ => {
+            let mut found = false;
+            e.node.for_each_child(&mut |child| found |= bytes_block_has_escaping_break(child));
+            found
+        }
+    }
+}
+
 mod diagnostic;
 mod const_resolution;
 pub(crate) use const_resolution::{ConstResolver, ConstResolverTask};
@@ -929,6 +943,17 @@ impl<'a> BodyTyper<'a> {
                 } else {
                     None
                 };
+                if recv_ty.as_ref() == Some(&Ty::Str) && method.as_str() == "bytes"
+                    && let Some(b) = block.as_ref()
+                    && let ExprNode::Lambda { body, .. } = &*b.node
+                    && bytes_block_has_escaping_break(body)
+                {
+                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None,
+                        construct: Symbol::from("String#bytes block break"),
+                        detail: "an escaping break can replace the receiver result; its return type is not modeled".into(),
+                    });
+                }
                 if method.as_str() == "new"
                     && matches!(&recv_ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "Data")
                     && self.const_resolver.as_ref().is_some_and(|resolver| !resolver.has_source_namespace("Data"))
@@ -3218,6 +3243,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn union_of_bool_int_nil_is_structural_not_debug_order() {
+        // Debug-string sort put Bool before Int; `ty_tag` puts Int first.
+        let got = union_of(union_of(Ty::Bool, Ty::Int), Ty::Nil);
+        assert_eq!(
+            got,
+            Ty::Union {
+                variants: vec![Ty::Int, Ty::Bool, Ty::Nil]
+            }
+        );
     }
 
     #[test]

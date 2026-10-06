@@ -101,7 +101,6 @@ impl Analyzer {
                 }
                 seed_empty_hashes(&mut method.body, &ty);
                 self.body_typer().analyze_expr(&mut method.body, &ctx);
-                method.effects = self.collect_effects(&mut method.body, &ctx);
                 method.signature = Some(Ty::Fn {
                     params: method
                         .params

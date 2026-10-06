@@ -599,6 +599,7 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
         "find", "find_by", "first", "last", "all", "each", "map", "to_a", "count",
         "exists?", "empty?", "any?", "none?", "sum", "maximum", "minimum", "pluck",
         "pick", "destroy_all", "delete_all", "update_all", "klass", "where_clauses",
+        "spawn", "find_each", "find_in_batches",
     ];
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
     // name -> [(model, params)] in app-model order, names sorted — the
@@ -6945,6 +6946,9 @@ fn require_path_for_body_const(
     // body to need this: `created_at: <%= 1.hour.ago %>` grounds to
     // `ActiveSupport::Duration.hour(1)` and `test/fixtures/<x>.rb` is
     // reached from the test harness, not from main.rb's require chain.
+    if joined == "ActiveSupport::SecurityUtils" {
+        return Some("runtime/security_utils".to_string());
+    }
     if joined == "ActiveSupport::Duration" {
         return Some("runtime/active_support_duration".to_string());
     }

@@ -168,6 +168,12 @@ pub struct App {
     /// as it is in stock Rails.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachable_unsigned_models: Vec<Symbol>,
+    /// Modules `include`d inside `ActiveSupport.on_load(:active_record)`
+    /// that provide class-method macros. Mixin instance methods are not
+    /// installed. Expansion treats these as an explicit provider origin
+    /// (not a seeded `include` set on every model).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub load_hook_class_macros: Vec<ClassId>,
     /// Partial → local name → type, harvested by the analyzer from the
     /// RENDER SITES that pass each local (`render partial: "form",
     /// locals: { new_message: @new_message }` with `@new_message` typed
@@ -680,6 +686,7 @@ impl App {
             view_visible_controller_methods: BTreeSet::new(),
             global_id_locate_models: BTreeSet::new(),
             attachable_unsigned_models: Vec::new(),
+            load_hook_class_macros: Vec::new(),
             partial_local_types: HashMap::new(),
             view_ivar_types: HashMap::new(),
             html_safe_methods: BTreeSet::new(),

@@ -909,28 +909,18 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         }
         n if n.as_lambda_node().is_some() => {
             let l = n.as_lambda_node().unwrap();
-            let params = l
-                .parameters()
-                .and_then(|p| {
-                    p.as_block_parameters_node().and_then(|bpn| bpn.parameters())
-                })
-                .map(|pn| {
-                    pn.requireds()
-                        .iter()
-                        .filter_map(|req| req.as_required_parameter_node())
-                        .map(|rp| Symbol::from(constant_id_str(&rp.name())))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let params = block_param_names(l.parameters());
+            let mut rest_param = block_rest_param(l.parameters());
             let body = match l.body() {
                 Some(b) => ingest_expr(&b, file)?,
                 None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
             };
+            let body = desugar_post_params(&mut rest_param, block_post_params(l.parameters()), body);
             // `->(x) { body }` literals always use brace form (Prism's
             // opening_loc is `{`); `->(x) do body end` exists but isn't
             // idiomatic and doesn't appear in any fixture yet.
             let block_style = block_style_from_opening(l.opening_loc().as_slice());
-            ExprNode::Lambda { rest_param: None, params, block_param: None, body, block_style }
+            ExprNode::Lambda { rest_param, params, block_param: None, body, block_style }
         }
         n if n.as_yield_node().is_some() => {
             let y = n.as_yield_node().unwrap();
@@ -2671,11 +2661,12 @@ fn ingest_call_block(
             // which is immaterial once it sits in block-argument position.
             if let Some(lam) = expr.as_lambda_node() {
                 let params = block_param_names(lam.parameters());
-                let rest_param = block_rest_param(lam.parameters());
+                let mut rest_param = block_rest_param(lam.parameters());
                 let body = match lam.body() {
                     Some(body) => ingest_expr(&body, file)?,
                     None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
                 };
+                let body = desugar_post_params(&mut rest_param, block_post_params(lam.parameters()), body);
                 let block_style = block_style_from_opening(lam.opening_loc().as_slice());
                 return Ok(Some(Expr::new(
                     Span::synthetic(),
@@ -2736,11 +2727,12 @@ fn ingest_call_block(
 /// `proc`/`lambda` call's own block).
 fn ingest_block_node_as_lambda(b: &ruby_prism::BlockNode<'_>, file: &str) -> IngestResult<Expr> {
     let params = block_param_names(b.parameters());
-    let rest_param = block_rest_param(b.parameters());
+    let mut rest_param = block_rest_param(b.parameters());
     let body = match b.body() {
         Some(body) => ingest_expr(&body, file)?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
+    let body = desugar_post_params(&mut rest_param, block_post_params(b.parameters()), body);
     let block_style = block_style_from_opening(b.opening_loc().as_slice());
     Ok(Expr::new(
         Span::synthetic(),
@@ -2821,6 +2813,65 @@ fn block_rest_param(params_node: Option<Node<'_>>) -> Option<Symbol> {
     let rest = pn.rest()?;
     let rp = rest.as_rest_parameter_node()?;
     Some(Symbol::from(constant_id_str(&rp.name()?)))
+}
+
+/// The parameters AFTER a block's or lambda's rest (`|*, payload|`,
+/// `->(*rest, a, b)`): Prism's `posts`, required names only.
+fn block_post_params(params_node: Option<Node<'_>>) -> Vec<Symbol> {
+    let Some(params_node) = params_node else { return vec![] };
+    let Some(bpn) = params_node.as_block_parameters_node() else { return vec![] };
+    let Some(pn) = bpn.parameters() else { return vec![] };
+    pn.posts()
+        .iter()
+        .filter_map(|post| post.as_required_parameter_node())
+        .map(|rp| Symbol::from(constant_id_str(&rp.name())))
+        .collect()
+}
+
+/// Lambda IR has no slot for parameters after a rest, and dropping them
+/// left the body reading names nothing bound: campfire's query counters
+/// (`->(*, payload) { payload[:sql] }`) emitted as `-> { payload[:sql] }`.
+/// Ruby's rule is that the rest takes everything but the trailing
+/// parameters, so name the rest (`__rest` when it is anonymous) and pop
+/// them off it, last first, ahead of the body. A named rest is left
+/// holding exactly what Ruby gives it. The one difference: too few
+/// arguments bind nil where a lambda would raise ArgumentError.
+fn desugar_post_params(rest_param: &mut Option<Symbol>, posts: Vec<Symbol>, body: Expr) -> Expr {
+    if posts.is_empty() {
+        return body;
+    }
+    let rest = rest_param.get_or_insert_with(|| Symbol::from("__rest")).clone();
+    let mut exprs: Vec<Expr> = posts
+        .into_iter()
+        .rev()
+        .map(|name| {
+            let pop = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Var { id: crate::ident::VarId(0), name: rest.clone() },
+                    )),
+                    method: Symbol::from("pop"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name },
+                    value: pop,
+                },
+            )
+        })
+        .collect();
+    match *body.node {
+        ExprNode::Seq { exprs: inner } => exprs.extend(inner),
+        other => exprs.push(Expr::new(body.span, other)),
+    }
+    Expr::new(Span::synthetic(), ExprNode::Seq { exprs })
 }
 
 /// Map the operator bytes of an `OrNode` / `AndNode` to the surface form.

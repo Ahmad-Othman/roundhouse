@@ -83,7 +83,8 @@ pub fn ingest_model(
     let mut constants = EnumConstants::default();
     constants.record(source, file);
     constants.finish();
-    ingest_model_with_enum_constants(source, file, schema, prefixes, &constants)
+    let bases = super::library_class::ModelBases::new();
+    ingest_model_with_enum_constants(source, file, schema, prefixes, &constants, &bases)
 }
 
 pub(super) fn ingest_model_with_enum_constants(
@@ -92,6 +93,7 @@ pub(super) fn ingest_model_with_enum_constants(
     schema: &Schema,
     prefixes: &TablePrefixes,
     enum_constants: &EnumConstants,
+    model_bases: &super::library_class::ModelBases,
 ) -> IngestResult<Option<Model>> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
@@ -114,7 +116,7 @@ pub(super) fn ingest_model_with_enum_constants(
     let enum_owners = enum_constants.nesting
         .get(&(file.to_string(), class.location().start_offset()))
         .cloned().unwrap_or_default();
-    let mut name_path = scope;
+    let mut name_path = scope.clone();
     name_path.extend(class_name_path(&class).ok_or_else(|| IngestError::Unsupported {
         file: file.into(),
         message: "model class name must be a simple constant or path".into(),
@@ -347,7 +349,10 @@ pub(super) fn ingest_model_with_enum_constants(
     }
 
     let parent = class.superclass().and_then(|n| {
-        constant_path_of(&n).map(|p| ClassId(Symbol::from(p.join("::"))))
+        constant_path_of(&n).map(|p| {
+            let resolved = model_bases.resolve_superclass(&scope, &p);
+            ClassId(Symbol::from(model_bases.emit_superclass(&resolved)))
+        })
     });
 
     let class_loc = class.location();
@@ -445,6 +450,105 @@ pub(super) fn ingest_model_body_items(
                         span,
                     })
                     .collect());
+            }
+            // `cattr_*` / `mattr_*` — class-attribute expansion library
+            // ingest already applies. Models that carry class attrs
+            // (Writebook `ActionText::Markdown.mattr_accessor :renderer`)
+            // must synthesize the singleton reader/writer or `to_html`
+            // and inventory resolve as unresolved `renderer`.
+            //
+            // Plain `attr_*` stays Unknown here on purpose: concern
+            // `included` blocks share this walker, and
+            // `concern_accessors::{is_candidate,is_supported}` plus
+            // visibility's `included_has_accessor` gate all match the
+            // raw `attr_accessor` Send — expanding those into Method
+            // items made `included_has_accessor` false (so `private;`
+            // inside `included` hard-failed ingest) and dropped
+            // concern virtual accessors from the splice.
+            if matches!(
+                name.as_str(),
+                "cattr_reader"
+                    | "cattr_writer"
+                    | "cattr_accessor"
+                    | "mattr_reader"
+                    | "mattr_writer"
+                    | "mattr_accessor"
+            ) {
+                let mut names: Vec<Symbol> = Vec::new();
+                let mut has_options = call.block().is_some();
+                if let Some(args) = call.arguments() {
+                    for arg in args.arguments().iter() {
+                        if let Some(s) = symbol_value(&arg) {
+                            names.push(Symbol::from(s));
+                        } else {
+                            // `default:` / other kwargs are not modeled —
+                            // partial expansion would drop the initializer.
+                            has_options = true;
+                        }
+                    }
+                }
+                // Writebook uses `mattr_accessor :renderer, default:` and
+                // `cattr_accessor :preview_renderer do`. Expanding those
+                // would drop the initializer; erroring rewrote inventory
+                // Errors into ingest-gap Infos. Leave the Send unknown.
+                if has_options {
+                    // fall through to ingest_model_body_item
+                } else {
+                let want_reader =
+                    name.ends_with("_reader") || name.ends_with("_accessor");
+                let want_writer =
+                    name.ends_with("_writer") || name.ends_with("_accessor");
+                let mut out = Vec::new();
+                for (i, attr) in names.iter().enumerate() {
+                    let lead = if i == 0 {
+                        leading_comments.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    // mattr/cattr: class accessors plus instance accessors
+                    // that share the same @ivar storage approximation used
+                    // by library ingest (Rails instance copies read the
+                    // class attribute; here both sides use the ivar).
+                    let receivers = [
+                        crate::dialect::MethodReceiver::Class,
+                        crate::dialect::MethodReceiver::Instance,
+                    ];
+                    let mut first_method = true;
+                    for &recv in &receivers {
+                        if want_reader {
+                            out.push(ModelBodyItem::Method {
+                                method: super::library_class::synth_attr_reader(
+                                    owner, attr, recv,
+                                ),
+                                leading_comments: if first_method {
+                                    lead.clone()
+                                } else {
+                                    Vec::new()
+                                },
+                                leading_blank_line: false,
+                            });
+                            first_method = false;
+                        }
+                        if want_writer {
+                            out.push(ModelBodyItem::Method {
+                                method: super::library_class::synth_attr_writer(
+                                    owner, attr, recv,
+                                ),
+                                leading_comments: if first_method {
+                                    lead.clone()
+                                } else {
+                                    Vec::new()
+                                },
+                                leading_blank_line: false,
+                            });
+                            first_method = false;
+                        }
+                    }
+                }
+                if !out.is_empty() {
+                    return Ok(out);
+                }
+                }
             }
         }
     }
@@ -1358,30 +1462,41 @@ pub(super) fn ingest_method(
         // caller an ArgumentError, and the forward into
         // `WebPush::Notification.new(**params, …)` a bare name.
         //
-        // Beside a positional `*rest` or a keyword the flattening does
-        // not parse (`def both(*args, options = {})`, `def opts(name:,
-        // rest = {})`), so there the slot stays a real `**kwrest`. This
-        // path keeps EVERY keyword as a keyword, so any `name:` or
-        // `name: default` rules the flattening out, the case the
-        // library-class path gates on `keeps_keywords`.
+        // Beside a positional `*rest` the flattening does not parse
+        // (`def both(*args, options = {})`), so there the slot stays a
+        // real `**kwrest`, as the library-class path keeps it.
+        //
+        // Beside an earlier keyword (`def notification(badge: …,
+        // **params)` — campfire preview) flattening to `params = {}`
+        // also does not parse: optional positionals cannot follow
+        // keywords. Keep a real keyword-rest there too (same rule
+        // `library_class` applies when `keeps_keywords`).
         if let Some(krest) = pn.keyword_rest() {
             if let Some(krp) = krest.as_keyword_rest_parameter_node() {
                 if let Some(loc) = krp.name() {
                     let name = Symbol::from(constant_id_str(&loc));
-                    let mut p = if params.iter().any(|p| p.rest || p.keyword) {
+                    let has_keywords = params.iter().any(|p| p.keyword || p.from_keyword);
+                    // Match `library_class`: `from_kwrest` marks the
+                    // *flattened* `params = {}` form only. A real
+                    // keyword-rest kept beside keywords / `*rest` must
+                    // not carry the marker — forwarding analysis treats
+                    // `from_kwrest` as "flattened keyword ABI" and would
+                    // reject valid `**` / full-arg forwards into it.
+                    let p = if params.iter().any(|p| p.rest) || has_keywords {
                         let mut p = crate::dialect::Param::keyword(name, None);
                         p.rest = true;
                         p
                     } else {
-                        crate::dialect::Param::with_default(
+                        let mut p = crate::dialect::Param::with_default(
                             name,
                             Expr::new(
                                 Span::synthetic(),
                                 ExprNode::Hash { entries: vec![], kwargs: false },
                             ),
-                        )
+                        );
+                        p.from_kwrest = true;
+                        p
                     };
-                    p.from_kwrest = true;
                     params.push(p);
                 }
             }
@@ -1952,6 +2067,7 @@ fn parse_association(
     let mut as_interface: Option<String> = None;
     let mut belongs_to_default: Option<crate::expr::Expr> = None;
     let mut touch: Option<crate::dialect::Touch> = None;
+    let mut autosave: Option<bool> = None;
 
     for arg in iter {
         // Positional lambda between name and kwargs — the association
@@ -2004,6 +2120,7 @@ fn parse_association(
                 "join_table" => join_table = string_value(&value),
                 "polymorphic" => polymorphic = bool_value(&value),
                 "as" => as_interface = symbol_value(&value),
+                "autosave" => autosave = bool_value(&value),
                 // `default: -> { Current.user }` — the lambda BODY, not
                 // the lambda. Rails calls it with `instance_exec`, so
                 // the body is already written against the record; a
@@ -2112,6 +2229,8 @@ fn parse_association(
             foreign_key_explicit,
             dependent: dependent.unwrap_or_default(),
             as_interface: as_interface.as_deref().map(Symbol::from),
+            scope,
+            autosave: autosave.unwrap_or(false),
         }),
         "belongs_to" => Some(Association::BelongsTo {
             name: name.clone(),

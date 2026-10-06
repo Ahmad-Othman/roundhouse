@@ -327,6 +327,429 @@ fn a_send_whose_selector_every_caller_names_dispatches_statically_on_spinel() {
     param_selector_dispatch_app().run_spinel(&script).assert_passes();
 }
 
+/// assert_select attribute operators (`$=`, `^=`, `*=`) and `:not([…])`,
+/// and assert_response's failure message. Rails 8.2-era tests write all
+/// of them: basecamp/once-campfire#301 checks `img[src*='install-edge']`,
+/// #303 checks `input[type=checkbox]:not([checked])` and passes a message
+/// to assert_response.
+#[test]
+fn assert_select_attribute_operators_and_negation_run() {
+    emit_and_run::real_blog()
+        .write(
+            "test/controllers/article_selectors_controller_test.rb",
+            r#"require "test_helper"
+
+class ArticleSelectorsControllerTest < ActionDispatch::IntegrationTest
+  test "attribute operators, negation and a response message" do
+    article = Article.create!(title: "Selectors", body: "Body text here")
+    get article_url(article)
+    assert_response :success, "the article page"
+    assert_select "a[href$='/edit']"
+    assert_select "a[href^='/articles/']"
+    assert_select "a[href*='articles']"
+    assert_select "h1[class]:not([hidden])"
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/article_selectors_controller_test.rb")
+        .assert_passes();
+}
+
+/// A job `perform_later` enqueues under the test adapter is held, not
+/// dropped, and a blockless `perform_enqueued_jobs only:` runs it
+/// (basecamp/once-campfire#296's tests). Its broadcast is JSON encoded
+/// once with `ActiveSupport::JSON.encode` and sent `coder: nil`
+/// (#292), so the test pubsub hands it back decoded exactly once.
+#[test]
+fn held_jobs_run_on_demand_and_pre_encoded_broadcasts_arrive_once() {
+    emit_and_run::real_blog()
+        .write(
+            "app/jobs/notice_job.rb",
+            r#"class NoticeJob < ApplicationJob
+  def perform(article)
+    ActionCable.server.broadcast "notices", ActiveSupport::JSON.encode(articleId: article.id, title: article.title), coder: nil
+  end
+end
+"#,
+        )
+        .write(
+            "test/models/notice_job_test.rb",
+            r#"require "test_helper"
+
+class NoticeJobTest < ActiveSupport::TestCase
+  include ActiveJob::TestHelper
+
+  test "a held job runs when performed, and broadcasts pre-encoded JSON" do
+    article = Article.create!(title: "Held", body: "Body text here")
+    NoticeJob.perform_later(article)
+    assert_enqueued_with job: NoticeJob
+    assert_equal 0, ActionCable.server.pubsub.broadcasts("notices").size
+
+    perform_enqueued_jobs only: NoticeJob
+
+    notices = ActionCable.server.pubsub.broadcasts("notices").map { |broadcast| JSON.parse(broadcast) }
+    assert_equal [ { "articleId" => article.id, "title" => "Held" } ], notices
+  end
+end
+"#,
+        )
+        .run_test("test/models/notice_job_test.rb")
+        .assert_passes();
+}
+
+/// rack-test's `Rack::Test::UploadedFile` built from a StringIO, as
+/// campfire's undecodable-image test builds one from half a WebP
+/// (basecamp/once-campfire#311). It is the `ActionDispatch::Http::UploadedFile`
+/// a controller's params read takes. Undefined, it was a constant error
+/// on CRuby and, on Spinel, a refusal that kept the whole test file
+/// from compiling.
+#[test]
+fn rack_test_uploaded_file_from_a_stringio_runs() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/article_upload_test.rb",
+            r#"require "test_helper"
+
+class ArticleUploadTest < ActiveSupport::TestCase
+  test "a StringIO upload is the file params carry" do
+    upload = Rack::Test::UploadedFile.new(StringIO.new("RIFF half"), "image/webp", original_filename: "broken.webp")
+    assert_equal "broken.webp", upload.original_filename
+    assert_equal "image/webp", upload.content_type
+    assert_equal "RIFF half", upload.read
+    assert_equal 9, upload.size
+    assert upload.is_a?(ActionDispatch::Http::UploadedFile)
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_upload_test.rb")
+        .assert_passes();
+}
+
+/// Named binds in `where` and `having` — `:size` used twice and an Array
+/// bound into `IN (:labels)` — in the shape of campfire's direct-room
+/// lookup (basecamp/once-campfire#310). Unbound, the placeholders reached
+/// SQLite as NULL and the lookup found nothing; campfire then created a
+/// second room on every Ping. Plus `relation.to_set`.
+fn named_binds_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "parts", force: :cascade do |t|
+    t.integer "widget_id"
+    t.string "label"
+  end
+end
+"#)
+        .write("app/models/widget.rb", r#"class Widget < ApplicationRecord
+  has_many :parts
+
+  def self.with_exactly(labels)
+    joins(:parts).group(:id)
+      .having("COUNT(*) = :size AND COUNT(CASE WHEN parts.label IN (:labels) THEN 1 END) = :size", size: labels.size, labels: labels)
+      .first
+  end
+end
+"#)
+        .write("app/models/part.rb", "class Part < ApplicationRecord\n  belongs_to :widget\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/widgets\", to: \"widgets#index\"\nend\n")
+        .write("app/controllers/widgets_controller.rb", r##"class WidgetsController < ApplicationController
+  def index
+    exact = Widget.with_exactly(%w[ a1 a2 ])
+    named = Widget.where("name = :name", name: "beta").first
+    set = Widget.where(name: %w[ alpha beta ]).to_set
+    render plain: "#{exact&.name}|#{named&.name}|#{set.size}|#{set.include?(named)}"
+  end
+end
+"##)
+}
+
+fn named_binds_assertions() -> &'static str {
+    r#"
+require_relative "app/controllers/widgets_controller"
+alpha = Widget.create!(name: "alpha")
+beta = Widget.create!(name: "beta")
+Part.create!(widget: alpha, label: "a1")
+Part.create!(widget: alpha, label: "a2")
+Part.create!(widget: beta, label: "a1")
+controller = WidgetsController.new
+controller.process_action(:index)
+raise "named binds: #{controller.body}" unless controller.body == "alpha|beta|2|true"
+puts "named binds passed"
+"#
+}
+
+#[test]
+fn named_binds_reach_the_query() {
+    named_binds_app().run_ruby(named_binds_assertions()).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn named_binds_reach_the_query_on_spinel() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{}",
+        named_binds_assertions()
+    );
+    named_binds_app().run_spinel(&script).assert_passes();
+}
+
+/// `sanitize_sql_array` is the documented array-form entry point (#400).
+fn sanitize_sql_array_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def self.quoted(value)
+    ActiveRecord::Base.sanitize_sql_array(["SELECT ? AS v", value])
+  end
+end
+"#,
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/widgets\", to: \"widgets#index\"\nend\n",
+        )
+        .write(
+            "app/controllers/widgets_controller.rb",
+            r##"class WidgetsController < ApplicationController
+  def index
+    render plain: Widget.quoted(1)
+  end
+end
+"##,
+        )
+}
+
+#[test]
+fn sanitize_sql_array_is_supported() {
+    sanitize_sql_array_app()
+        .run_ruby(
+            r#"
+require_relative "app/controllers/widgets_controller"
+sql = Widget.quoted(1)
+raise "sanitize_sql_array: #{sql.inspect}" unless sql == "SELECT 1 AS v"
+controller = WidgetsController.new
+controller.process_action(:index)
+raise "controller: #{controller.body}" unless controller.body == "SELECT 1 AS v"
+puts "sanitize_sql_array passed"
+"#,
+        )
+        .assert_passes();
+}
+
+/// Relation#ids must preserve uuid / named string keys (#310).
+fn relation_ids_uuid_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "widgets", id: :uuid, force: :cascade do |t|
+    t.string "name"
+    t.boolean "active", default: true
+  end
+end
+"#,
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/widget_ids\", to: \"widgets#ids\"\nend\n",
+        )
+        .write(
+            "app/controllers/widgets_controller.rb",
+            r##"class WidgetsController < ApplicationController
+  def ids
+    render plain: Widget.where(active: true).ids.join(",")
+  end
+end
+"##,
+        )
+}
+
+#[test]
+fn relation_ids_preserves_uuid_keys() {
+    relation_ids_uuid_app()
+        .run_ruby(
+            r#"
+require_relative "app/controllers/widgets_controller"
+uid = "44444444-4444-4444-8444-444444444441"
+Widget.create!(id: uid, name: "a", active: true)
+controller = WidgetsController.new
+controller.process_action(:ids)
+raise "uuid ids: #{controller.body.inspect}" unless controller.body == uid
+puts "relation ids uuid passed"
+"#,
+        )
+        .assert_passes();
+}
+
+/// Writebook-shaped `ActionText::Markdown < Record` under `module ActionText`
+/// in `lib/` is an ordinary model (table `action_text_markdowns`, attr
+/// `content`). Storage-only — does not claim `has_markdown`.
+#[test]
+fn action_text_markdown_saves_and_reloads_content() {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define(version: 1) do
+  create_table "action_text_markdowns", force: :cascade do |t|
+    t.text "content"
+    t.string "name", null: false
+    t.bigint "record_id", null: false
+    t.string "record_type", null: false
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+  end
+end
+"#,
+        )
+        .write(
+            "lib/rails_ext/action_text_markdown.rb",
+            r#"module ActionText
+  class Markdown < Record
+    belongs_to :record, polymorphic: true
+  end
+end
+"#,
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        )
+        .run_ruby(
+            r##"
+m = ActionText::Markdown.new
+m.content = "# Hello"
+m.name = "body"
+m.record_type = "Article"
+m.record_id = 1
+m.save!
+reloaded = ActionText::Markdown.find(m.id)
+raise "content lost: #{reloaded.content.inspect}" unless reloaded.content == "# Hello"
+raise "name lost: #{reloaded.name.inspect}" unless reloaded.name == "body"
+puts "action_text markdown storage passed"
+"##,
+        )
+        .assert_passes();
+}
+
+/// Rails 7.2's query assertions and the notification they are built on,
+/// over the runtime's statement capture, with `connection.select_rows`
+/// answering Arrays: campfire's tests count queries, assert none match a
+/// pattern, and read an `EXPLAIN QUERY PLAN` through a `->(*, payload)`
+/// callback (basecamp/once-campfire#295, #304, #310, #312).
+#[test]
+fn query_assertions_and_sql_notifications_run() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/article_queries_test.rb",
+            r#"require "test_helper"
+
+class ArticleQueriesTest < ActiveSupport::TestCase
+  test "query assertions count, match and explain" do
+    article = Article.create!(title: "Counted", body: "Body text here")
+
+    found = assert_queries_count(1) { Article.find(article.id) }
+    assert_equal "Counted", found.title
+    assert_no_queries { found.title }
+    assert_no_queries_match(/comments/) { Article.find(article.id) }
+    assert_queries_match(/articles/) { Article.where(title: "Counted").to_a }
+
+    statements = []
+    callback = ->(*, payload) { statements << payload[:sql] }
+    ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+      Article.where(title: "Counted").to_a
+    end
+    assert_equal 1, statements.size
+    # Rails' quoting, which apps' tests filter statements by
+    # (`start_with?(%(SELECT "messages"))`, basecamp/once-campfire#312).
+    assert statements.first.start_with?(%(SELECT "articles")), statements.first
+    plan = Article.connection.select_rows("EXPLAIN QUERY PLAN #{statements.first}").map(&:last).join(" | ")
+    assert_match(/articles/, plan)
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_queries_test.rb")
+        .assert_passes();
+}
+
+/// `offset(n).exists?` asks for a row past the first n (campfire's
+/// `paged?`, basecamp/once-campfire#297) where a COUNT ignored the offset;
+/// and the caching knobs campfire's messages caching test turns
+/// (`Rails.cache =`, `ActiveSupport::Cache::MemoryStore.new`,
+/// `ActionView::PartialRenderer.collection_cache`, a controller's
+/// `cache_store` and `perform_caching`).
+#[test]
+fn offset_exists_and_caching_knobs_run() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/article_paging_test.rb",
+            r#"require "test_helper"
+
+class ArticlePagingTest < ActiveSupport::TestCase
+  test "a row past the offset, and the caching knobs" do
+    Article.delete_all
+    2.times { |i| Article.create!(title: "Paged #{i}", body: "Body text here") }
+    assert Article.offset(1).exists?
+    assert_not Article.offset(2).exists?
+
+    store = ActiveSupport::Cache::MemoryStore.new
+    Rails.cache = store
+    ActionView::PartialRenderer.collection_cache = Rails.cache
+    ArticlesController.cache_store = Rails.cache
+    ArticlesController.perform_caching = true
+    assert_same store, Rails.cache
+    assert_same store, ActionView::PartialRenderer.collection_cache
+    assert_same store, ArticlesController.cache_store
+    assert ArticlesController.perform_caching
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_paging_test.rb")
+        .assert_passes();
+}
+
 #[test]
 fn the_unedited_blog_runs() {
     emit_and_run::real_blog()
@@ -1121,6 +1544,99 @@ raise "bare" unless rel.reverse_order_term("title") == "title DESC"
 puts "ok"
 "##,
         )
+        .assert_passes();
+}
+
+/// `cached: true` on a collection render is one store read of the
+/// concatenated partials. A second render of the same records must not
+/// run the inner fragment bodies.
+#[test]
+fn cached_true_collection_skips_partial_bodies_on_hit() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  def self.render_count
+    @render_count || 0
+  end
+  def self.reset_render_count
+    @render_count = 0
+  end
+  def self.bump_render
+    @render_count = render_count + 1
+  end
+  def bump_render
+    Article.bump_render
+    title
+  end
+"#,
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "  def index\n    @articles = Article.includes(:comments).order(created_at: :desc)\n  end\n",
+            "  def index\n    @articles = Article.includes(:comments).order(created_at: :desc)\n  end\n\n  def probe\n    @articles = Article.order(:title)\n  end\n",
+        )
+        .write(
+            "app/views/articles/_probe_row.html.erb",
+            "<% probe_row.bump_render %><i><%= probe_row.title %></i>\n",
+        )
+        .write(
+            "app/views/articles/probe.html.erb",
+            "<%= render partial: \"articles/probe_row\", collection: @articles, cached: true %>\n",
+        )
+        .run_ruby(
+            r#"
+Article.delete_all
+Article.create!(title: "one", body: "long enough body")
+Article.create!(title: "two", body: "long enough body")
+rows = ActiveRecord::Relation.new(Article).to_a.sort_by { |a| a.title }
+Article.reset_render_count
+a = Views::Articles.probe(rows)
+raise "first #{Article.render_count}: #{a}" unless Article.render_count == 2
+Article.reset_render_count
+b = Views::Articles.probe(rows)
+raise "second #{Article.render_count}: #{b}" unless Article.render_count == 0
+raise "html drifted #{a.inspect} vs #{b.inspect}" unless a == b
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
+/// `rel.more_than?(n)` is `SELECT 1 LIMIT 1 OFFSET n` with the same
+/// FROM/JOIN/WHERE as COUNT, and the relation is not mutated. Campfire's
+/// `Message.paged?` is `count > PAGE_SIZE` rewritten to this method.
+#[test]
+fn relation_more_than_probes_offset_without_count() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/article_more_than_test.rb",
+            r#"require "test_helper"
+
+class ArticleMoreThanTest < ActiveSupport::TestCase
+  test "more_than? offsets without COUNT or mutating the relation" do
+    Article.delete_all
+    3.times { |i| Article.create!(title: "more-#{i}", body: "Body text here") }
+    rel = Article.where("title LIKE 'more-%'")
+    prior = rel.to_sql
+    statements = []
+    callback = ->(*, payload) { statements << payload[:sql] }
+    ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+      assert rel.more_than?(2)
+      assert_not rel.more_than?(3)
+    end
+    assert_equal prior, rel.to_sql
+    sql = statements.find { |s| s.include?("OFFSET 2") }
+    assert sql, statements.inspect
+    assert_no_match(/COUNT/i, sql)
+    assert_match(/LIMIT 1/, sql)
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_more_than_test.rb")
         .assert_passes();
 }
 
@@ -3481,6 +3997,87 @@ fn trailing_erb_comments_execute_without_swallowing_output_terminators() {
         .assert_passes();
 }
 
+/// `cookies.permanent` in each spelling Rails accepts, over one plain
+/// write as the control. The permanent jar was the identity until
+/// 2026-10-06, so these went out with no Expires and ended with the
+/// browser session: campfire's sign-in did not survive a restart.
+fn permanent_cookie_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "app/controllers/visits_controller.rb",
+            r#"class VisitsController < ApplicationController
+  def index
+    cookies.permanent[:last_room] = 7
+    cookies.signed.permanent[:session_token] = { value: "tok", httponly: true, same_site: :lax }
+    cookies.permanent.signed[:remember] = "me"
+    cookies[:plain] = "p"
+    head :no_content
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :visits, only: :index\nend\n",
+        )
+        .write("app/models/visit.rb", "class Visit < ApplicationRecord\nend\n")
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"visits\", force: :cascade do |t|\n    t.string \"room\"\n  end\nend\n",
+        )
+}
+
+#[test]
+fn permanent_cookies_go_out_with_an_expiry() {
+    permanent_cookie_app()
+        .run_ruby(
+            r##"status, headers, = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => "/visits", "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
+raise "GET /visits answered #{status}" unless status == 204
+lines = headers["set-cookie"] || []
+year = (Time.now.utc.year + 20).to_s
+%w[last_room session_token remember].each do |name|
+  line = lines.find { |l| l.start_with?("#{name}=") } or raise "no Set-Cookie for #{name}: #{lines.inspect}"
+  raise "#{name} has no twenty-year Expires: #{line}" unless line =~ /; Expires=\w{3}, \d{2} \w{3} #{year} \d{2}:\d{2}:\d{2} GMT/
+end
+plain = lines.find { |l| l.start_with?("plain=") } or raise "no Set-Cookie for plain: #{lines.inspect}"
+raise "a plain cookie must stay a session cookie: #{plain}" if plain.include?("Expires")
+session = lines.find { |l| l.start_with?("session_token=") }
+raise "options still apply under permanent: #{session}" unless session.include?("SameSite=Lax") && session.include?("HttpOnly")
+puts "permanent cookies passed"
+"##,
+        )
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn permanent_cookies_record_an_expiry_on_spinel() {
+    permanent_cookie_app()
+        .run_spinel(
+            r##"controller = VisitsController.new
+controller.process_action(:index)
+jar = controller.cookies
+year = (Time.now.utc.year + 20).to_s
+["last_room", "session_token", "remember"].each do |name|
+  exp = jar.flag_expires(name)
+  raise "#{name} has no twenty-year expiry: #{exp.inspect}" unless exp.split(" ")[3] == year && exp.end_with?(" GMT")
+end
+raise "a plain cookie must stay a session cookie" unless jar.flag_expires("plain") == ""
+raise "the signed permanent value must round-trip" unless jar.signed[:session_token] == "tok"
+puts "permanent cookies passed"
+"##,
+        )
+        .assert_passes();
+}
+
 /// Not the scaffold blog's `app/views.rb`, whose requires name views this tree does not have: an app with no views boots and answers a request (#164).
 #[test]
 fn an_app_with_no_views_boots() {
@@ -5144,3 +5741,436 @@ end
         )
         .assert_passes();
 }
+
+#[path = "emit_and_run/string_bytes.rs"]
+mod string_bytes;
+
+/// A Slim view is ingested rather than skipped, so `check` going quiet on
+/// it is a claim the emitted page renders. Swap the blog's index for a
+/// Slim twin that exercises the grammar (shortcuts merging with a
+/// `class=`, Ruby and boolean attributes, `tag: child` nesting, output
+/// and code lines with a block, `|` text, comments) and assert on the
+/// rendered markup, not just the status.
+#[test]
+fn a_slim_view_renders() {
+    let slim = r#"= turbo_stream_from "articles"
+- content_for :title, "Articles"
+- turbo_exempts_page_from_cache
+
+/ never rendered
+.w-full
+  - if notice.present?
+    p.py-2#notice = notice
+  .flex.justify-between
+    h1.font-bold.text-4xl Articles
+    = link_to "New article", new_article_path, class: "rounded-md"
+  #articles.min-w-full class="space-y-5" data-count=@articles.size
+    - if @articles.any?
+      = render @articles
+    - else
+      p.text-center No articles found.
+  ul.slim-list(data-kind="list" hidden)
+    - @articles.each do |article|
+      li: a href=article_path(article) = article.title
+  p.slim-text
+    | plain text
+"#;
+    emit_and_run::real_blog()
+        .remove("app/views/articles/index.html.erb")
+        .write("app/views/articles/index.html.slim", slim)
+        .edit(
+            "test/controllers/articles_controller_test.rb",
+            "    assert_select \"h1\", \"Articles\"\n",
+            "    assert_select \"h1.font-bold\", \"Articles\"\n    \
+             assert_select \"#articles.min-w-full.space-y-5[data-count]\"\n    \
+             assert_select \"ul.slim-list[data-kind=list][hidden] li a\", minimum: 1\n    \
+             assert_select \"p.slim-text\", \"plain text\"\n",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+/// A view directory with a hyphen (`product-item/`) is legal in Rails and
+/// common in real apps, but `Views::Product-item` and a `product-item`
+/// parameter are not Ruby. The emitted partial must load and render.
+#[test]
+fn a_hyphenated_view_directory_renders() {
+    emit_and_run::real_blog()
+        .write(
+            "app/views/note-card/_note.html.erb",
+            "<aside class=\"note-card\"><%= note %></aside>\n",
+        )
+        .edit(
+            "app/views/articles/index.html.erb",
+            "<div class=\"w-full\">\n",
+            "<div class=\"w-full\">\n  <%= render \"note-card/note\", note: \"hyphen ok\" %>\n",
+        )
+        .edit(
+            "test/controllers/articles_controller_test.rb",
+            "    assert_select \"h1\", \"Articles\"\n",
+            "    assert_select \"h1\", \"Articles\"\n    assert_select \"aside.note-card\", \"hyphen ok\"\n",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+/// Rails' own guards against a request-steered header, ahead of the
+/// server's (which drops any header holding a control character):
+/// `redirect_to` deletes CR and LF from the location
+/// (`_compute_redirect_to_location`, actionpack 8.1), and Active
+/// Storage serves only `inline` or `attachment`, whatever disposition a
+/// URL asks for (`content_disposition_with`, activestorage 8.1) — the
+/// blob redirect route takes it from a query param and signs it into
+/// the disk URL whose Content-Disposition it becomes.
+fn header_values_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "docs", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "active_storage_blobs", force: :cascade do |t|
+    t.string "key", null: false
+    t.string "filename", null: false
+    t.string "content_type"
+    t.text "metadata"
+    t.string "service_name", null: false
+    t.bigint "byte_size", null: false
+    t.string "checksum"
+    t.datetime "created_at", null: false
+  end
+  create_table "active_storage_attachments", force: :cascade do |t|
+    t.string "name", null: false
+    t.string "record_type", null: false
+    t.bigint "record_id", null: false
+    t.bigint "blob_id", null: false
+    t.datetime "created_at", null: false
+  end
+end
+"#)
+        .write("app/models/doc.rb", "class Doc < ApplicationRecord\n  has_one_attached :file\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get \"/bounce\", to: \"docs#bounce\"\nend\n")
+        .write("app/controllers/docs_controller.rb", r#"class DocsController < ApplicationController
+  def bounce
+    redirect_to params[:back]
+  end
+end
+"#)
+}
+
+#[test]
+fn request_steered_header_values_stay_one_line() {
+    header_values_app()
+        .run_ruby(r#"
+require_relative "app/controllers/docs_controller"
+controller = DocsController.new
+controller.params = { "back" => "/next\r\nSet-Cookie: pwned=1" }
+controller.process_action(:bounce)
+location = controller.location.to_s
+raise "CR/LF reached the Location: #{location.inspect}" if location.include?("\r") || location.include?("\n")
+raise "the rest of the location is kept, as Rails keeps it: #{location.inspect}" unless location == "/nextSet-Cookie: pwned=1"
+
+asked = ActiveStorage::DiskKey.decode(ActiveStorage::DiskKey.encode("k", "attachment\r\nSet-Cookie: pwned=1"))
+raise "an unknown disposition was signed as asked: #{asked.inspect}" unless asked == ["k", "inline"]
+kept = ActiveStorage::DiskKey.decode(ActiveStorage::DiskKey.encode("k", "attachment"))
+raise "attachment is a disposition: #{kept.inspect}" unless kept == ["k", "attachment"]
+puts "header values passed"
+"#)
+        .assert_passes();
+}
+
+fn query_value_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\n  protect_from_forgery with: :exception\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#)
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write("config/routes.rb", r#"Rails.application.routes.draw do
+  get "/limited", to: "widgets#limited"
+  get "/paged", to: "widgets#paged"
+  get "/sorted", to: "widgets#sorted"
+  get "/sorted_by", to: "widgets#sorted_by"
+  get "/sorted_str", to: "widgets#sorted_str"
+  get "/bounce", to: "widgets#bounce"
+  post "/touch", to: "widgets#touch"
+  get "/headed", to: "widgets#headed"
+  get "/tails", to: "widgets#tails"
+end
+"#)
+        .write("app/controllers/widgets_controller.rb", r#"class WidgetsController < ApplicationController
+  def limited
+    render plain: Widget.order(:name).limit(params[:n]).map { |w| w.name }.join(",")
+  end
+
+  def paged
+    render plain: Widget.order(:name).offset(params[:skip]).map { |w| w.name }.join(",")
+  end
+
+  def sorted
+    render plain: Widget.order(name: params[:dir]).map { |w| w.name }.join(",")
+  end
+
+  def sorted_by
+    render plain: Widget.order(params[:sort] => :asc).map { |w| w.name }.join(",")
+  end
+
+  def sorted_str
+    render plain: Widget.order(params[:sort]).map { |w| w.name }.join(",")
+  end
+
+  def bounce
+    redirect_to params[:back]
+  end
+
+  def touch
+    render plain: "ok"
+  end
+
+  def headed
+    head :created, location: params[:back]
+  end
+
+  def tails
+    render plain: Widget.order(:name).first(1).map { |w| w.name }.join(",") + Widget.order(:name).last(1).map { |w| w.name }.join(",")
+  end
+end
+"#)
+}
+
+fn query_value_assertions() -> &'static str {
+    r#"
+require_relative "app/controllers/widgets_controller"
+ActionController::Base.allow_forgery_protection = false
+Widget.create!(name: "beta")
+Widget.create!(name: "alpha")
+Widget.create!(name: "gamma")
+
+def run(action, params)
+  controller = WidgetsController.new
+  controller.request_method = "GET"
+  controller.params = params
+  controller.process_action(action)
+  controller.body
+end
+
+def rejected(action, params)
+  "ran: " + run(action, params)
+rescue ArgumentError
+  "rejected"
+end
+
+got = run(:limited, { "n" => "2" })
+raise "a numeric String limit is Rails' Integer(): #{got}" unless got == "alpha,beta"
+got = rejected(:limited, { "n" => "(SELECT COUNT(*) FROM widgets)" })
+raise "LIMIT took SQL: #{got}" unless got == "rejected"
+
+got = run(:paged, { "skip" => "1" })
+raise "a numeric String offset is Rails' to_i: #{got}" unless got == "beta,gamma"
+got = run(:paged, { "skip" => "(SELECT 2)" })
+raise "OFFSET took SQL: #{got}" unless got == "alpha,beta,gamma"
+got = run(:paged, { "skip" => "1; SELECT 1" })
+raise "OFFSET to_i prefix: #{got}" unless got == "beta,gamma"
+
+got = run(:sorted, { "dir" => "desc" })
+raise "a String direction: #{got}" unless got == "gamma,beta,alpha"
+got = rejected(:sorted, { "dir" => "asc, (SELECT 1)" })
+raise "ORDER direction took SQL: #{got}" unless got == "rejected"
+
+got = run(:sorted_by, { "sort" => "name" })
+raise "a String column key: #{got}" unless got == "alpha,beta,gamma"
+got = rejected(:sorted_by, { "sort" => "(SELECT 1)" })
+raise "ORDER column took SQL: #{got}" unless got == "rejected"
+got = run(:sorted_by, { "sort" => "widgets.name" })
+raise "table.col hash key: #{got}" unless got == "alpha,beta,gamma"
+
+got = run(:sorted_str, { "sort" => "name desc" })
+raise "string order: #{got}" unless got == "gamma,beta,alpha"
+got = rejected(:sorted_str, { "sort" => "id DESC, (SELECT 1)" })
+raise "string ORDER took SQL: #{got}" unless got == "rejected"
+got = Widget.all.order("LOWER(name)").map { |w| w.name }.join(",")
+raise "LOWER(name) order: #{got}" unless got == "alpha,beta,gamma"
+got = Widget.all.order("RANDOM()").map { |w| w.name }.length
+raise "RANDOM() order rejected" unless got == 3
+got = rejected(:sorted_str, { "sort" => "SLEEP()" })
+raise "SLEEP() order: #{got}" unless got == "rejected"
+got = rejected(:sorted_str, { "sort" => "LOWER(name); SELECT 1" })
+raise "LOWER plus splice: #{got}" unless got == "rejected"
+
+rel = Widget.all.order(:name)
+begin
+  rel.last_n("(SELECT 1)")
+  raise "last_n accepted SQL"
+rescue ArgumentError
+  got = rel.order(:name).map { |w| w.name }.join(",")
+  raise "last_n mutated orders: #{got}" unless got == "alpha,beta,gamma"
+end
+got = Widget.all.order(:name).first_n("2").map { |w| w.name }.join(",")
+raise "first_n string: #{got}" unless got == "alpha,beta"
+got = Widget.all.order(:name).limit(2.9).map { |w| w.name }.join(",")
+raise "float limit truncate: #{got}" unless got == "alpha,beta"
+
+puts "query values passed"
+"#
+}
+
+#[test]
+fn query_params_are_values_not_sql() {
+    query_value_app()
+        .run_ruby(query_value_assertions())
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn query_params_are_values_not_sql_on_spinel() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{}",
+        query_value_assertions()
+    );
+    query_value_app().run_spinel(&script).assert_passes();
+}
+
+#[test]
+fn request_steered_head_and_headers_stay_one_line() {
+    query_value_app()
+        .run_ruby(r#"
+require_relative "app/controllers/widgets_controller"
+ActionController::Base.allow_forgery_protection = false
+controller = WidgetsController.new
+controller.params = { "back" => "/next\r\nSet-Cookie: pwned=1" }
+controller.process_action(:headed)
+location = controller.location.to_s
+raise "head location kept CR/LF: #{location.inspect}" if location.include?("\r") || location.include?("\n")
+
+controller = WidgetsController.new
+controller.headers["X-Link"] = "a\r\nSet-Cookie: pwned=1"
+raise "CR/LF header was stored" unless controller.headers["X-Link"].nil?
+
+controller.headers["X-Ok"] = "one-line"
+raise "legal header dropped" unless controller.headers["X-Ok"] == "one-line"
+
+controller.headers["X-Rev"] = nil
+raise "nil header write stored a value" unless controller.headers["X-Rev"].nil?
+raise "nil header wiped a sibling" unless controller.headers["X-Ok"] == "one-line"
+puts "head and headers passed"
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn redirect_to_rejects_an_unvalidated_host() {
+    query_value_app()
+        .run_ruby(r#"
+require_relative "app/controllers/widgets_controller"
+ActionController::Base.allow_forgery_protection = false
+controller = WidgetsController.new
+controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.request_method = "GET"
+controller.params = { "back" => "http://evil.example/" }
+begin
+  controller.process_action(:bounce)
+  raise "open redirect ran: #{controller.location.inspect}"
+rescue ArgumentError
+end
+
+controller = WidgetsController.new
+controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.request_method = "GET"
+controller.params = { "back" => "/home" }
+controller.process_action(:bounce)
+raise "relative redirect lost: #{controller.location.inspect}" unless controller.location == "/home"
+
+controller = WidgetsController.new
+controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.request_method = "GET"
+controller.params = { "back" => "http://app.example/ok" }
+controller.process_action(:bounce)
+raise "same-host absolute refused: #{controller.location.inspect}" unless controller.location == "http://app.example/ok"
+
+controller = WidgetsController.new
+controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "evil.example")
+controller.request_method = "GET"
+controller.session[:return_to_after_authenticating] = controller.request.url
+controller.params = { "back" => controller.session[:return_to_after_authenticating] }
+controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.request_method = "GET"
+begin
+  controller.process_action(:bounce)
+  raise "spoofed request.url honored: #{controller.location.inspect}"
+rescue ArgumentError
+end
+
+controller = WidgetsController.new
+controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.request_method = "GET"
+controller.params = { "back" => "/\\evil.example" }
+begin
+  controller.process_action(:bounce)
+  raise "backslash host honored: #{controller.location.inspect}"
+rescue ArgumentError
+end
+
+controller = WidgetsController.new
+controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.request_method = "GET"
+controller.params = { "back" => "///evil.example" }
+begin
+  controller.process_action(:bounce)
+  raise "triple-slash honored: #{controller.location.inspect}"
+rescue ArgumentError
+end
+
+controller = WidgetsController.new
+controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.request_method = "GET"
+controller.params = { "back" => "/\t/evil.example" }
+begin
+  controller.process_action(:bounce)
+  raise "tab host honored: #{controller.location.inspect}"
+rescue ArgumentError
+end
+puts "open redirect passed"
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn csrf_rejects_a_post_without_the_session_token() {
+    query_value_app()
+        .run_ruby(r#"
+require_relative "app/controllers/widgets_controller"
+ActionController::Base.allow_forgery_protection = true
+controller = WidgetsController.new
+ActionController::Current.controller = controller
+req = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example", "REQUEST_METHOD" => "POST")
+controller.request = req
+ActionController::Current.request = req
+controller.request_method = "POST"
+controller.params = {}
+controller.process_action(:touch)
+raise "empty CSRF ran: #{controller.status}" unless controller.status == 422
+
+controller = WidgetsController.new
+ActionController::Current.controller = controller
+req = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example", "REQUEST_METHOD" => "POST")
+controller.request = req
+ActionController::Current.request = req
+controller.request_method = "POST"
+controller.session[:_csrf_token] = "tok"
+controller.params = { "authenticity_token" => "tok" }
+controller.process_action(:touch)
+raise "matching CSRF failed: #{controller.status} #{controller.body}" unless controller.status == 200 && controller.body == "ok"
+
+token = ActionView::ViewHelpers.form_authenticity_token
+raise "parked session token not read: #{token.inspect}" unless token == "tok"
+puts "csrf passed"
+"#)
+        .assert_passes();
+}
+

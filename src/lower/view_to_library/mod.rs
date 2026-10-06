@@ -63,20 +63,33 @@ pub fn lower_views_to_library_classes(
     app: &App,
     extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
 ) -> Vec<LibraryClass> {
-    // Build LibraryClasses (with method signatures populated) but
-    // *skip* the per-view internal body-typing pass — we'll do it
-    // below with the merged registry.
-    //
-    // Only ERB (html-format) views go through this path. Jbuilder
-    // (json-format) views are lowered by `jbuilder_to_library`,
-    // which produces `<name>_json` methods on the same view module.
     let vctx = ViewLowerCtx::new(app);
-    let mut lcs: Vec<LibraryClass> = views
+    let mut lcs = preliminary_view_classes(views, &vctx);
+    type_view_library_classes(&mut lcs, app, extras);
+    lcs
+}
+
+/// Untyped view classes used only to seed model/controller registries
+/// with `Views::*` method signatures. Body typing happens later in
+/// [`type_view_library_classes`]. Callers that already built a
+/// [`ViewLowerCtx`] should use this instead of a second `ViewLowerCtx::new`
+/// plus a typed `lower` walk — signatures do not need typed bodies.
+pub fn preliminary_view_classes(views: &[View], vctx: &ViewLowerCtx<'_>) -> Vec<LibraryClass> {
+    views
         .iter()
         .filter(|v| crate::lower::view::lowers_through_view_path(v))
         .map(|v| vctx.lower_untyped(v))
-        .collect();
+        .collect()
+}
 
+/// Type untyped view LibraryClasses against a merged extras registry.
+/// Mutates `lcs` in place so a preliminary untyped pass can be reused
+/// instead of constructing the classes a second time.
+pub fn type_view_library_classes(
+    lcs: &mut Vec<LibraryClass>,
+    app: &App,
+    extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
+) {
     // Merge: caller extras + framework runtime stubs + view modules
     // themselves (so cross-view dispatch like Views::Articles.article
     // resolves from one view to another).
@@ -87,7 +100,7 @@ pub fn lower_views_to_library_classes(
     }
     insert_framework_stubs(&mut classes);
     insert_route_helper_stubs(&mut classes, app);
-    for lc in &lcs {
+    for lc in lcs.iter() {
         let info = classes.entry(lc.name.clone()).or_default();
         for m in &lc.methods {
             if let Some(sig) = &m.signature {
@@ -127,16 +140,15 @@ pub fn lower_views_to_library_classes(
     // defines. Here, after every pass that pattern-matches the bare
     // shape in URL position, is the last moment the two spellings can
     // be made one.
-    crate::lower::route_helper_receiver::qualify_lcs(&mut lcs, app);
+    crate::lower::route_helper_receiver::qualify_lcs(lcs, app);
 
     let empty_ivars: std::collections::HashMap<Symbol, crate::ty::Ty> =
         std::collections::HashMap::new();
-    for lc in &mut lcs {
+    for lc in lcs.iter_mut() {
         for method in &mut lc.methods {
             crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
         }
     }
-    lcs
 }
 
 /// Migration entry point: lower views to `LibraryFunction`s, the
@@ -3342,7 +3354,12 @@ pub(crate) fn build_view_signature_from(
     })
 }
 
-pub(crate) fn infer_view_arg(stem: &str, dir: &str, is_partial: bool, _known_models: &[String]) -> String {
+pub(crate) fn infer_view_arg(stem: &str, dir: &str, is_partial: bool, known_models: &[String]) -> String {
+    // A hyphenated directory (`product-item`) is no identifier.
+    infer_view_arg_raw(stem, dir, is_partial, known_models).replace('-', "_")
+}
+
+fn infer_view_arg_raw(stem: &str, dir: &str, is_partial: bool, _known_models: &[String]) -> String {
     if dir.is_empty() {
         return String::new();
     }
@@ -4472,6 +4489,12 @@ mod tests {
     fn module_id_for_articles_dir() {
         let id = view_module_id("articles");
         assert_eq!(id.0.as_str(), "Views::Articles");
+    }
+
+    #[test]
+    fn a_hyphenated_view_directory_yields_a_valid_constant_and_local() {
+        assert_eq!(view_module_id("product-item").0.as_str(), "Views::ProductItem");
+        assert_eq!(infer_view_arg("_default", "product-item", true, &[]), "product_item");
     }
 
     #[test]
