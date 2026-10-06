@@ -636,12 +636,36 @@ impl<'a> BodyTyper<'a> {
                         }
                     }
                     Some(Some(ResolvedConstant::Value { declaration, name, runtime })) => {
-    // Concern splices retain the resolved value owner as well as its type.
-    qualify_resolved_path(path, name);
-    self.typed_constants.and_then(|values| values.get(declaration)).cloned()
-        .or_else(|| runtime.as_ref().map(|ty| (**ty).clone()))
-        .unwrap_or_else(unknown)
-}
+                        // Value constants: `name` is the FULL declaration
+                        // (`DnsTestHelper::WEB_PUSH_PUBLIC_TEST_IP`). Expanding
+                        // a bare path via `qualify_resolved_path` would rebuild
+                        // that qualification. Test-helper splice unqualifies to
+                        // a bare name on the test class and never emits the
+                        // helper module — re-expanding (esp. from lower's
+                        // `type_method_body`, which has an empty ConstScope)
+                        // is a NameError at load (campfire push-subscription
+                        // floor: 375/405 vs 392). Keep bare paths bare; when
+                        // the class owns the leaf, strip a qualified write too.
+                        // Namespace (class) refs still qualify above.
+                        let leaf = path.last().cloned();
+                        let locally_owned = leaf
+                            .as_ref()
+                            .is_some_and(|n| ctx.constants.get_own(n).is_some());
+                        if path.len() == 1 {
+                            // already bare — do not expand
+                        } else if locally_owned {
+                            if let Some(n) = leaf {
+                                *path = vec![n];
+                            }
+                        } else {
+                            qualify_resolved_path(path, name);
+                        }
+                        self.typed_constants
+                            .and_then(|values| values.get(declaration))
+                            .cloned()
+                            .or_else(|| runtime.as_ref().map(|ty| (**ty).clone()))
+                            .unwrap_or_else(unknown)
+                    }
                     // An unresolved source reference may still name an
                     // exact modeled external class (for example Time).
                     Some(None) => exact_modeled_class(path),
