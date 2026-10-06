@@ -494,7 +494,7 @@ end
     match &*first.node {
         roundhouse::ExprNode::If { cond, then_branch, .. } => {
             match &*cond.node {
-                roundhouse::ExprNode::Send { recv: None, method, .. } => {
+                roundhouse::ExprNode::Send { method, .. } => {
                     assert_eq!(method.as_str(), "profile");
                 }
                 other => panic!("expected profile reader cond; got {other:?}"),

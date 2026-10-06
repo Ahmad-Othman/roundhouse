@@ -26,7 +26,7 @@ const CONTROLLER: &str = r#"class ReportsController < ApplicationController
   end
 
   def distinct_index
-    reports = Report.select("title").distinct.order(:title).page(params[:page]).per(params[:per])
+    reports = Report.order(:title).select("title").distinct.page(params[:page]).per(params[:per])
     render plain: "page=#{reports.current_page} per=#{reports.limit_value} total=#{reports.total_count} " \
                   "pages=#{reports.total_pages} next=#{reports.next_page.inspect} prev=#{reports.prev_page.inspect} " \
                   "first=#{reports.first_page?} last=#{reports.last_page?} out=#{reports.out_of_range?} " \
@@ -34,7 +34,7 @@ const CONTROLLER: &str = r#"class ReportsController < ApplicationController
   end
 
   def grouped_index
-    reports = Report.select("title").group("title").order("title").page(params[:page]).per(params[:per])
+    reports = Report.order("title").select("title").group("title").page(params[:page]).per(params[:per])
     render plain: "page=#{reports.current_page} per=#{reports.limit_value} total=#{reports.total_count} " \
                   "pages=#{reports.total_pages} next=#{reports.next_page.inspect} prev=#{reports.prev_page.inspect} " \
                   "first=#{reports.first_page?} last=#{reports.last_page?} out=#{reports.out_of_range?} " \
@@ -160,7 +160,7 @@ expect("/distinct", "page=2&per=2", "page=2 per=2 total=3 pages=2 next=nil prev=
 expect("/distinct", "page=9&per=2", "page=9 per=2 total=3 pages=2 next=nil prev=nil first=false last=false out=true titles=")
 expect("/grouped", "page=1&per=2", "page=1 per=2 total=3 pages=2 next=2 prev=nil first=true last=false out=false titles=a,b")
 expect("/grouped", "page=2&per=2", "page=2 per=2 total=3 pages=2 next=nil prev=1 first=false last=true out=false titles=c")
-rel = Report.select("title").distinct.order(:title).page(2).per(2)
+rel = Report.order(:title).select("title").distinct.page(2).per(2)
 sql = rel.to_sql
 loaded = rel.to_a.map(&:title)
 _ = rel.total_count
