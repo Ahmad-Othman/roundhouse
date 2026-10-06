@@ -912,9 +912,10 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         return "__MODULE__".to_string();
     }
 
-    // `recv.__index_put__(k, v)` (from local_accumulation's `x[k]=v`)
-    // rendered by receiver type: a struct routes to its `put` setter,
-    // a map (or unknown) to `Map.put`.
+    // `recv.__index_put__(k, v)` (from local_accumulation's `x[k]=v`
+    // and mutation_to_struct_return's `@x[k]=v`) rendered by receiver
+    // type: a struct routes to its `put` setter; an Int-indexed write
+    // is a List slot (`List.replace_at`); otherwise Map.put.
     if method == "__index_put__" && args.len() == 2 {
         if let Some(r) = recv {
             let r_s = emit_expr(r);
@@ -922,6 +923,18 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             if let Some(crate::ty::Ty::Class { id, .. }) = r.ty.as_ref() {
                 let module = super::library::v2_module_name(id.0.as_str());
                 return format!("{module}.put({r_s}, {k}, {v})");
+            }
+            // Array slot write: HeaderStore `@vals[i] = value` and similar.
+            // Int index → List; Hash key → Map.
+            let index_is_int = matches!(
+                args[0].ty.as_ref(),
+                Some(crate::ty::Ty::Int)
+            ) || matches!(
+                effective_recv_ty(r),
+                Some(crate::ty::Ty::Array { .. })
+            );
+            if index_is_int {
+                return format!("List.replace_at({r_s}, {k}, {v})");
             }
             return format!("Map.put({r_s}, {k}, {v})");
         }

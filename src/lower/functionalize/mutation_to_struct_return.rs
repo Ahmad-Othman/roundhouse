@@ -833,9 +833,28 @@ fn rewrite_expr(e: &Expr) -> Expr {
         // [v]}`. On mutable targets the accessor returns the @errors Array
         // and `<<` mutates it in place; the functional equivalent threads
         // a struct-update append (the accessor name is the field name).
+        //
+        // Same for `@arr << v` (HeaderStore `@keys << key`): ivar recv,
+        // not an accessor Send.
         ExprNode::Send { recv: Some(r), method, args, .. }
             if method.as_str() == "<<" && args.len() == 1 =>
         {
+            if let ExprNode::Ivar { name } = &*r.node {
+                let appended = syn(ExprNode::Send {
+                    recv: Some(field_read(name)),
+                    method: Symbol::from("++"),
+                    args: vec![syn(ExprNode::Array {
+                        elements: vec![rewrite_expr(&args[0])],
+                        style: ArrayStyle::Brackets,
+                    })],
+                    block: None,
+                    parenthesized: false,
+                });
+                return syn(ExprNode::Assign {
+                    target: LValue::Var { id: VarId(0), name: Symbol::from(RECORD) },
+                    value: struct_put(name, appended),
+                });
+            }
             if let ExprNode::Send { recv: ar, method: field, args: fargs, .. } = &*r.node {
                 if fargs.is_empty()
                     && ar.as_ref().is_none_or(|x| matches!(&*x.node, ExprNode::SelfRef))
