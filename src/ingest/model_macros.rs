@@ -1,33 +1,58 @@
-//! Specialize concern macros that define instance methods from symbols.
+//! Specialize concern macros that define instance methods from symbols
+//! or from a statically interpolatable `class_eval` string/heredoc.
 //!
 //! Writebook's `positioned_within` closes over three symbol arguments in
 //! parameterless `define_method` blocks, then marks the helpers private.
-//! Turn that compile-time work into ordinary methods BEFORE inference,
-//! once for every target. This is deliberately not a Ruby evaluator:
-//! mutable captures, block parameters, nested blocks, control flow,
-//! side effects outside the definitions and redefinitions stay unexpanded.
+//! The same pass expands a class-body `class_eval <<-CODE` whose
+//! interpolations are those bound symbols — without executing Ruby.
+//! Dynamic `class_eval` (non-literal, unknown interpolations) stays
+//! unexpanded. This is deliberately not a Ruby evaluator: mutable
+//! captures, block parameters, nested blocks, control flow, side
+//! effects outside the definitions and redefinitions stay unexpanded.
 
 use std::collections::{HashMap, HashSet};
 
+use super::util::constant_id_str;
 use crate::App;
 use crate::dialect::{MethodDef, MethodReceiver, MethodVisibility, ModelBodyItem};
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::span::SourceFile;
 
-pub(crate) fn expand_model_macros(app: &mut App, sources: &[SourceFile]) -> super::IngestResult<()> {
-    if app.concern_spliced_class_methods.is_empty() {
+pub(crate) fn expand_model_macros(
+    app: &mut App,
+    sources: &[SourceFile],
+) -> super::IngestResult<()> {
+    if app.concern_spliced_class_methods.is_empty() && app.load_hook_class_macros.is_empty() {
         return Ok(());
     }
     let mut params_specs =
         crate::lower::controller_to_library::params::collect_specs(&app.controllers);
     params_specs.mark_file_fields(&app.models);
+    let hook_macros: Vec<(ClassId, MethodDef)> = app
+        .load_hook_class_macros
+        .iter()
+        .flat_map(|id| {
+            app.library_classes
+                .iter()
+                .find(|c| &c.name == id)
+                .into_iter()
+                .flat_map(|c| {
+                    c.methods.iter().filter_map(|m| {
+                        (m.receiver == MethodReceiver::Class && has_definition(&m.body))
+                            .then(|| (id.clone(), m.clone()))
+                    })
+                })
+        })
+        .collect();
     for model_index in 0..app.models.len() {
         let model = &app.models[model_index];
-        let Some(origins) = app.concern_spliced_class_methods.get(&model.name) else {
-            continue;
-        };
-        let macros: HashMap<_, _> = model
+        let mut origins = app
+            .concern_spliced_class_methods
+            .get(&model.name)
+            .cloned()
+            .unwrap_or_default();
+        let mut macros: HashMap<_, _> = model
             .methods()
             .filter(|m| {
                 m.receiver == MethodReceiver::Class
@@ -36,9 +61,23 @@ pub(crate) fn expand_model_macros(app: &mut App, sources: &[SourceFile]) -> supe
             })
             .map(|m| (m.name.clone(), m.clone()))
             .collect();
+        for (origin, def) in &hook_macros {
+            origins
+                .entry(def.name.clone())
+                .or_insert_with(|| origin.clone());
+            macros
+                .entry(def.name.clone())
+                .or_insert_with(|| def.clone());
+        }
+        if macros.is_empty() {
+            continue;
+        }
         let mut candidates = Vec::new();
         let mut calls = HashMap::<Symbol, usize>::new();
         let mut included = HashSet::new();
+        for id in &app.load_hook_class_macros {
+            included.insert(id.clone());
+        }
         for (index, item) in model.body.iter().enumerate() {
             let ModelBodyItem::Unknown { expr, .. } = item else {
                 continue;
@@ -108,19 +147,25 @@ pub(crate) fn expand_model_macros(app: &mut App, sources: &[SourceFile]) -> supe
                 && block.is_none()
                 && included.contains(origin)
                 && providers == 1
-                && ["define_method", "private", "protected", "public"]
-                    .iter()
-                    .all(|name| {
-                        !crate::lower::scope_chain::app_method(
-                            app,
-                            &model.name,
-                            &Symbol::from(*name),
-                            MethodReceiver::Class,
-                        )
-                    })
+                && [
+                    "define_method",
+                    "private",
+                    "protected",
+                    "public",
+                    "class_eval",
+                ]
+                .iter()
+                .all(|name| {
+                    !crate::lower::scope_chain::app_method(
+                        app,
+                        &model.name,
+                        &Symbol::from(*name),
+                        MethodReceiver::Class,
+                    )
+                })
                 && supported_source_signature(def, sources)
                 && supported_source_call(expr, sources))
-            .then(|| expand(def, args, sources))
+            .then(|| expand(def, args, sources, &model.name))
             .flatten();
             candidates.push((index, method.clone(), methods));
         }
@@ -156,8 +201,8 @@ pub(crate) fn expand_model_macros(app: &mut App, sources: &[SourceFile]) -> supe
         // first one become a misleading partial expansion either.
         let mut names = HashMap::<Symbol, usize>::new();
         for (_, _, methods) in &candidates {
-            let Some(methods) = methods else { continue };
-            for m in methods {
+            let Some(expansion) = methods else { continue };
+            for m in &expansion.methods {
                 *names.entry(m.name.clone()).or_default() += 1;
             }
         }
@@ -166,10 +211,10 @@ pub(crate) fn expand_model_macros(app: &mut App, sources: &[SourceFile]) -> supe
         // invent a partial class when one candidate's effects are unknown.
         let opaque = candidates.iter().any(|(_, _, methods)| methods.is_none());
         for (index, name, methods) in candidates {
-            let methods = methods.filter(|methods| {
+            let methods = methods.filter(|expansion| {
                 !opaque
                     && calls[&name] == 1
-                    && methods.iter().all(|m| {
+                    && expansion.methods.iter().all(|m| {
                         names[&m.name] == 1
                             && !reserved.contains(&m.name)
                             && !crate::lower::scope_chain::app_method(
@@ -205,7 +250,7 @@ pub(crate) fn expand_model_macros(app: &mut App, sources: &[SourceFile]) -> supe
         let model = &mut app.models[model_index];
         let mut body = Vec::new();
         for (index, item) in std::mem::take(&mut model.body).into_iter().enumerate() {
-            let Some(methods) = expansions.remove(&index) else {
+            let Some(expansion) = expansions.remove(&index) else {
                 body.push(item);
                 continue;
             };
@@ -217,7 +262,7 @@ pub(crate) fn expand_model_macros(app: &mut App, sources: &[SourceFile]) -> supe
             else {
                 unreachable!()
             };
-            for mut method in methods {
+            for mut method in expansion.methods {
                 method.enclosing_class = Some(model.name.0.clone());
                 body.push(ModelBodyItem::Method {
                     method,
@@ -225,6 +270,7 @@ pub(crate) fn expand_model_macros(app: &mut App, sources: &[SourceFile]) -> supe
                     leading_blank_line: std::mem::take(&mut leading_blank_line),
                 });
             }
+            body.extend(expansion.items);
         }
         model.body = body;
     }
@@ -276,8 +322,7 @@ fn supported_source_signature(def: &MethodDef, sources: &[SourceFile]) -> bool {
                         .all(|p| p.as_required_parameter_node().is_some())
                     && params.keywords().iter().all(|p| {
                         p.as_required_keyword_parameter_node().is_some()
-                            || p.as_optional_keyword_parameter_node()
-                                .is_some_and(|p| p.value().as_symbol_node().is_some())
+                            || p.as_optional_keyword_parameter_node().is_some()
                     })
             });
         }
@@ -343,7 +388,9 @@ fn supported_source_call(expr: &Expr, sources: &[SourceFile]) -> bool {
 }
 
 fn has_definition(body: &Expr) -> bool {
-    if matches!(&*body.node, ExprNode::Send { method, .. } if method.as_str() == "define_method") {
+    if matches!(&*body.node, ExprNode::Send { method, .. }
+        if matches!(method.as_str(), "define_method" | "class_eval"))
+    {
         return true;
     }
     let mut found = false;
@@ -410,9 +457,22 @@ fn bindings(def: &MethodDef, args: &[Expr]) -> Option<HashMap<Symbol, Expr>> {
     let mut out = HashMap::new();
     for param in &def.params {
         let value = if param.keyword || param.from_keyword {
-            keywords
+            match keywords
                 .remove(&param.name)
-                .or_else(|| param.default.clone())?
+                .or_else(|| param.default.clone())
+            {
+                Some(value) => {
+                    symbol(&value)?;
+                    value
+                }
+                None if param.keyword || param.from_keyword => {
+                    // Optional keyword not passed, default is not a
+                    // substitutable symbol — omit it from the binding
+                    // set so later statements that need it decline.
+                    continue;
+                }
+                None => return None,
+            }
         } else {
             positional.next()?.clone()
         };
@@ -425,7 +485,31 @@ fn bindings(def: &MethodDef, args: &[Expr]) -> Option<HashMap<Symbol, Expr>> {
     (positional.next().is_none() && keywords.is_empty()).then_some(out)
 }
 
-fn expand(def: &MethodDef, args: &[Expr], sources: &[SourceFile]) -> Option<Vec<MethodDef>> {
+struct Expansion {
+    methods: Vec<MethodDef>,
+    items: Vec<ModelBodyItem>,
+}
+
+fn expand(
+    def: &MethodDef,
+    args: &[Expr],
+    sources: &[SourceFile],
+    owner: &ClassId,
+) -> Option<Expansion> {
+    if let Some(methods) = expand_define_methods(def, args, sources) {
+        return Some(Expansion {
+            methods,
+            items: Vec::new(),
+        });
+    }
+    expand_class_eval_macro(def, args, sources, owner)
+}
+
+fn expand_define_methods(
+    def: &MethodDef,
+    args: &[Expr],
+    sources: &[SourceFile],
+) -> Option<Vec<MethodDef>> {
     let bindings = bindings(def, args)?;
     let statements = match &*def.body.node {
         ExprNode::Seq { exprs } => exprs.as_slice(),
@@ -619,4 +703,235 @@ fn substitute(mut expr: Expr, bindings: &HashMap<Symbol, Expr>) -> Option<Expr> 
         _ => return None,
     }
     Some(expr)
+}
+
+fn expand_class_eval_macro(
+    def: &MethodDef,
+    args: &[Expr],
+    sources: &[SourceFile],
+    owner: &ClassId,
+) -> Option<Expansion> {
+    let bindings = bindings(def, args)?;
+    let mut idents = HashMap::new();
+    for (k, v) in &bindings {
+        idents.insert(k.as_str().to_string(), symbol(v)?.as_str().to_string());
+    }
+    let source = def
+        .name_span
+        .file
+        .0
+        .checked_sub(1)
+        .and_then(|i| sources.get(i as usize))?;
+    let parsed = ruby_prism::parse(source.text.as_bytes());
+    if parsed.errors().next().is_some() {
+        return None;
+    }
+    enum Piece {
+        ClassEval(String),
+        Stmt(String),
+    }
+    struct Collect {
+        offset: usize,
+        idents: HashMap<String, String>,
+        pieces: Vec<Piece>,
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Collect {
+        fn visit_def_node(&mut self, defn: &ruby_prism::DefNode<'pr>) {
+            if defn.name_loc().start_offset() != self.offset {
+                return;
+            }
+            let Some(body) = defn.body() else {
+                return;
+            };
+            for stmt in super::util::flatten_statements(body) {
+                if let Some(call) = stmt.as_call_node() {
+                    if call.receiver().is_none() && constant_id_str(&call.name()) == "class_eval" {
+                        if let Some(template) = class_eval_template(&call, &self.idents) {
+                            self.pieces.push(Piece::ClassEval(template));
+                            continue;
+                        }
+                    }
+                }
+                let loc = stmt.location();
+                self.pieces.push(Piece::Stmt(
+                    String::from_utf8_lossy(loc.as_slice()).into_owned(),
+                ));
+            }
+        }
+    }
+    let mut collect = Collect {
+        offset: def.name_span.start as usize,
+        idents: idents.clone(),
+        pieces: Vec::new(),
+    };
+    ruby_prism::Visit::visit(&mut collect, &parsed.node());
+    let mut methods = Vec::new();
+    let mut items = Vec::new();
+    let file = source.path.as_str();
+    for piece in collect.pieces {
+        let rewritten = match piece {
+            Piece::ClassEval(template) => template,
+            Piece::Stmt(src) => bind_local_reads(&src, &idents)?,
+        };
+        ingest_rewritten_body(&rewritten, owner, file, &mut methods, &mut items)?;
+    }
+    if items
+        .iter()
+        .any(|item| matches!(item, ModelBodyItem::Unknown { .. }))
+    {
+        return None;
+    }
+    (!methods.is_empty() || !items.is_empty()).then_some(Expansion { methods, items })
+}
+
+fn ingest_rewritten_body(
+    src: &str,
+    owner: &ClassId,
+    file: &str,
+    methods: &mut Vec<MethodDef>,
+    items: &mut Vec<ModelBodyItem>,
+) -> Option<()> {
+    let parsed = super::prism::parse_silent(src.as_bytes());
+    if parsed.errors().next().is_some() {
+        return None;
+    }
+    let program = parsed.node().as_program_node()?;
+    for stmt in program.statements().body().iter() {
+        absorb_items(
+            super::model::ingest_model_body_items(&stmt, owner, file, Vec::new()).ok()?,
+            methods,
+            items,
+        );
+    }
+    Some(())
+}
+
+fn absorb_items(
+    ingested: Vec<ModelBodyItem>,
+    methods: &mut Vec<MethodDef>,
+    items: &mut Vec<ModelBodyItem>,
+) {
+    for item in ingested {
+        match item {
+            ModelBodyItem::Method { method, .. } => methods.push(method),
+            other => items.push(other),
+        }
+    }
+}
+
+fn class_eval_template(
+    call: &ruby_prism::CallNode<'_>,
+    idents: &HashMap<String, String>,
+) -> Option<String> {
+    let args = call.arguments()?;
+    let first = args.arguments().iter().next()?;
+    if let Some(s) = first.as_string_node() {
+        return Some(String::from_utf8_lossy(s.unescaped()).into_owned());
+    }
+    interpolate_string_node(&first, idents)
+}
+
+fn interpolate_string_node(
+    node: &ruby_prism::Node<'_>,
+    idents: &HashMap<String, String>,
+) -> Option<String> {
+    if let Some(s) = node.as_string_node() {
+        return Some(String::from_utf8_lossy(s.unescaped()).into_owned());
+    }
+    let interp = node.as_interpolated_string_node()?;
+    let mut out = String::new();
+    for part in interp.parts().iter() {
+        if let Some(s) = part.as_string_node() {
+            out.push_str(&String::from_utf8_lossy(s.unescaped()));
+        } else if let Some(es) = part.as_embedded_statements_node() {
+            let stmts = es.statements()?;
+            let nodes: Vec<_> = stmts.body().iter().collect();
+            let [only] = nodes.as_slice() else {
+                return None;
+            };
+            let name = only
+                .as_local_variable_read_node()
+                .map(|n| String::from_utf8_lossy(n.name().as_slice()).into_owned())
+                .or_else(|| {
+                    only.as_call_node().and_then(|c| {
+                        (c.receiver().is_none() && c.arguments().is_none() && c.block().is_none())
+                            .then(|| String::from_utf8_lossy(c.name().as_slice()).into_owned())
+                    })
+                })?;
+            out.push_str(idents.get(&name)?);
+        } else if part.as_interpolated_string_node().is_some() {
+            out.push_str(&interpolate_string_node(&part, idents)?);
+        } else {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+/// After `#{param}` has been substituted, remaining local reads of a
+/// bound param become symbol literals (`name` → `:body`). A statement
+/// sliced out of its `def` parses those names as receiverless calls,
+/// which must get the same rewrite.
+fn bind_local_reads(src: &str, idents: &HashMap<String, String>) -> Option<String> {
+    let parsed = ruby_prism::parse(src.as_bytes());
+    if parsed.errors().next().is_some() {
+        return None;
+    }
+    struct Locals {
+        hits: Vec<(usize, usize, String)>,
+        idents: HashMap<String, String>,
+    }
+    impl Locals {
+        fn record(&mut self, name: String, loc: ruby_prism::Location<'_>) {
+            if self.idents.contains_key(&name) {
+                self.hits.push((loc.start_offset(), loc.end_offset(), name));
+            }
+        }
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Locals {
+        fn visit_local_variable_read_node(
+            &mut self,
+            node: &ruby_prism::LocalVariableReadNode<'pr>,
+        ) {
+            self.record(
+                String::from_utf8_lossy(node.name().as_slice()).into_owned(),
+                node.location(),
+            );
+        }
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            if node.receiver().is_none() && node.arguments().is_none() && node.block().is_none() {
+                self.record(
+                    String::from_utf8_lossy(node.name().as_slice()).into_owned(),
+                    node.location(),
+                );
+            }
+            if let Some(recv) = node.receiver() {
+                self.visit(&recv);
+            }
+            if let Some(args) = node.arguments() {
+                for arg in args.arguments().iter() {
+                    self.visit(&arg);
+                }
+            }
+            if let Some(block) = node.block() {
+                self.visit(&block);
+            }
+        }
+    }
+    let mut locals = Locals {
+        hits: Vec::new(),
+        idents: idents.clone(),
+    };
+    ruby_prism::Visit::visit(&mut locals, &parsed.node());
+    let mut out = src.to_string();
+    locals.hits.sort_by_key(|(start, _, _)| *start);
+    locals.hits.reverse();
+    for (start, end, name) in locals.hits {
+        let ident = idents.get(&name)?;
+        if start > out.len() || end > out.len() || start > end {
+            return None;
+        }
+        out.replace_range(start..end, &format!(":{ident}"));
+    }
+    Some(out)
 }

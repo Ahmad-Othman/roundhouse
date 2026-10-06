@@ -1,0 +1,430 @@
+//! Compile-time class-body declarations (#30): enum, attribute,
+//! literal `define_method`, interpolatable `class_eval` heredocs, and
+//! the same expansion when the class-method provider is an
+//! `on_load(:active_record)` include rather than an `include` on the
+//! model.
+//!
+//! Forcing coverage is synthetic overlays on the blog fixtures — not a
+//! named app macro. Dynamic string eval stays unexpanded.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use roundhouse::dialect::{Association, MethodReceiver, ModelBodyItem};
+use roundhouse::expr::ExprNode;
+use roundhouse::ingest::ingest_app_from_tree;
+
+#[path = "support/emit_and_run.rs"]
+mod emit_and_run;
+
+const HEREDOC_MACRO: &str = r#"module TitleMacro
+  extend ActiveSupport::Concern
+  class_methods do
+    def titled(name)
+      class_eval <<-CODE, __FILE__, __LINE__ + 1
+        def #{name}
+          @#{name}.to_s
+        end
+        def #{name}=(value)
+          @#{name} = value
+        end
+      CODE
+    end
+  end
+end
+"#;
+
+const CHILD_MACRO: &str = r#"module ChildMacro
+  extend ActiveSupport::Concern
+  class_methods do
+    def child_named(name)
+      has_one name, class_name: "Comment", foreign_key: :article_id
+      class_eval <<-CODE, __FILE__, __LINE__ + 1
+        def #{name}_present?
+          !#{name}.nil?
+        end
+      CODE
+    end
+  end
+end
+"#;
+
+fn tree(files: &[(&str, &str)]) -> HashMap<PathBuf, Vec<u8>> {
+    files
+        .iter()
+        .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect()
+}
+
+fn article_with_macro(
+    concern_path: &str,
+    concern: &str,
+    include_name: &str,
+    model_body: &str,
+) -> HashMap<PathBuf, Vec<u8>> {
+    tree(&[
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table :articles do |t|\n    t.string :title\n  end\n  create_table :comments do |t|\n    t.text :body\n    t.bigint :article_id\n  end\nend\n",
+        ),
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        ),
+        (concern_path, concern),
+        (
+            "app/models/article.rb",
+            &format!(
+                "class Article < ApplicationRecord\n  include {include_name}\n  {model_body}\nend\n"
+            ),
+        ),
+        (
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord\n  belongs_to :article\nend\n",
+        ),
+    ])
+}
+
+fn instance_names(app: &roundhouse::App, model: &str) -> Vec<String> {
+    app.models
+        .iter()
+        .find(|m| m.name.0.as_str() == model)
+        .expect(model)
+        .methods()
+        .filter(|m| m.receiver == MethodReceiver::Instance)
+        .map(|m| m.name.as_str().to_string())
+        .collect()
+}
+
+#[test]
+fn heredoc_class_eval_expands_interpolated_accessors() {
+    let app = ingest_app_from_tree(article_with_macro(
+        "app/models/concerns/title_macro.rb",
+        HEREDOC_MACRO,
+        "TitleMacro",
+        "titled :headline",
+    ))
+    .expect("ingest");
+    let names = instance_names(&app, "Article");
+    assert!(names.contains(&"headline".to_string()), "{names:?}");
+    assert!(names.contains(&"headline=".to_string()), "{names:?}");
+    let article = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Article")
+        .unwrap();
+    assert!(!article.body.iter().any(|item| matches!(
+        item,
+        ModelBodyItem::Unknown { expr, .. }
+            if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "titled")
+    )));
+}
+
+#[test]
+fn class_eval_macro_also_ingests_substituted_has_one() {
+    let app = ingest_app_from_tree(article_with_macro(
+        "app/models/concerns/child_macro.rb",
+        CHILD_MACRO,
+        "ChildMacro",
+        "child_named :spotlight",
+    ))
+    .expect("ingest");
+    let article = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Article")
+        .unwrap();
+    assert!(article.body.iter().any(|item| matches!(
+        item,
+        ModelBodyItem::Association {
+            assoc: Association::HasOne { name, .. },
+            ..
+        } if name.as_str() == "spotlight"
+    )));
+    let names = instance_names(&app, "Article");
+    assert!(
+        names.contains(&"spotlight_present?".to_string()),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn load_hook_class_methods_expand_without_mixing_in_instance_methods() {
+    let files = tree(&[
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table :articles do |t|\n    t.string :title\n  end\nend\n",
+        ),
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        ),
+        (
+            "lib/title_macro.rb",
+            &format!(
+                "{HEREDOC_MACRO}\nActiveSupport.on_load :active_record do\n  include TitleMacro\nend\n"
+            ),
+        ),
+        (
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  titled :headline\nend\n",
+        ),
+    ]);
+    roundhouse::ingest::survey::activate();
+    let app = ingest_app_from_tree(files).expect("survey ingest");
+    roundhouse::ingest::survey::drain();
+    let names = instance_names(&app, "Article");
+    assert!(names.contains(&"headline".to_string()), "{names:?}");
+    assert!(names.contains(&"headline=".to_string()), "{names:?}");
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.contains("installer") || n == "titled")
+    );
+}
+
+#[test]
+fn dynamic_class_eval_string_is_not_expanded() {
+    let concern = r#"module TitleMacro
+  extend ActiveSupport::Concern
+  class_methods do
+    def titled(name)
+      class_eval "def #{name}; 99; end"
+    end
+  end
+end
+"#;
+    let files = tree(&[
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table :articles do |t|\n    t.string :title\n  end\nend\n",
+        ),
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        ),
+        ("app/models/concerns/title_macro.rb", concern),
+        (
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  include TitleMacro\n  titled choose\nend\n",
+        ),
+    ]);
+    roundhouse::ingest::survey::activate();
+    let app = ingest_app_from_tree(files).expect("survey ingest");
+    roundhouse::ingest::survey::drain();
+    let article = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Article")
+        .unwrap();
+    assert!(article.body.iter().any(|item| matches!(
+        item,
+        ModelBodyItem::Unknown { expr, .. }
+            if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "titled")
+    )));
+    assert!(
+        !article
+            .methods()
+            .any(|m| m.name.as_str() == "choose" && m.receiver == MethodReceiver::Instance)
+    );
+}
+
+#[test]
+fn tiny_blog_enum_and_attribute_ingest() {
+    let files = tree(&[
+        (
+            "db/schema.rb",
+            include_str!("../fixtures/tiny-blog/db/schema.rb"),
+        ),
+        (
+            "app/models/post.rb",
+            r#"class Post < ApplicationRecord
+  has_many :comments
+  validates :title, presence: true
+  scope :recent, -> { limit(10) }
+  scope :published, -> { where(published: true) }
+  before_save :normalize_title
+  enum :status, %i[draft published], default: :draft
+  attribute :flagged, :boolean
+
+  def normalize_title
+    title.strip
+  end
+end
+"#,
+        ),
+        (
+            "app/models/comment.rb",
+            include_str!("../fixtures/tiny-blog/app/models/comment.rb"),
+        ),
+    ]);
+    let app = ingest_app_from_tree(files).expect("ingest");
+    let names = instance_names(&app, "Post");
+    assert!(names.iter().any(|n| n == "draft?"), "{names:?}");
+    assert!(names.iter().any(|n| n == "published?"), "{names:?}");
+    let post = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Post")
+        .unwrap();
+    let lowered = roundhouse::lower::lower_model_to_library_class(post, &app.schema);
+    assert!(
+        lowered.methods.iter().any(|m| m.name.as_str() == "flagged"),
+        "attribute reader"
+    );
+    assert!(
+        lowered
+            .methods
+            .iter()
+            .any(|m| m.name.as_str() == "flagged="),
+        "attribute writer"
+    );
+}
+
+#[test]
+fn emitted_heredoc_class_eval_accessors_run() {
+    emit_and_run::real_blog()
+        .write("app/models/concerns/title_macro.rb", HEREDOC_MACRO)
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include TitleMacro\n  titled :headline\n",
+        )
+        .run_ruby(
+            r#"
+a = Article.new
+a.headline = "Hello"
+raise "writer lost" unless a.headline == "Hello"
+puts "class_eval heredoc accessors passed"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn emitted_load_hook_class_eval_accessors_run_without_mixin() {
+    emit_and_run::real_blog()
+        .write(
+            "lib/title_macro.rb",
+            r#"module TitleMacro
+  extend ActiveSupport::Concern
+  class_methods do
+    def titled(name)
+      class_eval <<-CODE, __FILE__, __LINE__ + 1
+        def #{name}
+          @#{name}.to_s
+        end
+        def #{name}=(value)
+          @#{name} = value
+        end
+      CODE
+    end
+  end
+  def installer_marker
+    37
+  end
+end
+ActiveSupport.on_load :active_record do
+  include TitleMacro
+end
+"#,
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  titled :headline\n",
+        )
+        .run_ruby(
+            r#"
+a = Article.new
+a.headline = "Hello"
+raise "writer lost" unless a.headline == "Hello"
+raise "hook mixed in instance methods" if a.respond_to?(:installer_marker, true)
+puts "load-hook class_eval accessors passed"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn emitted_enum_and_boolean_attribute_run() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  enum :status, %i[draft published], default: :draft\n  attribute :flagged, :boolean\n",
+        )
+        .edit(
+            "db/schema.rb",
+            "    t.string \"title\"",
+            "    t.string \"title\"\n    t.string \"status\"",
+        )
+        .run_ruby(
+            r#"
+a = Article.new(title: "Hello world", body: "abcdefghij")
+raise "enum default" unless a.draft?
+a.published!
+raise "enum bang" unless a.published?
+a.flagged = "0"
+raise "boolean attribute" unless a.flagged == false
+a.flagged = "1"
+raise "boolean attribute true" unless a.flagged == true
+puts "enum and attribute passed"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn emitted_literal_define_method_macro_runs() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/label_macro.rb",
+            r#"module LabelMacro
+  extend ActiveSupport::Concern
+  class_methods do
+    def labeled(field)
+      define_method :label_of do
+        send(field)
+      end
+    end
+  end
+end
+"#,
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include LabelMacro\n  labeled :title\n",
+        )
+        .run_ruby(
+            r#"
+a = Article.new(title: "Hello world", body: "abcdefghij")
+raise "define_method" unless a.label_of == "Hello world"
+puts "literal define_method passed"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn emitted_substituted_has_one_and_class_eval_predicate_run() {
+    emit_and_run::real_blog()
+        .write("app/models/concerns/child_macro.rb", CHILD_MACRO)
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include ChildMacro\n  child_named :spotlight\n",
+        )
+        .run_ruby(
+            r#"
+a = Article.create!(title: "Hello world", body: "abcdefghij")
+raise "empty has_one" unless a.spotlight_present? == false
+Comment.create!(article: a, body: "hi", commenter: "x")
+raise "has_one reader" unless a.spotlight_present?
+raise "wrong child" unless a.spotlight.body == "hi"
+puts "substituted has_one passed"
+"#,
+        )
+        .assert_passes();
+}

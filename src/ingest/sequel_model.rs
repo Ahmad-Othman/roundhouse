@@ -254,6 +254,8 @@ fn parse_sequel_association(
                 .unwrap_or_else(|| Symbol::from(format!("{owner_snake}_id"))),
             dependent: Dependent::None,
             as_interface: None,
+            scope: None,
+            autosave: false,
         },
         "many_to_one" => Association::BelongsTo {
             name: name.clone(),

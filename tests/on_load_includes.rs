@@ -179,49 +179,43 @@ fn binary_encoded_source_uses_original_byte_locations_before_lossy_display() {
 }
 
 #[test]
-fn emitted_app_does_not_gain_methods_from_a_dropped_installer_or_string_class_eval() {
-    // This is a negative execution check. The provider is a minimal
-    // string-eval macro, not a replacement implementation of Writebook.
+fn load_hook_does_not_install_mixin_instance_methods() {
+    // Class-method macros from the hook may expand (see
+    // `class_body_declarations`). Instance methods of the included
+    // module still do not land — mixin installation stays a gap.
     let run = emit_and_run::real_blog()
-        .write("lib/rails_ext/action_text_has_markdown.rb", r#"module ActionText::HasMarkdown
+        .write(
+            "lib/rails_ext/title_macro.rb",
+            r#"module TitleMacro
   extend ActiveSupport::Concern
   class_methods do
-    def has_markdown(name)
-      class_eval "def body; 99; end"
+    def titled(name)
+      class_eval <<-CODE, __FILE__, __LINE__ + 1
+        def #{name}
+          @#{name}.to_s
+        end
+      CODE
     end
   end
-  def markdown_installer_marker
+  def installer_marker
     37
   end
 end
 ActiveSupport.on_load :active_record do
-  include ActionText::HasMarkdown
+  include TitleMacro
 end
-"#)
-        .write("app/models/page.rb", "class Page < ApplicationRecord\n  has_markdown :body\nend\n")
-        .edit("db/schema.rb", "  add_foreign_key \"comments\", \"articles\"", "  create_table :pages do |t|\n    t.string :title\n  end\n  add_foreign_key \"comments\", \"articles\"")
-        .run_ruby(r#"
-page = Page.new
-[:body, :body?, :body=, :markdown_body, :build_markdown_body].each do |name|
-  raise "invented Markdown method #{name}" if page.respond_to?(name, true)
-end
-[page, Article.new].each do |owner|
-  raise "dropped hook installed mixin on #{owner.class}" if owner.respond_to?(:markdown_installer_marker, true)
-end
-[:with_markdown_body, :with_markdown_body_and_embeds].each do |name|
-  raise "invented preload scope #{name}" if Page.respond_to?(name, true)
-end
-begin
-  Page.new.body
-  raise "string class_eval was expanded"
-rescue NoMethodError => e
-  raise "wrong missing method" unless e.name == :body
-end
-puts "unsupported Markdown boundary preserved"
-"#);
+"#,
+        )
+        .run_ruby(
+            r#"
+a = Article.new
+raise "dropped hook installed mixin" if a.respond_to?(:installer_marker, true)
+puts "load-hook mixin installation still dropped"
+"#,
+        );
     run.assert_passes();
     assert!(
         run.stdout
-            .contains("unsupported Markdown boundary preserved")
+            .contains("load-hook mixin installation still dropped")
     );
 }

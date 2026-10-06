@@ -319,13 +319,14 @@ pub(super) fn push_association_methods(
                     methods.push(synth_belongs_to_writer(owner, name, target, foreign_key, sentinel));
                 }
             }
-            Association::HasOne { name, target, foreign_key, as_interface, .. } => {
+            Association::HasOne { name, target, foreign_key, as_interface, scope, .. } => {
                 methods.push(synth_has_one_reader(
                     owner,
                     name,
                     target,
                     foreign_key,
                     as_interface.as_ref(),
+                    scope.as_ref(),
                 ));
             }
             // HABTM lands when a fixture demands it.
@@ -778,6 +779,7 @@ fn synth_has_one_reader(
     target: &ClassId,
     foreign_key: &Symbol,
     as_interface: Option<&Symbol>,
+    scope: Option<&Expr>,
 ) -> MethodDef {
     let mut entries = vec![(
         lit_sym(foreign_key.clone()),
@@ -809,6 +811,10 @@ fn synth_has_one_reader(
             parenthesized: true,
         },
     );
+    let query = match scope {
+        Some(scope_expr) => graft_scope(scope_expr, query),
+        None => query,
+    };
     let first = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
