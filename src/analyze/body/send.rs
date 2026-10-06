@@ -156,45 +156,8 @@ impl<'a> BodyTyper<'a> {
         Some(Ty::Hash { key: Box::new(key), value: Box::new(Ty::Int) })
     }
 
-    /// Names must match `lower::group_count::COUNT_CHAIN_REFINERS`.
-    const COUNT_CHAIN_REFINERS: &'static [&'static str] = &[
-        "having",
-        "distinct",
-        "select",
-        "where",
-        "not",
-        "joins",
-        "left_outer_joins",
-        "left_joins",
-        "order",
-        "reorder",
-        "rewhere",
-        "where!",
-        "order!",
-        "limit",
-        "offset",
-        "from",
-        "includes",
-        "preload",
-        "eager_load",
-        "merge",
-        "references",
-    ];
-
     fn group_args_in_count_chain(expr: &Expr) -> Option<&[Expr]> {
-        let mut cur = expr;
-        loop {
-            let ExprNode::Send { recv, method, args, block: None, .. } = &*cur.node else {
-                return None;
-            };
-            if method.as_str() == "group" {
-                return Some(args);
-            }
-            if !Self::COUNT_CHAIN_REFINERS.contains(&method.as_str()) {
-                return None;
-            }
-            cur = recv.as_ref()?;
-        }
+        crate::lower::group_count::group_in_relation_chain(expr).map(|g| g.group_args)
     }
 
     /// The column type a single-symbol `group(:col)` groups by, when the

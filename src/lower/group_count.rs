@@ -48,10 +48,21 @@ pub struct GroupedCount<'a> {
 /// the rename exists to keep the runtime Relation's return
 /// monomorphic, which is a fact about the runtime path, not about the
 /// SQL.
+pub fn grouped_count_parts(expr: &Expr) -> Option<GroupedCount<'_>> {
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
+        return None;
+    };
+    if !matches!(method.as_str(), "count" | "group_count") || !args.is_empty() {
+        return None;
+    }
+    group_in_relation_chain(recv)
+}
+
 /// Query methods that refine a grouped relation without changing that
-/// it is grouped. `analyze::body::send::grouped_count_ty` walks the
-/// same names. `group` itself is the stop, not a skip.
-const COUNT_CHAIN_REFINERS: &[&str] = &[
+/// it is grouped. `analyze::body::send::grouped_count_ty` walks this
+/// same list via [`group_in_relation_chain`]. `group` itself is the
+/// stop, not a skip.
+pub const COUNT_CHAIN_REFINERS: &[&str] = &[
     "having",
     "distinct",
     "select",
@@ -75,16 +86,6 @@ const COUNT_CHAIN_REFINERS: &[&str] = &[
     "references",
 ];
 
-pub fn grouped_count_parts(expr: &Expr) -> Option<GroupedCount<'_>> {
-    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
-        return None;
-    };
-    if !matches!(method.as_str(), "count" | "group_count") || !args.is_empty() {
-        return None;
-    }
-    group_in_relation_chain(recv)
-}
-
 /// Arel may fold only `rel.group(:col).count` — intervening `having` /
 /// `distinct` / `select` belong on Relation SQL so GROUP BY, HAVING,
 /// and the DISTINCT projection stay in one place (#343).
@@ -101,7 +102,7 @@ pub fn group_immediately_precedes_count(expr: &Expr) -> bool {
     )
 }
 
-fn group_in_relation_chain(expr: &Expr) -> Option<GroupedCount<'_>> {
+pub fn group_in_relation_chain(expr: &Expr) -> Option<GroupedCount<'_>> {
     let mut cur = expr;
     loop {
         let ExprNode::Send { recv, method, args, block: None, .. } = &*cur.node else {
