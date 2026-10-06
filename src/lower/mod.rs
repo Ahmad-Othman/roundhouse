@@ -1527,6 +1527,7 @@ pub use ty_coerce_insertion::{insert_ty_coercions, insert_ty_coercions_with_extr
 pub use view_to_library::{
     ViewLowerCtx, flatten_lcs_to_functions, lower_view_to_library_class,
     lower_views_to_library_classes, lower_views_to_library_functions,
+    preliminary_view_classes, type_view_library_classes,
 };
 pub use jbuilder_to_library::{
     lower_jbuilder_to_library_class, lower_jbuilder_to_library_classes,

@@ -847,7 +847,19 @@ impl Analyzer {
     /// `FIXPOINT_CAP`) using a signature fingerprint to detect convergence.
     pub fn analyze(&mut self, app: &mut App) {
         const FIXPOINT_CAP: usize = 12;
-        crate::timings::phase("typing passes (initial)", || self.run_typing_passes(app));
+        // View-name and dynamic-render ivar sets are invariant across
+        // fixpoint rounds — they read source views, not the registry.
+        let mut dynamic_render_ivars: std::collections::HashSet<Symbol> =
+            std::collections::HashSet::new();
+        for view in &app.views {
+            collect_dynamic_render_ivars(&view.body, &mut dynamic_render_ivars);
+        }
+        let existing_view_names: std::collections::HashSet<Symbol> =
+            app.views.iter().map(|v| v.name.clone()).collect();
+
+        crate::timings::phase("typing passes (initial)", || {
+            self.run_typing_passes(app, &dynamic_render_ivars, &existing_view_names)
+        });
 
         // Whole-program fixpoint: harvest returns + unify params, re-type,
         // repeat until the registry signature stabilizes. Each round
@@ -873,7 +885,9 @@ impl Analyzer {
             // Re-type the whole app with the refined registry. Idempotent
             // BodyTyper means a second pass simply resolves dispatches
             // and Var bindings the first pass couldn't.
-            crate::timings::phase(format_args!("round {round}: typing passes"), || self.run_typing_passes(app));
+            crate::timings::phase(format_args!("round {round}: typing passes"), || {
+                self.run_typing_passes(app, &dynamic_render_ivars, &existing_view_names)
+            });
         }
 
         // The loop's last act is a typing pass whose results nothing
@@ -1342,7 +1356,12 @@ impl Analyzer {
     /// (controller→view ivar channel, before_action seeding,
     /// per-model two-pass ivar discovery, partial locals threading)
     /// stays internal to this method; the fixpoint just calls it.
-    fn run_typing_passes(&mut self, app: &mut App) {
+    fn run_typing_passes(
+        &mut self,
+        app: &mut App,
+        dynamic_render_ivars: &std::collections::HashSet<Symbol>,
+        existing_view_names: &std::collections::HashSet<Symbol>,
+    ) {
         // Source-backed constant reads use Rubydex declaration IDs.
         // A bare-name fallback remains for generated expressions without
         // a Ruby source reference.
@@ -1376,15 +1395,8 @@ impl Analyzer {
         // partial view name (`home/_for_domain`) to the union of ivars
         // from every action that names it (`@above = 'for_domain'`).
         // Built during Pass B, consumed when seeding partials below.
-        let dynamic_render_ivars: std::collections::HashSet<Symbol> = {
-            let mut set = std::collections::HashSet::new();
-            for view in &app.views {
-                collect_dynamic_render_ivars(&view.body, &mut set);
-            }
-            set
-        };
-        let existing_view_names: std::collections::HashSet<Symbol> =
-            app.views.iter().map(|v| v.name.clone()).collect();
+        // The two sets are computed once in `analyze` and reused every
+        // round — they do not depend on the refined registry.
         let mut content_partial_ivars: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
 
         // Per-controller metadata captured during Pass A so Pass B
@@ -3285,22 +3297,26 @@ impl Analyzer {
     fn inference_signature(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         let mut class_keys: Vec<&ClassId> = self.classes.keys().collect();
-        class_keys.sort_by_key(|k| k.0.as_str().to_string());
+        class_keys.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         for cid in class_keys {
             let cls = &self.classes[cid];
             let mut method_keys: Vec<&Symbol> = cls.instance_methods.keys().collect();
-            method_keys.sort_by_key(|k| k.as_str().to_string());
+            method_keys.sort_by(|a, b| a.as_str().cmp(b.as_str()));
             for m in method_keys {
                 parts.push(format!("{}#{}={:?}", cid.0.as_str(), m.as_str(), cls.instance_methods[m]));
             }
             let mut cmethod_keys: Vec<&Symbol> = cls.class_methods.keys().collect();
-            cmethod_keys.sort_by_key(|k| k.as_str().to_string());
+            cmethod_keys.sort_by(|a, b| a.as_str().cmp(b.as_str()));
             for m in cmethod_keys {
                 parts.push(format!("{}.{}={:?}", cid.0.as_str(), m.as_str(), cls.class_methods[m]));
             }
         }
         let mut param_keys: Vec<&(ClassId, Symbol)> = self.inferred_params.keys().collect();
-        param_keys.sort_by_key(|(c, m)| (c.0.as_str().to_string(), m.as_str().to_string()));
+        param_keys.sort_by(|(c1, m1), (c2, m2)| {
+            c1.0.as_str()
+                .cmp(c2.0.as_str())
+                .then_with(|| m1.as_str().cmp(m2.as_str()))
+        });
         for k in param_keys {
             parts.push(format!("{}#{}~{:?}", k.0.0.as_str(), k.1.as_str(), self.inferred_params[k]));
         }
