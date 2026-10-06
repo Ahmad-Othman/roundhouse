@@ -1,12 +1,16 @@
-//! Harvested method-return normalization across fixpoint rounds.
+//! Harvested method-return stabilization across fixpoint rounds.
 //!
 //! Circular accessors (`config` ↔ `Configuration.load!`) can thrash the
 //! harvest table between a concrete type and `Concrete|Untyped` every
-//! round and exhaust `FIXPOINT_CAP`. Harvested returns are stored
-//! without top-level unknown arms (`Configuration|Untyped` →
-//! `Configuration`). Nil-only cores keep sticky `Nil|Untyped` — a full
-//! lattice join was tried and rejected because `Untyped` then `Nil`
-//! collapsed Campfire URI helpers to bare `Nil`.
+//! round and exhaust `FIXPOINT_CAP`. When an existing entry and a new
+//! body type share the same concrete core (after dropping top-level
+//! `Untyped`/`Var` arms), store that core. Nil-only cores keep sticky
+//! `Nil|Untyped` — a full lattice join was tried and rejected because
+//! `Untyped` then `Nil` collapsed Campfire URI helpers to bare `Nil`.
+//!
+//! First writes keep their gradual unions (`String|Untyped` stays) so
+//! library signatures that honestly return untyped are not narrowed.
+//! A later bare `Untyped` never replaces an already-informative return.
 
 use crate::ident::Symbol;
 use crate::ty::Ty;
@@ -21,39 +25,65 @@ fn is_gradual_nil(ty: &Ty) -> bool {
     ty == &gradual_nil()
 }
 
-/// Drop top-level `Untyped`/`Var` arms before storing. Nil cores stay
-/// gradual (`Nil|Untyped`) so Campfire URI helpers do not collapse.
-fn normalize_harvested_return(ty: Ty) -> Ty {
-    if !ty.has_unknown_arm() {
-        return ty;
+fn is_bare_unknown(ty: &Ty) -> bool {
+    matches!(ty, Ty::Untyped | Ty::Var { .. })
+}
+
+/// True when stripping top-level unknown arms leaves a usable core
+/// (anything other than bare [`Ty::Untyped`]).
+fn has_informative_core(ty: &Ty) -> bool {
+    !matches!(ty.clone().strip_unknown(), Ty::Untyped)
+}
+
+/// If two harvested returns differ only by top-level `Untyped`/`Var`
+/// arms, return the stable form to store. Non-Nil concrete cores keep
+/// the stripped type (`Configuration|Untyped` → `Configuration`).
+/// Nil-only cores keep `Nil|Untyped` when either side was gradual.
+fn stabilize_untyped_return_oscillation(existing: &Ty, new: &Ty) -> Option<Ty> {
+    let core_e = existing.clone().strip_unknown();
+    let core_n = new.clone().strip_unknown();
+    if core_e != core_n {
+        return None;
     }
-    let core = ty.strip_unknown();
-    if matches!(core, Ty::Nil) {
-        gradual_nil()
-    } else {
-        core
+    if matches!(core_e, Ty::Nil) {
+        if existing.has_unknown_arm() || new.has_unknown_arm() {
+            return Some(gradual_nil());
+        }
+        return Some(core_e);
     }
+    Some(core_e)
 }
 
 /// Conservative insertion into the harvested-return table.
 ///
-/// RBS-sourced `Ty::Fn` stays authoritative. Otherwise the body type is
-/// normalized (no top-level unknown arms; Nil stays gradual) and
-/// written. Sticky `Nil|Untyped` is not overwritten by a later bare
-/// `Nil`, so circular helpers cannot thrash gradual nil away.
+/// RBS-sourced `Ty::Fn` stays authoritative. Same-core returns that
+/// differ only by unknown arms stabilize to the concrete core (Nil
+/// cores stay gradual). An informative existing return is never
+/// replaced by bare `Untyped`/`Var`. First writes are stored as-is,
+/// including gradual unions.
 pub(super) fn insert_inferred_return(
     table: &mut std::collections::HashMap<Symbol, Ty>,
     method: &Symbol,
     ty: Ty,
 ) {
-    let ty = normalize_harvested_return(ty);
     match table.get(method) {
         Some(Ty::Fn { .. }) => return,
         Some(existing) if existing == &ty => return,
         Some(existing) if is_gradual_nil(existing) && matches!(ty, Ty::Nil) => return,
-        _ => {}
+        Some(existing) if has_informative_core(existing) && is_bare_unknown(&ty) => return,
+        Some(existing) => {
+            if let Some(stable) = stabilize_untyped_return_oscillation(existing, &ty) {
+                if existing != &stable {
+                    table.insert(method.clone(), stable);
+                }
+                return;
+            }
+            table.insert(method.clone(), ty);
+        }
+        None => {
+            table.insert(method.clone(), ty);
+        }
     }
-    table.insert(method.clone(), ty);
 }
 
 #[cfg(test)]
@@ -70,27 +100,37 @@ mod tests {
     }
 
     #[test]
-    fn normalize_strips_untyped_from_configuration() {
+    fn configuration_versus_configuration_or_untyped_stabilizes_to_configuration() {
+        let concrete = cfg();
         let noisy = body::union_of(cfg(), Ty::Untyped);
-        assert_eq!(normalize_harvested_return(noisy), cfg());
-        assert_eq!(normalize_harvested_return(cfg()), cfg());
+        let stable = stabilize_untyped_return_oscillation(&concrete, &noisy)
+            .expect("same concrete core");
+        assert_eq!(stable, concrete);
+        let stable_rev = stabilize_untyped_return_oscillation(&noisy, &concrete)
+            .expect("order-independent");
+        assert_eq!(stable_rev, concrete);
     }
 
     #[test]
-    fn normalize_keeps_gradual_nil() {
+    fn nil_versus_nil_or_untyped_keeps_gradual_nil() {
+        let nil = Ty::Nil;
         let gradual = body::union_of(Ty::Nil, Ty::Untyped);
-        assert_eq!(normalize_harvested_return(gradual.clone()), gradual);
-        assert_eq!(
-            normalize_harvested_return(body::union_of(Ty::Var { var: TyVar(0) }, Ty::Nil)),
-            gradual_nil()
-        );
+        let stable =
+            stabilize_untyped_return_oscillation(&nil, &gradual).expect("nil-only cores match");
+        assert_eq!(stable, gradual);
     }
 
     #[test]
-    fn normalize_strips_untyped_from_configuration_or_nil() {
-        let gradual = body::union_of(body::union_of(cfg(), Ty::Nil), Ty::Untyped);
-        let concrete = body::union_of(cfg(), Ty::Nil);
-        assert_eq!(normalize_harvested_return(gradual), concrete);
+    fn distinct_concrete_cores_do_not_stabilize() {
+        assert!(stabilize_untyped_return_oscillation(&Ty::Str, &Ty::Int).is_none());
+    }
+
+    #[test]
+    fn var_nil_versus_untyped_nil_keeps_gradual_nil() {
+        let a = body::union_of(Ty::Var { var: TyVar(0) }, Ty::Nil);
+        let b = body::union_of(Ty::Untyped, Ty::Nil);
+        let stable = stabilize_untyped_return_oscillation(&a, &b).expect("same nil core");
+        assert_eq!(stable, gradual_nil());
     }
 
     #[test]
@@ -109,12 +149,29 @@ mod tests {
     }
 
     #[test]
-    fn insert_normalizes_untyped_noise_on_write() {
+    fn insert_stabilizes_configuration_versus_noisy() {
         let method = Symbol::from("config");
         let mut table = HashMap::new();
+        insert_inferred_return(&mut table, &method, cfg());
         insert_inferred_return(&mut table, &method, body::union_of(cfg(), Ty::Untyped));
         assert_eq!(table.get(&method), Some(&cfg()));
+    }
+
+    #[test]
+    fn insert_preserves_first_write_of_gradual_union() {
+        let method = Symbol::from("build");
+        let mut table = HashMap::new();
+        let gradual = body::union_of(Ty::Str, Ty::Untyped);
+        insert_inferred_return(&mut table, &method, gradual.clone());
+        assert_eq!(table.get(&method), Some(&gradual));
+    }
+
+    #[test]
+    fn insert_keeps_known_return_against_bare_untyped() {
+        let method = Symbol::from("config");
+        let mut table = HashMap::new();
         insert_inferred_return(&mut table, &method, cfg());
+        insert_inferred_return(&mut table, &method, Ty::Untyped);
         assert_eq!(table.get(&method), Some(&cfg()));
     }
 
