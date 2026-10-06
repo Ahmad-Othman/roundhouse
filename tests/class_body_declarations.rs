@@ -569,38 +569,22 @@ fn load_hook_leftover_interpolated_association_does_not_expand() {
     );
 }
 
-/// Emitted Ruby must not grow the class_eval reader when leftovers abort.
+/// Strict ingest keeps the abort as an error — survey records a gap,
+/// emit-and-run would panic, and we must not drop the diagnostic to
+/// emit a reader without the association.
 #[test]
-fn leftover_interpolated_association_does_not_emit_invented_readers() {
-    let run = emit_and_run::real_blog()
-        .write(
-            "lib/attach_macro.rb",
-            &format!(
-                "{LEFTOVER_MACRO}\nActiveSupport.on_load :active_record do\n  include AttachMacro\nend\n"
-            ),
-        )
-        .edit(
-            "app/models/article.rb",
-            "class Article < ApplicationRecord\n",
-            "class Article < ApplicationRecord\n  attached :spotlight\n",
-        )
-        .run_ruby(
-            r#"
-a = Article.new
-raise "invented reader" if a.respond_to?(:spotlight)
-raise "invented association" if a.respond_to?(:spotlight_record)
-begin
-  a.spotlight
-  raise "spotlight should raise NoMethodError"
-rescue NoMethodError
-end
-puts "leftover interpolated association stayed unemitted"
-"#,
-        );
-    run.assert_passes();
+fn leftover_interpolated_association_stays_an_ingest_error() {
+    let err = ingest_app_from_tree(article_with_macro(
+        "app/models/concerns/attach_macro.rb",
+        LEFTOVER_MACRO,
+        "AttachMacro",
+        "attached :spotlight",
+    ))
+    .expect_err("strict ingest must fail closed");
+    let message = err.to_string();
     assert!(
-        run.stdout
-            .contains("leftover interpolated association stayed unemitted")
+        message.contains("model macro `attached` not expanded"),
+        "{message}"
     );
 }
 
