@@ -586,6 +586,9 @@ module Main
       copts["SameSite"] = ss if ss.length > 0
       # SameSite=None is ignored by browsers unless Secure is set.
       copts["Secure"] = +"" if jar.flag_secure?(cname) || request_obj.ssl? || ss == "None"
+      # `cookies.permanent` — without it the cookie ends with the browser.
+      exp = jar.flag_expires(cname)
+      copts["Expires"] = exp if exp.length > 0
       res.set_cookie(cname, out_cookies[cname], copts)
       ci += 1
     end

@@ -3939,6 +3939,87 @@ fn trailing_erb_comments_execute_without_swallowing_output_terminators() {
         .assert_passes();
 }
 
+/// `cookies.permanent` in each spelling Rails accepts, over one plain
+/// write as the control. The permanent jar was the identity until
+/// 2026-10-06, so these went out with no Expires and ended with the
+/// browser session: campfire's sign-in did not survive a restart.
+fn permanent_cookie_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write(
+            "app/controllers/visits_controller.rb",
+            r#"class VisitsController < ApplicationController
+  def index
+    cookies.permanent[:last_room] = 7
+    cookies.signed.permanent[:session_token] = { value: "tok", httponly: true, same_site: :lax }
+    cookies.permanent.signed[:remember] = "me"
+    cookies[:plain] = "p"
+    head :no_content
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :visits, only: :index\nend\n",
+        )
+        .write("app/models/visit.rb", "class Visit < ApplicationRecord\nend\n")
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 2026_01_01_000000) do\n  create_table \"visits\", force: :cascade do |t|\n    t.string \"room\"\n  end\nend\n",
+        )
+}
+
+#[test]
+fn permanent_cookies_go_out_with_an_expiry() {
+    permanent_cookie_app()
+        .run_ruby(
+            r##"status, headers, = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => "/visits", "QUERY_STRING" => "", "rack.input" => StringIO.new(""))
+raise "GET /visits answered #{status}" unless status == 204
+lines = headers["set-cookie"] || []
+year = (Time.now.utc.year + 20).to_s
+%w[last_room session_token remember].each do |name|
+  line = lines.find { |l| l.start_with?("#{name}=") } or raise "no Set-Cookie for #{name}: #{lines.inspect}"
+  raise "#{name} has no twenty-year Expires: #{line}" unless line =~ /; Expires=\w{3}, \d{2} \w{3} #{year} \d{2}:\d{2}:\d{2} GMT/
+end
+plain = lines.find { |l| l.start_with?("plain=") } or raise "no Set-Cookie for plain: #{lines.inspect}"
+raise "a plain cookie must stay a session cookie: #{plain}" if plain.include?("Expires")
+session = lines.find { |l| l.start_with?("session_token=") }
+raise "options still apply under permanent: #{session}" unless session.include?("SameSite=Lax") && session.include?("HttpOnly")
+puts "permanent cookies passed"
+"##,
+        )
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn permanent_cookies_record_an_expiry_on_spinel() {
+    permanent_cookie_app()
+        .run_spinel(
+            r##"controller = VisitsController.new
+controller.process_action(:index)
+jar = controller.cookies
+year = (Time.now.utc.year + 20).to_s
+["last_room", "session_token", "remember"].each do |name|
+  exp = jar.flag_expires(name)
+  raise "#{name} has no twenty-year expiry: #{exp.inspect}" unless exp.split(" ")[3] == year && exp.end_with?(" GMT")
+end
+raise "a plain cookie must stay a session cookie" unless jar.flag_expires("plain") == ""
+raise "the signed permanent value must round-trip" unless jar.signed[:session_token] == "tok"
+puts "permanent cookies passed"
+"##,
+        )
+        .assert_passes();
+}
+
 /// Not the scaffold blog's `app/views.rb`, whose requires name views this tree does not have: an app with no views boots and answers a request (#164).
 #[test]
 fn an_app_with_no_views_boots() {

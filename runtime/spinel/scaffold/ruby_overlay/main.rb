@@ -34,8 +34,9 @@ require_relative "boot"
 module Main
   # Dispatch one request to a response descriptor — the single source
   # of routing / controller / flash / redirect logic. Returns the
-  # 9-tuple `[status, body, content_type, location, set_cookies,
-  # extra_headers, secure_cookies, samesite_cookies, httponly_cookies]`
+  # 10-tuple `[status, body, content_type, location, set_cookies,
+  # extra_headers, secure_cookies, samesite_cookies, httponly_cookies,
+  # expires_cookies]`
   # (the first six are the exact argument shape `CgiIo.write_response`
   # consumes; the rest are the explicit cookie-flag maps `run_rack`
   # needs). Two thin wrappers sit on top:
@@ -251,12 +252,15 @@ module Main
     secure_cookies = {}
     samesite_cookies = {}
     httponly_cookies = {}
+    expires_cookies = {}
     jar.pending.each do |k, v|
       out_cookies[k] = v
       secure_cookies[k] = true if jar.flag_secure?(k)
       httponly_cookies[k] = jar.flag_httponly?(k)
       ss = jar.flag_samesite(k).to_s
       samesite_cookies[k] = ss if ss.length > 0
+      exp = jar.flag_expires(k)
+      expires_cookies[k] = exp if exp.length > 0
     end
     # Session persistence: re-encode whatever the action (or a lazy
     # CSRF token generation during render) left in the session, and
@@ -283,7 +287,7 @@ module Main
     if is_redirect
       [controller.status,
        %(<a href="#{controller.location}">Redirecting</a>),
-       "text/html; charset=utf-8", controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies]
+       "text/html; charset=utf-8", controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies, expires_cookies]
     else
       # The controller body IS the full page: the Ruby emit path's
       # `apply_layout_lowering` wraps each html action render in
@@ -304,13 +308,13 @@ module Main
          controller.request_format == :turbo_stream ||
          controller.content_type != "text/html; charset=utf-8"
         [controller.status, controller.body,
-         controller.content_type, controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies]
+         controller.content_type, controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies, expires_cookies]
       elsif controller.request_format == :rss
         [controller.status, controller.body,
-         "application/rss+xml; charset=utf-8", controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies]
+         "application/rss+xml; charset=utf-8", controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies, expires_cookies]
       else
         [controller.status, controller.body,
-         "text/html; charset=utf-8", controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies]
+         "text/html; charset=utf-8", controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies, expires_cookies]
       end
     end
   end
@@ -339,7 +343,7 @@ module Main
   # entry per cookie) and reuses `CgiIo.url_encode` so values match the
   # CGI path exactly.
   def self.run_rack(env)
-    status, body, content_type, location, set_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies =
+    status, body, content_type, location, set_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies, expires_cookies =
       dispatch_core(env, env["rack.input"] || StringIO.new(""))
     headers = { "content-type" => content_type }
     headers["location"] = location unless location.nil?
@@ -359,6 +363,7 @@ module Main
         # An explicit httponly: false records false and is omitted.
         line = line + "; HttpOnly" unless httponly_cookies && httponly_cookies.key?(name) && !httponly_cookies[name]
         line = line + "; SameSite=#{ss}"
+        line = line + "; Expires=#{expires_cookies[name]}" if expires_cookies && expires_cookies.key?(name)
         line = line + "; Secure" if https || (secure_cookies && secure_cookies[name]) || ss == "None"
         line
       end
