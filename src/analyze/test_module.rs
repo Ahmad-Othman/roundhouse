@@ -124,7 +124,6 @@ impl Analyzer {
                 let method_ctx = self.seed_method_params(&ctx, &module.name, method);
                 self.body_typer()
                     .analyze_expr(&mut method.body, &method_ctx);
-                method.effects = self.collect_effects(&mut method.body, &method_ctx);
             }
             for test in &mut module.tests {
                 // Setup's ivars survive, its locals do not. Keep bare source

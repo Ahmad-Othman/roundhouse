@@ -895,6 +895,7 @@ impl Analyzer {
                 &module_methods,
                 &module_includes,
                 &parent_link_by_name,
+                true,
             )
         });
 
@@ -929,9 +930,29 @@ impl Analyzer {
                     &module_methods,
                     &module_includes,
                     &parent_link_by_name,
+                    false,
                 )
             });
         }
+
+        // Intermediate rounds skip views/tests: they do not harvest
+        // returns (except test helpers, typed below) and their call
+        // sites are still walked by unify from the last typed trees.
+        // Re-type them once against the converged production registry
+        // so templates see the final controller ivars and helper
+        // returns. Then harvest/unify; if view sites moved a param,
+        // one more production-only pass absorbs it.
+        crate::timings::phase("typing passes (views after fixpoint)", || {
+            self.run_typing_passes(
+                app,
+                &dynamic_render_ivars,
+                &existing_view_names,
+                &module_methods,
+                &module_includes,
+                &parent_link_by_name,
+                true,
+            )
+        });
 
         // The loop's last act is a typing pass whose results nothing
         // harvested — either it hit the cap, or it ran on the round
@@ -940,6 +961,28 @@ impl Analyzer {
         // reads the registry. Harvesting once more costs no re-typing
         // and makes the two agree.
         self.harvest_returns_to_registry(app);
+        crate::timings::phase("unify params (after views)", || {
+            self.unify_params_from_call_sites(app)
+        });
+        if !self.inference_matches(&prev_sig) {
+            crate::timings::phase("typing passes (after view unify)", || {
+                self.run_typing_passes(
+                    app,
+                    &dynamic_render_ivars,
+                    &existing_view_names,
+                    &module_methods,
+                    &module_includes,
+                    &parent_link_by_name,
+                    true,
+                )
+            });
+            self.harvest_returns_to_registry(app);
+        }
+        // Effects are a function of the converged typed trees, not of
+        // the fixpoint. Collecting inside every typing round walked
+        // the same bodies two or three times per round for no harvest
+        // or unify input.
+        self.stamp_body_effects(app);
 
         // Publish the converged param table onto the App for lowerings
         // that build signatures after analysis (the controller lowering
@@ -1407,6 +1450,7 @@ impl Analyzer {
         module_methods: &HashMap<ClassId, Vec<MethodDef>>,
         module_includes: &HashMap<ClassId, Vec<ClassId>>,
         parent_link_by_name: &HashMap<ClassId, Option<ClassId>>,
+        type_views_and_tests: bool,
     ) {
         // Source-backed constant reads use Rubydex declaration IDs.
         // A bare-name fallback remains for generated expressions without
@@ -1574,7 +1618,6 @@ impl Analyzer {
                     action.block_param.as_ref(),
                 );
                 self.body_typer().analyze_expr(&mut action.body, &mctx);
-                action.effects = self.collect_effects(&mut action.body, &mctx);
             }
 
             // Snapshot each action's ivar bindings (this controller's
@@ -1650,7 +1693,6 @@ impl Analyzer {
                     }
                 }
             }
-            let mut concern_effects: HashMap<Symbol, EffectSet> = HashMap::new();
             for module_id in &mixed_in {
                 let Some(methods) = module_methods.get(module_id) else { continue };
                 for method in methods {
@@ -1670,20 +1712,13 @@ impl Analyzer {
                     // as a resolution target for
                     // `collect_transitive_filter_ivars`.
                     action_bodies.entry(method.name.clone()).or_insert_with(|| body.clone());
-                    let effects = self.collect_effects(&mut body, &ctx);
-                    if !effects.is_pure() {
-                        concern_effects.entry(method.name.clone()).or_insert(effects);
-                    }
                 }
             }
 
-            // Per-method effect snapshot for the persisted chain: own
-            // methods (typed by Pass A) overwrite concern methods —
-            // a shadowed module method never runs.
-            let mut action_effects = concern_effects;
-            for action in controller.actions() {
-                action_effects.insert(action.name.clone(), action.effects.clone());
-            }
+            // Effect sets for the persisted chain are stamped once after
+            // the typing fixpoint (`stamp_body_effects`); this snapshot
+            // is empty here and patched from the converged trees.
+            let action_effects: HashMap<Symbol, EffectSet> = HashMap::new();
 
             let layout = controller.layout.clone();
             meta_by_name.insert(
@@ -2015,7 +2050,6 @@ impl Analyzer {
                             action.block_param.as_ref(),
                         );
                         self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
-                        action.effects = self.collect_effects(&mut action.body, &inner_ctx);
                     }
                 }
 
@@ -2500,7 +2534,6 @@ impl Analyzer {
                         action.block_param.as_ref(),
                     );
                     self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
-                    action.effects = self.collect_effects(&mut action.body, &inner_ctx);
                 }
             }
         }
@@ -2634,12 +2667,6 @@ impl Analyzer {
                 for method in model.methods_mut() {
                     let mctx = self.seed_method_params(&reseeded_ctx, &model_name, method);
                     self.body_typer().analyze_expr(&mut method.body, &mctx);
-                    method.effects = self.collect_effects(&mut method.body, &mctx);
-                }
-            } else {
-                for method in model.methods_mut() {
-                    let mctx = self.seed_method_params(&class_ctx, &model_name, method);
-                    method.effects = self.collect_effects(&mut method.body, &mctx);
                 }
             }
         }
@@ -2902,16 +2929,14 @@ impl Analyzer {
                 for method in &mut lc.methods {
                     let mctx = self.seed_method_params(&reseeded_ctx, &lc_name, method);
                     self.body_typer().analyze_expr(&mut method.body, &mctx);
-                    method.effects = self.collect_effects(&mut method.body, &mctx);
-                }
-            } else {
-                for method in &mut lc.methods {
-                    let mctx = self.seed_method_params(&class_ctx, &lc_name, method);
-                    method.effects = self.collect_effects(&mut method.body, &mctx);
                 }
             }
         }
         drop(_typing_library);
+
+        if !type_views_and_tests {
+            return;
+        }
 
         // Partial-locals channel: we need action/top-level views analyzed first
         // so their expression types are known at each `render` call site. We
@@ -3177,10 +3202,13 @@ impl Analyzer {
             .iter()
             .map(|(view, locals)| (view.clone(), locals.clone()))
             .collect();
+        drop(_typing_views);
 
         // Type the ORIGINAL test scopes, before source contracts inspect
         // them. Emission later clones/rewrites these bodies; it is too late
         // for that typing to establish a source admission fact.
+
+        let _typing_tests = crate::timings::begin("typing: tests");
         self.type_test_modules(app, &global_constants);
 
         // Seeds body (db/seeds.rb). Top-level Ruby: no `self`, no
@@ -3188,14 +3216,14 @@ impl Analyzer {
         // that references model classes. Types so that Send effects
         // flow (DbWrite on `Article.create!`, DbRead on
         // `Article.count`), which the emitter uses for await
-        // placement under async adapters.
+        // placement under async adapters. Effects themselves are
+        // stamped once after the typing fixpoint.
         if let Some(expr) = app.seeds.as_mut() {
             let mut ctx = Ctx::default();
             ctx.constants = global_constants.clone();
             self.body_typer().analyze_expr(expr, &ctx);
-            let _ = self.collect_effects(expr, &ctx);
         }
-        drop(_typing_views);
+        drop(_typing_tests);
     }
 
 

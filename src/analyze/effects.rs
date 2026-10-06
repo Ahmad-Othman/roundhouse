@@ -3,17 +3,117 @@
 //! controller render/redirect). Inherent `Analyzer` methods extracted
 //! verbatim from `src/analyze/mod.rs` (pure code motion).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::adapter::ArMethodKind;
+use crate::App;
+use crate::dialect::ControllerBodyItem;
 use crate::effect::{Effect, EffectSet};
 use crate::expr::{Expr, ExprNode, LValue};
-use crate::ident::Symbol;
+use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
 use super::Ctx;
 
 impl super::Analyzer {
+    /// Walk every live body once after the typing fixpoint. Effect
+    /// annotation does not feed harvest/unify/`inference_sig`, so doing
+    /// it inside each typing round (Campfire: 1 initial + 8 retypes,
+    /// and controllers collect on Phase A plus each Phase B sweep)
+    /// only repeated the same tree walk. `visit_effects` reads `self_ty`
+    /// for implicit-self Sends and the already-typed receiver `ty`; it
+    /// does not read ivar/local bindings.
+    pub(super) fn stamp_body_effects(&self, app: &mut App) {
+        let _stamp = crate::timings::begin("stamp effects");
+        for controller in &mut app.controllers {
+            let id = controller.name.clone();
+            for item in &mut controller.body {
+                match item {
+                    ControllerBodyItem::Action { action, .. } => {
+                        action.effects = self.stamp_expr(&id, &mut action.body);
+                    }
+                    ControllerBodyItem::ClassMethod { method, .. } => {
+                        self.stamp_method(&id, method);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for model in &mut app.models {
+            let id = model.name.clone();
+            for method in model.methods_mut() {
+                self.stamp_method(&id, method);
+            }
+        }
+        for lc in &mut app.library_classes {
+            let id = lc.name.clone();
+            for method in &mut lc.methods {
+                self.stamp_method(&id, method);
+            }
+        }
+        for module in &mut app.test_modules {
+            let id = module.name.clone();
+            for method in &mut module.helpers {
+                self.stamp_method(&id, method);
+            }
+        }
+        if let Some(expr) = app.seeds.as_mut() {
+            let _ = self.collect_effects(expr, &Ctx::default());
+        }
+
+        let mut by_key: HashMap<(ClassId, Symbol), EffectSet> = HashMap::new();
+        for controller in &app.controllers {
+            for action in controller.actions() {
+                by_key.insert(
+                    (controller.name.clone(), action.name.clone()),
+                    action.effects.clone(),
+                );
+            }
+            for method in controller.class_methods() {
+                by_key.insert(
+                    (controller.name.clone(), method.name.clone()),
+                    method.effects.clone(),
+                );
+            }
+        }
+        for lc in &app.library_classes {
+            for method in &lc.methods {
+                by_key.insert((lc.name.clone(), method.name.clone()), method.effects.clone());
+            }
+        }
+        for resolution in app.controller_resolutions.values_mut() {
+            for rf in &mut resolution.filter_chain {
+                if rf.filter.kind.is_skip() {
+                    continue;
+                }
+                let target = &rf.filter.target;
+                rf.effects = by_key
+                    .get(&(rf.included_via.clone(), target.clone()))
+                    .or_else(|| by_key.get(&(rf.defined_in.clone(), target.clone())))
+                    .cloned()
+                    .unwrap_or_default();
+            }
+        }
+    }
+
+    fn stamp_expr(&self, class: &ClassId, expr: &mut Expr) -> EffectSet {
+        let ctx = Ctx {
+            self_ty: Some(Ty::Class {
+                id: class.clone(),
+                args: vec![],
+            }),
+            ..Ctx::default()
+        };
+        self.collect_effects(expr, &ctx)
+    }
+
+    fn stamp_method(&self, class: &ClassId, method: &mut crate::dialect::MethodDef) {
+        method.effects = self.stamp_expr(class, &mut method.body);
+        if let Some(Ty::Fn { effects, .. }) = &mut method.signature {
+            *effects = method.effects.clone();
+        }
+    }
+
     pub(super) fn collect_effects(&self, expr: &mut Expr, ctx: &Ctx) -> EffectSet {
         let mut set = BTreeSet::new();
         self.visit_effects(expr, ctx, &mut set);
