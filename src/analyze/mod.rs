@@ -4576,9 +4576,17 @@ impl Analyzer {
                         args.last().map(|a| &*a.node),
                         Some(ExprNode::Hash { kwargs: true, .. } | ExprNode::KeywordSplat { .. })
                     );
+                    // The splat merges over the literal, so each literal
+                    // key may take the splat's value too.
                     let (keys, splat) = match args.last().map(|a| &*a.node) {
                         Some(ExprNode::KeywordSplat { value }) => keyword_splat(value)
-                            .map_or((keys, None), |(pairs, v)| (pairs, Some(v))),
+                            .map_or((keys, None), |(pairs, v)| {
+                                let joined = pairs
+                                    .into_iter()
+                                    .map(|(k, t)| (k, union_of(t, v.clone())))
+                                    .collect();
+                                (joined, Some(v))
+                            }),
                         _ => (keys, None),
                     };
                     let kw_tys = SiteKeywords { group, keys, splat };

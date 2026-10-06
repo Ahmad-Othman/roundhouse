@@ -154,6 +154,17 @@ fn concern_class_attribute_macros_are_fully_typed() {
         .map(|d| d.message)
         .collect();
     assert!(concern.is_empty(), "concern diagnostics: {concern:#?}");
+    // The signature declares the parameter's own type, not the slot's.
+    let probe = app.controllers.iter().find(|c| c.name.0.as_str() == "ProbeController").unwrap();
+    let preload = probe.class_methods().find(|m| m.name.as_str() == "preload_site_configs").unwrap();
+    let Some(roundhouse::ty::Ty::Fn { params, .. }) = &preload.signature else {
+        panic!("unsigned: {:?}", preload.signature)
+    };
+    assert_eq!(
+        params[0].ty,
+        roundhouse::ty::Ty::Array { elem: Box::new(roundhouse::ty::Ty::Str) },
+        "codes"
+    );
 }
 
 /// The harness itself: the unedited blog emits and its controller

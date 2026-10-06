@@ -146,7 +146,13 @@ impl Analyzer {
                         .iter()
                         .map(|p| Param {
                             name: p.name.clone(),
-                            ty: ty.clone(),
+                            // A writer takes the slot's value; any other
+                            // method's parameter is what its sites seeded.
+                            ty: if *configuration_role == ClassConfigurationRole::Writer {
+                                ty.clone()
+                            } else {
+                                ctx.local_bindings.get(&p.name).cloned().unwrap_or(Ty::Untyped)
+                            },
                             kind: p.ty_kind(),
                         })
                         .collect(),

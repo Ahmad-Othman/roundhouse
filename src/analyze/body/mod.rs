@@ -1850,13 +1850,16 @@ fn kernel_array_elem(arg: &Ty) -> Option<Ty> {
     match arg {
         Ty::Array { elem } => Some((**elem).clone()),
         Ty::Tuple { elems } => Some(elems.iter().cloned().reduce(union_of).unwrap_or(Ty::Bottom)),
+        // `to_a` of a relation is its records; of a range, its elements.
+        Ty::Relation { of } => Some(Ty::Class { id: of.clone(), args: vec![] }),
+        Ty::Class { id, args } if id.0.as_str() == "Range" => args.first().cloned(),
         Ty::Nil => Some(Ty::Bottom),
         Ty::Union { variants } => variants
             .iter()
             .map(kernel_array_elem)
             .collect::<Option<Vec<_>>>()
             .map(|elems| elems.into_iter().reduce(union_of).unwrap_or(Ty::Bottom)),
-        Ty::Var { .. } | Ty::Untyped | Ty::Hash { .. } => None,
+        Ty::Var { .. } | Ty::Untyped | Ty::Hash { .. } | Ty::Record { .. } => None,
         scalar => Some(scalar.clone()),
     }
 }
@@ -2282,6 +2285,8 @@ mod tests {
         for (arg, elem) in [
             (array_of(Ty::Str), Ty::Str),
             (Ty::Tuple { elems: vec![Ty::Str, Ty::Int] }, union_of(Ty::Str, Ty::Int)),
+            (Ty::Relation { of: ClassId(Symbol::from("Story")) }, Ty::Class { id: ClassId(Symbol::from("Story")), args: vec![] }),
+            (Ty::Class { id: ClassId(Symbol::from("Range")), args: vec![Ty::Int] }, Ty::Int),
             (Ty::Sym, Ty::Sym),
             (Ty::Union { variants: vec![array_of(Ty::Sym), Ty::Sym, Ty::Nil] }, Ty::Sym),
         ] {
