@@ -1,18 +1,31 @@
 //! Unscoped `has_one` participates in Relation `preload` / `includes`
-//! batching through the load-once cache. Abstract overlay — not a
-//! Markdown-named product claim.
+//! batching through the load-once cache. Abstract overlays cover the
+//! Relation API spellings and declaration options this slice claims.
+//!
+//! Honest gaps (not claimed here):
+//! - Scoped `has_one :x, -> { where(...) }` stays on the lazy reader;
+//!   the batch loader does not apply the scope (same rule as has_many).
+//! - Polymorphic `has_one …, as:` is not in the preload batch yet
+//!   (lazy reader + type predicate still work).
+//! - `eager_load(:x)` is recognized for synthesizing batch loaders
+//!   (`app_mentions_includes`) but is not separately asserted here.
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
+fn profile_schema_edit() -> (&'static str, &'static str, &'static str) {
+    (
+        "db/schema.rb",
+        "  create_table \"comments\", force: :cascade do |t|",
+        "  create_table \"profiles\", force: :cascade do |t|\n    t.integer \"article_id\"\n    t.string \"bio\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|",
+    )
+}
+
 #[test]
 fn preloading_has_one_distributes_each_owners_child() {
+    let (path, from, to) = profile_schema_edit();
     emit_and_run::real_blog()
-        .edit(
-            "db/schema.rb",
-            "  create_table \"comments\", force: :cascade do |t|",
-            "  create_table \"profiles\", force: :cascade do |t|\n    t.integer \"article_id\"\n    t.string \"bio\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|",
-        )
+        .edit(path, from, to)
         .write(
             "app/models/profile.rb",
             "class Profile < ApplicationRecord\n  belongs_to :article\nend\n",
@@ -34,10 +47,68 @@ raise "count" unless rows.size == 3
 raise "alpha" unless rows[0].profile.bio == "a-bio"
 raise "beta should be nil" unless rows[1].profile.nil?
 raise "gamma" unless rows[2].profile.bio == "c-bio"
-# Writer stash still wins over a stale preload when assigned later.
 rows[1].profile = Profile.new(bio: "assigned")
 raise "writer after preload" unless rows[1].profile.bio == "assigned"
 puts "has_one preload passed"
+"#,
+        )
+        .assert_passes();
+}
+
+/// `includes(:assoc)` — sibling Relation spelling of the same batch path.
+#[test]
+fn includes_has_one_distributes_each_owners_child() {
+    let (path, from, to) = profile_schema_edit();
+    emit_and_run::real_blog()
+        .edit(path, from, to)
+        .write(
+            "app/models/profile.rb",
+            "class Profile < ApplicationRecord\n  belongs_to :article\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  has_one :profile\n  scope :including_profiles, -> { includes(:profile) }",
+        )
+        .run_ruby(
+            r#"
+a = Article.create!(title: "Alpha", body: "abcdefghij")
+b = Article.create!(title: "Beta", body: "abcdefghij")
+Profile.create!(article_id: a.id, bio: "via-includes")
+rows = Article.including_profiles.order(:id).to_a
+raise "alpha" unless rows[0].profile.bio == "via-includes"
+raise "beta nil" unless rows[1].profile.nil?
+puts "has_one includes passed"
+"#,
+        )
+        .assert_passes();
+}
+
+/// Renamed association: `class_name:` + `foreign_key:` preloads under the
+/// declared name, not the target class name.
+#[test]
+fn preload_honors_class_name_and_foreign_key() {
+    let (path, from, to) = profile_schema_edit();
+    emit_and_run::real_blog()
+        .edit(path, from, to)
+        .write(
+            "app/models/profile.rb",
+            "class Profile < ApplicationRecord\n  belongs_to :article\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  has_one :spotlight, class_name: \"Profile\", foreign_key: :article_id\n  scope :with_spotlights, -> { preload(:spotlight) }",
+        )
+        .run_ruby(
+            r#"
+a = Article.create!(title: "Alpha", body: "abcdefghij")
+b = Article.create!(title: "Beta", body: "abcdefghij")
+Profile.create!(article_id: a.id, bio: "spot")
+rows = Article.with_spotlights.order(:id).to_a
+raise "spotlight" unless rows[0].spotlight.bio == "spot"
+raise "missing is nil" unless rows[1].spotlight.nil?
+puts "has_one preload class_name/foreign_key passed"
 "#,
         )
         .assert_passes();

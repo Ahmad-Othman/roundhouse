@@ -1,18 +1,34 @@
 //! `has_one …, autosave: true` stashes through the writer and persists
-//! the child after the owner saves. Abstract overlay — not a
-//! Markdown-named product claim.
+//! the child after the owner saves. Abstract overlays cover the Rails
+//! declaration spellings this slice claims — not a Markdown-/Writebook-
+//! named product path.
+//!
+//! Honest gaps (not claimed here):
+//! - `build_<assoc>` / `create_<assoc>` call-site rewrite does not assign
+//!   into the association cache, so autosave after bare `build_` alone
+//!   is unsupported; assign through `<assoc>=` (or assign the build
+//!   result) instead.
+//! - Rails' default `autosave: nil` (implicit autosave of new records)
+//!   is not modeled — only explicit `autosave: true`.
+//! - `inverse_of`, `touch`, `validate`, `required`, `strict_loading`
+//!   remain unmodeled association kwargs.
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
+fn profile_schema_edit() -> (&'static str, &'static str, &'static str) {
+    (
+        "db/schema.rb",
+        "  create_table \"comments\", force: :cascade do |t|",
+        "  create_table \"profiles\", force: :cascade do |t|\n    t.integer \"article_id\"\n    t.string \"bio\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|",
+    )
+}
+
 #[test]
 fn assigned_has_one_child_autosaves_with_owner() {
+    let (path, from, to) = profile_schema_edit();
     emit_and_run::real_blog()
-        .edit(
-            "db/schema.rb",
-            "  create_table \"comments\", force: :cascade do |t|",
-            "  create_table \"profiles\", force: :cascade do |t|\n    t.integer \"article_id\"\n    t.string \"bio\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|",
-        )
+        .edit(path, from, to)
         .write(
             "app/models/profile.rb",
             "class Profile < ApplicationRecord\n  belongs_to :article\nend\n",
@@ -37,6 +53,99 @@ b = Article.create!(title: "Empty owner", body: "abcdefghij")
 b.save!
 raise "nil child invented a row" unless Profile.where(article_id: b.id).count == 0
 puts "has_one autosave passed"
+"#,
+        )
+        .assert_passes();
+}
+
+/// `class_name:` + `foreign_key:` — association name ≠ target / default FK.
+#[test]
+fn autosave_honors_class_name_and_foreign_key() {
+    let (path, from, to) = profile_schema_edit();
+    emit_and_run::real_blog()
+        .edit(path, from, to)
+        .write(
+            "app/models/profile.rb",
+            "class Profile < ApplicationRecord\n  belongs_to :article\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  has_one :spotlight, class_name: \"Profile\", foreign_key: :article_id, autosave: true",
+        )
+        .run_ruby(
+            r#"
+a = Article.new(title: "Hello world", body: "abcdefghij")
+a.spotlight = Profile.new(bio: "named")
+a.save!
+child = Profile.find_by(article_id: a.id)
+raise "child missing" if child.nil?
+raise "bio" unless child.bio == "named"
+raise "reader" unless a.spotlight.bio == "named"
+puts "has_one autosave class_name/foreign_key passed"
+"#,
+        )
+        .assert_passes();
+}
+
+/// Polymorphic `as:` stamps the type column on autosave.
+#[test]
+fn autosave_stamps_polymorphic_as_type() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "  create_table \"comments\", force: :cascade do |t|",
+            "  create_table \"notices\", force: :cascade do |t|\n    t.integer \"notable_id\"\n    t.string \"notable_type\"\n    t.string \"body\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|",
+        )
+        .write(
+            "app/models/notice.rb",
+            "class Notice < ApplicationRecord\n  belongs_to :notable, polymorphic: true\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  has_one :notice, as: :notable, autosave: true",
+        )
+        .run_ruby(
+            r#"
+a = Article.new(title: "Hello world", body: "abcdefghij")
+a.notice = Notice.new(body: "ping")
+a.save!
+row = Notice.find_by(notable_id: a.id, notable_type: "Article")
+raise "row missing" if row.nil?
+raise "body" unless row.body == "ping"
+raise "reader" unless a.notice.body == "ping"
+puts "has_one autosave as: passed"
+"#,
+        )
+        .assert_passes();
+}
+
+/// `dependent: :destroy` beside `autosave: true` — both halves coexist.
+#[test]
+fn autosave_with_dependent_destroy() {
+    let (path, from, to) = profile_schema_edit();
+    emit_and_run::real_blog()
+        .edit(path, from, to)
+        .write(
+            "app/models/profile.rb",
+            "class Profile < ApplicationRecord\n  belongs_to :article\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  has_one :profile, dependent: :destroy, autosave: true",
+        )
+        .run_ruby(
+            r#"
+a = Article.new(title: "Hello world", body: "abcdefghij")
+a.profile = Profile.new(bio: "temp")
+a.save!
+id = a.profile.id
+raise "not saved" if id.nil? || id == 0
+a.destroy
+raise "child survived destroy" unless Profile.find_by(id: id).nil?
+puts "has_one autosave+dependent destroy passed"
 "#,
         )
         .assert_passes();
