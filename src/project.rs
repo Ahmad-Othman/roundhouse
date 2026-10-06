@@ -975,8 +975,11 @@ fn reject_unsupported_forwarded_procs(app: &App, target: BuildTarget) -> Result<
         {
             // These shapes predate the arbitrary-expression fallback;
             // their existing target-specific paths remain unchanged.
+            // The bytes primitive implements literal &nil as no block. Use
+            // its shared classifier, without accepting other &expr calls.
             if !matches!(&*block.node, ExprNode::Lambda { .. } | ExprNode::Var { .. }
-                | ExprNode::MethodRef { .. }) {
+                | ExprNode::MethodRef { .. })
+                && !crate::emit::shared::string_bytes::materializes_array(e) {
                 *found = true;
                 crate::emit::diagnostics::report_unsupported(
                     block.span, target, "forwarded_proc",

@@ -5684,6 +5684,9 @@ end
         .assert_passes();
 }
 
+#[path = "emit_and_run/string_bytes.rs"]
+mod string_bytes;
+
 /// A Slim view is ingested rather than skipped, so `check` going quiet on
 /// it is a claim the emitted page renders. Swap the blog's index for a
 /// Slim twin that exercises the grammar (shortcuts merging with a

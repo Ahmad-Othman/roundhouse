@@ -37,7 +37,11 @@ where
     r
 }
 
+/// Render a Crystal expression, recognizing whole-call primitives before node dispatch.
 pub fn emit_expr(e: &Expr) -> String {
+    if let Some(s) = crate::emit::shared::string_bytes::emit(e, crate::emit::shared::string_bytes::Target::Crystal, emit_expr) {
+        return s;
+    }
     // IrHint::StringBuilder* — lowerer-tagged accumulator triple
     // (`io = String.new; io << "..."; io`). Crystal's `String + String`
     // is O(n²) per append (immutable Strings reallocate); swap to
