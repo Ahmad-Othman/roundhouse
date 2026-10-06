@@ -12,6 +12,11 @@
 //! (or node kinds) do not consume each other's output. Passes that need
 //! extra app-level context, diagnostics, or a later predecessor stay
 //! sequential.
+//!
+//! Two walks, split by the `kwsplat` constraint: the early group runs
+//! before any pass that mutates argument lists; the late group runs
+//! after `kwsplat` (and after `tag_builder`, which `capture_inline`
+//! depends on).
 
 use crate::app::App;
 use crate::expr::Expr;
@@ -34,6 +39,21 @@ pub fn apply_fused_independent_rewrites(app: &mut App) {
     }
     super::for_each_test_body(app, &mut |body| {
         walk_postorder(body, &mut |e| rewrite_test_node(e, skip_full_messages));
+    });
+}
+
+/// Independent rewrites that must observe ingested (or already
+/// `kwsplat`-expanded) argument lists, and `capture_inline` which
+/// must see `tag_builder`'s synthesized `capture` blocks.
+pub fn apply_fused_late_rewrites(app: &mut App) {
+    super::for_each_hook_body(app, &mut |body| {
+        walk_postorder(body, &mut rewrite_late_hook_node);
+    });
+    for view in &mut app.views {
+        walk_postorder(&mut view.body, &mut super::attachables_grep::rewrite_node);
+    }
+    super::for_each_test_body(app, &mut |body| {
+        walk_postorder(body, &mut super::attachables_grep::rewrite_node);
     });
 }
 
@@ -78,6 +98,10 @@ fn rewrite_hook_node(
         super::errors_full_messages::rewrite_node(e);
     }
     super::each_with_index::rewrite_node(e);
+    // Last: produces `ActiveSupport.*` / Range nodes no earlier fused
+    // rewrite keys on. `where_range_split` still runs sequentially
+    // afterwards and walks those Ranges.
+    super::time_calendar::rewrite_node(e);
 }
 
 fn rewrite_view_node(
@@ -116,6 +140,7 @@ fn rewrite_view_node(
         super::errors_full_messages::rewrite_node(e);
     }
     super::each_with_index::rewrite_node(e);
+    super::time_calendar::rewrite_node(e);
 }
 
 fn rewrite_test_node(e: &mut Expr, skip_full_messages: bool) {
@@ -126,6 +151,17 @@ fn rewrite_test_node(e: &mut Expr, skip_full_messages: bool) {
     if !skip_full_messages {
         super::errors_full_messages::rewrite_node(e);
     }
+}
+
+fn rewrite_late_hook_node(e: &mut Expr) {
+    super::rails_cache::rewrite_node(e);
+    super::capture_inline::rewrite_node(e);
+    super::and_return::rewrite_node(e);
+    super::case_lambda::rewrite_node(e);
+    super::system_exception::rewrite_node(e);
+    super::perform_all_later::rewrite_node(e);
+    super::attachables_grep::rewrite_node(e);
+    super::send_file::rewrite_node(e);
 }
 
 fn walk_postorder(expr: &mut Expr, f: &mut impl FnMut(&mut Expr)) {

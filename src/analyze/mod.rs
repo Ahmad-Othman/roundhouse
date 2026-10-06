@@ -129,6 +129,16 @@ pub struct Analyzer {
     data_factories: HashMap<crate::span::Span, Ty>,
 }
 
+/// Snapshot of the data the fixpoint refines: per-class instance/class
+/// method return types plus `inferred_params`. HashMap equality is
+/// order-independent, so this matches the previous sorted-string
+/// fingerprint without `Debug`-formatting every `Ty` on every round.
+struct InferenceSig {
+    instance: HashMap<ClassId, HashMap<Symbol, Ty>>,
+    class_methods: HashMap<ClassId, HashMap<Symbol, Ty>>,
+    params: HashMap<(ClassId, Symbol), Vec<Ty>>,
+}
+
 impl Analyzer {
     /// Build an analyzer with the default database adapter
     /// (`SqliteAdapter`). Matches pre-adapter-refactor behavior —
@@ -844,7 +854,7 @@ impl Analyzer {
     /// types from method bodies into the dispatch registry, (b) unifies
     /// parameter types across call sites, and (c) re-runs typing with
     /// the refined registry. Iterates to a fixed point (capped; see
-    /// `FIXPOINT_CAP`) using a signature fingerprint to detect convergence.
+    /// `FIXPOINT_CAP`) using a structural registry snapshot to detect convergence.
     pub fn analyze(&mut self, app: &mut App) {
         const FIXPOINT_CAP: usize = 12;
         // View-name and dynamic-render ivar sets are invariant across
@@ -873,15 +883,14 @@ impl Analyzer {
         // `with_pagination_info` → `get` → `paginate` → the
         // `get_from_cache` block → its return → the destructuring, which
         // settles on round 9.
-        let mut prev_sig = self.inference_signature();
+        let mut prev_sig = self.capture_inference_sig();
         for round in 0..FIXPOINT_CAP {
             crate::timings::phase(format_args!("round {round}: harvest returns"), || self.harvest_returns_to_registry(app));
             crate::timings::phase(format_args!("round {round}: unify params"), || self.unify_params_from_call_sites(app));
-            let cur_sig = self.inference_signature();
-            if cur_sig == prev_sig {
+            if self.inference_matches(&prev_sig) {
                 break;
             }
-            prev_sig = cur_sig;
+            prev_sig = self.capture_inference_sig();
             // Re-type the whole app with the refined registry. Idempotent
             // BodyTyper means a second pass simply resolves dispatches
             // and Var bindings the first pass couldn't.
@@ -3287,40 +3296,35 @@ impl Analyzer {
         ctx
     }
 
-    /// Fingerprint of the data the fixpoint refines: per-class
-    /// instance/class method return types in `self.classes` plus the
-    /// parameter-type table in `self.inferred_params`. The fixpoint
-    /// loop in `analyze` compares fingerprints between iterations and
-    /// stops when they match. Order-independent so HashMap iteration
-    /// order doesn't perturb results: keys are sorted before
-    /// stringification.
-    fn inference_signature(&self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-        let mut class_keys: Vec<&ClassId> = self.classes.keys().collect();
-        class_keys.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
-        for cid in class_keys {
-            let cls = &self.classes[cid];
-            let mut method_keys: Vec<&Symbol> = cls.instance_methods.keys().collect();
-            method_keys.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-            for m in method_keys {
-                parts.push(format!("{}#{}={:?}", cid.0.as_str(), m.as_str(), cls.instance_methods[m]));
+    fn capture_inference_sig(&self) -> InferenceSig {
+        let mut instance = HashMap::with_capacity(self.classes.len());
+        let mut class_methods = HashMap::with_capacity(self.classes.len());
+        for (id, cls) in &self.classes {
+            instance.insert(id.clone(), cls.instance_methods.clone());
+            class_methods.insert(id.clone(), cls.class_methods.clone());
+        }
+        InferenceSig {
+            instance,
+            class_methods,
+            params: self.inferred_params.clone(),
+        }
+    }
+
+    fn inference_matches(&self, prev: &InferenceSig) -> bool {
+        if self.classes.len() != prev.instance.len() || self.inferred_params != prev.params {
+            return false;
+        }
+        for (id, cls) in &self.classes {
+            match prev.instance.get(id) {
+                Some(methods) if methods == &cls.instance_methods => {}
+                _ => return false,
             }
-            let mut cmethod_keys: Vec<&Symbol> = cls.class_methods.keys().collect();
-            cmethod_keys.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-            for m in cmethod_keys {
-                parts.push(format!("{}.{}={:?}", cid.0.as_str(), m.as_str(), cls.class_methods[m]));
+            match prev.class_methods.get(id) {
+                Some(methods) if methods == &cls.class_methods => {}
+                _ => return false,
             }
         }
-        let mut param_keys: Vec<&(ClassId, Symbol)> = self.inferred_params.keys().collect();
-        param_keys.sort_by(|(c1, m1), (c2, m2)| {
-            c1.0.as_str()
-                .cmp(c2.0.as_str())
-                .then_with(|| m1.as_str().cmp(m2.as_str()))
-        });
-        for k in param_keys {
-            parts.push(format!("{}#{}~{:?}", k.0.0.as_str(), k.1.as_str(), self.inferred_params[k]));
-        }
-        parts.join("|")
+        true
     }
 
     /// Walk every model + library_class method body and write its

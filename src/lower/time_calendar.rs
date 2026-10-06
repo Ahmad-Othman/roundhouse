@@ -14,6 +14,10 @@ pub fn apply_time_calendar_grounding(app: &mut App) {
 
 fn rewrite(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut rewrite);
+    rewrite_node(expr);
+}
+
+pub(crate) fn rewrite_node(expr: &mut Expr) {
     if let ExprNode::Send { recv: Some(r), method, .. } = &mut *expr.node {
         if is_time_const(r) && method.as_str() == "use_zone" {
             *r = Expr::new(r.span, ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] });

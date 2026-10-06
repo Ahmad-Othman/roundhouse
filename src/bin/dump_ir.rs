@@ -351,7 +351,9 @@ fn print_usage() {
 // ── Pipeline (mirrors tests/model_lowerer.rs::lowered_real_blog_typing_residual) ─
 
 fn lower_all(app: &roundhouse::App) -> Vec<LibraryClass> {
-    let vctx = roundhouse::lower::ViewLowerCtx::new(app);
+    let vctx = roundhouse::timings::phase("lower: view ctx", || {
+        roundhouse::lower::ViewLowerCtx::new(app)
+    });
     let mut view_lcs = roundhouse::timings::phase("lower: preliminary views", || {
         preliminary_view_classes(&app.views, &vctx)
     });
@@ -390,20 +392,24 @@ fn lower_all(app: &roundhouse::App) -> Vec<LibraryClass> {
     // on models (`@article.title`), Comment.where(…), assertions on
     // self (Minitest::Test), so the registry needs all of: models +
     // views + controllers.
-    let fixture_lcs = lower_fixtures_to_library_classes(app);
+    let fixture_lcs = roundhouse::timings::phase("lower: fixtures", || {
+        lower_fixtures_to_library_classes(app)
+    });
 
     let mut test_extras: Vec<(ClassId, roundhouse::analyze::ClassInfo)> =
         model_registry.into_iter().collect();
     test_extras.extend(build_class_info_extras(&view_lcs));
     test_extras.extend(build_class_info_extras(&controller_lcs));
     test_extras.extend(build_class_info_extras(&fixture_lcs));
-    let test_lcs = lower_test_modules_to_library_classes(
-        &app.test_modules,
-        &app.fixtures,
-        &app.models,
-        test_extras,
-        &roundhouse::lower::routes::helper_id_segments(app),
-    );
+    let test_lcs = roundhouse::timings::phase("lower: tests", || {
+        lower_test_modules_to_library_classes(
+            &app.test_modules,
+            &app.fixtures,
+            &app.models,
+            test_extras,
+            &roundhouse::lower::routes::helper_id_segments(app),
+        )
+    });
 
     let mut all = Vec::new();
     all.extend(model_lcs);
@@ -412,9 +418,11 @@ fn lower_all(app: &roundhouse::App) -> Vec<LibraryClass> {
     all.extend(controller_lcs);
     all.extend(fixture_lcs);
     all.extend(test_lcs);
-    for lc in &app.library_classes {
-        all.push(lc.clone());
-    }
+    roundhouse::timings::phase("lower: copy library classes", || {
+        for lc in &app.library_classes {
+            all.push(lc.clone());
+        }
+    });
     all
 }
 

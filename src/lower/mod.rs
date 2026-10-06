@@ -328,6 +328,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("group_count", &[]),
     ("errors_full_messages", &[]),
     ("each_with_index", &[]),
+    // After the other fused send rewrites: produces Range / ActiveSupport
+    // calls `where_range_split` later consumes. Empty runs_after of its
+    // own — the dependent is the later pass.
+    ("time_calendar", &[]),
     ("blank", &[]),
     ("time_current", &[]),
     ("as_json_super", &[]),
@@ -356,9 +360,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("try_guard", &[]),
     // `record.read_attribute(:x)` → `record[:x]`; a rename of a name no other pass produces or consumes.
     ("attribute_aliases", &[]),
-    // No runs_after: it reads only analyzer types and produces calls no other pass consumes.
-    ("time_calendar", &[]),
-    // After time_calendar: `t.all_month` becomes the Range literal this splits out.
+    // After time_calendar (fused earlier): `t.all_month` becomes the Range literal this splits out.
     ("where_range_split", &["time_calendar"]),
     // `Rooms::Open.count` → `Room.where(type: "Rooms::Open").count`.
     // Produces a `where` at a model Const root, which is vocabulary
@@ -478,10 +480,18 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // callee's signature, so it must see the argument list as ingested —
     // before any pass that appends or drops a positional argument.
     ("kwsplat", &[]),
-    // `Rails.cache.fetch(k, expires_in: t) { <String> }` → `fetch_str`;
-    // must run BEFORE the render lowering, whose rewrite of
-    // `render_to_string` into a `Views::` call is the tail this gates on.
+    // Independent late send rewrites: one fused tree walk in
+    // `fused::apply_fused_late_rewrites`. After `kwsplat` so argument
+    // lists are still as ingested for `send_file`; after `tag_builder`
+    // so `capture_inline` sees synthesized `capture` blocks.
     ("rails_cache", &[]),
+    ("capture_inline", &["tag_builder"]),
+    ("and_return", &[]),
+    ("case_lambda", &[]),
+    ("system_exception", &[]),
+    ("perform_all_later", &[]),
+    ("attachables_grep", &[]),
+    ("send_file", &[]),
     // `<e>.html_safe` → `<e>`, recording the producing method on the
     // App. No ordering constraints among the lowerings; the view
     // lowerer reads what it records, and that runs later, at emit.
@@ -499,14 +509,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `ActiveSupport::Duration`, and `duration` is what grounds one.
     ("signed_id", &[]),
     ("partial_qualify", &[]),
-    ("capture_inline", &["tag_builder"]),
-    ("and_return", &[]),
-    ("case_lambda", &[]),
     ("first_or_create", &[]),
-    ("system_exception", &[]),
     ("case_class_narrow", &[]),
     ("reset_counters", &[]),
-    ("perform_all_later", &[]),
     // `Model.authenticate_by(email: …, password: …)` → bind
     // `find_by(<identifiers>)`, then check `authenticate(<password>)`;
     // macro-inline of a Rails 7.1 name no other pass produces or
@@ -550,11 +555,6 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // running second leaves exactly the sites it declined, which is the
     // division of labour intended.
     ("assoc_attr_key", &["update_kwargs"]),
-    // `content.attachables.grep(User)` -> `User.where(id:
-    // content.attachable_ids("User")).to_a`. Writes a `Model.where`
-    // chain, which the ruby emit's scope lowering then folds like any
-    // other; consumes a shape no pass produces, so no constraints.
-    ("attachables_grep", &[]),
     // `obj.extend Mod` on an instance -> a raise stub with the report.
     // Consumes a shape no pass produces or reads; no constraints.
     ("object_extend", &[]),
@@ -604,13 +604,6 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // String-typed helper gets a String. Matches the reader's NAME,
     // which no earlier pass rewrites; no constraint.
     ("attached_url", &[]),
-    // `send_file path, content_type:` → `send_data File.binread(path),
-    // type:`. Reads Rails' own keyword spelling, which no earlier pass
-    // rewrites, and writes a `send_data` the runtime already answers —
-    // so no ordering constraint. Beside `attach` because it is the same
-    // move for the same reason: the file read belongs at the call site,
-    // where the app pays for it, not in a runtime every target shares.
-    ("send_file", &[]),
     // Moves a forwarded `**` bundle out of an optional keyword's
     // flattened slot and into the `**rest` slot it was aimed at. BEFORE
     // helper_kwargs, which splices literal keywords into those same
@@ -760,6 +753,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("group_count");
     ran!("errors_full_messages");
     ran!("each_with_index");
+    ran!("time_calendar");
     diags.extend(crate::timings::phase("post-analyze: blank", || {
         blank::apply_blank_lowering(app)
     }));
@@ -788,8 +782,6 @@ pub fn apply_post_analyze_lowerings(
     ran!("try_guard");
     attribute_aliases::apply_attribute_alias_lowering(app);
     ran!("attribute_aliases");
-    time_calendar::apply_time_calendar_grounding(app);
-    ran!("time_calendar");
     diags.extend(where_range_split::apply_where_range_split(app));
     ran!("where_range_split");
     sti_scope::apply_sti_scope_lowering(app);
@@ -852,8 +844,17 @@ pub fn apply_post_analyze_lowerings(
         kwsplat::apply_kwsplat_expansion(app)
     }));
     ran!("kwsplat");
-    rails_cache::apply_rails_cache_lowering(app);
+    crate::timings::phase("post-analyze: fused late rewrites", || {
+        fused::apply_fused_late_rewrites(app);
+    });
     ran!("rails_cache");
+    ran!("capture_inline");
+    ran!("and_return");
+    ran!("case_lambda");
+    ran!("system_exception");
+    ran!("perform_all_later");
+    ran!("attachables_grep");
+    ran!("send_file");
     html_safe::apply_html_safe_lowering(app);
     ran!("html_safe");
     diags.extend(module_mixins::apply_module_mixins_lowering(app));
@@ -866,22 +867,12 @@ pub fn apply_post_analyze_lowerings(
     ran!("signed_id");
     partial_qualify::apply_partial_qualification(app);
     ran!("partial_qualify");
-    capture_inline::apply_capture_inline(app);
-    ran!("capture_inline");
-    and_return::apply_and_return_lowering(app);
-    ran!("and_return");
-    case_lambda::apply_case_lambda_lowering(app);
-    ran!("case_lambda");
     diags.extend(first_or_create::apply_first_or_create_lowering(app));
     ran!("first_or_create");
-    system_exception::apply_system_exception_lowering(app);
-    ran!("system_exception");
     case_class_narrow::apply_case_class_narrowing(app);
     ran!("case_class_narrow");
     reset_counters::apply_reset_counters_lowering(app);
     ran!("reset_counters");
-    perform_all_later::apply_perform_all_later_lowering(app);
-    ran!("perform_all_later");
     diags.extend(authenticate_by::apply_authenticate_by_lowering(app));
     ran!("authenticate_by");
     // After authenticate_by: its expansion is a `find_by` whose keyword
@@ -906,8 +897,6 @@ pub fn apply_post_analyze_lowerings(
     ran!("update_kwargs");
     diags.extend(assoc_attr_key::apply_assoc_attr_key_lowering(app));
     ran!("assoc_attr_key");
-    attachables_grep::apply_attachables_grep_lowering(app);
-    ran!("attachables_grep");
     diags.extend(object_extend::apply_object_extend_stub(app));
     ran!("object_extend");
     param_rebind::apply_param_rebind_lowering(app);
@@ -940,8 +929,6 @@ pub fn apply_post_analyze_lowerings(
     ran!("attach");
     attached_url::apply_attached_url_lowering(app);
     ran!("attached_url");
-    send_file::apply_send_file_lowering(app);
-    ran!("send_file");
     diags.extend(kwrest_forward::apply_kwrest_forward_lowering(app));
     ran!("kwrest_forward");
     helper_kwargs::apply_helper_kwarg_positional_lowering(app);
