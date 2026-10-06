@@ -270,7 +270,7 @@ fn expand(decl: Declaration, leading_comments: &[Comment]) -> Vec<ModelBodyItem>
                 span,
                 ExprNode::Lit {
                     value: Literal::Str {
-                        value: underscore(crate::naming::demodulize(t)).replace('/', "_"),
+                        value: underscore(t).replace('/', "_"),
                     },
                 },
             )

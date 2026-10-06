@@ -246,6 +246,18 @@ fn included_do_delegated_type_ingests() {
     assert!(inst.iter().any(|n| n == "message?"), "{inst:?}");
 }
 
+/// `dependent: :nullify` (and other non-destroy values) stay unexpanded
+/// so the unsupported ledger remains honest.
+#[test]
+fn other_dependent_stays_unexpanded() {
+    let app = entry_app(
+        "  delegated_type :entryable, types: %w[ Message Comment ], dependent: :nullify\n",
+    );
+    let inst = instance_names(&app, "Entry");
+    assert!(!inst.iter().any(|n| n == "message?"), "{inst:?}");
+    assert!(!inst.iter().any(|n| n == "destroy_entryable"), "{inst:?}");
+}
+
 fn runtime_app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write(
@@ -356,7 +368,7 @@ e = Entry.create!(entryable: n)
 raise "ns predicate" unless e.access_notice_message?
 raise "ns reader" unless e.access_notice_message.body == "ping"
 raise "ns scope" unless Entry.access_notice_messages.where(id: e.id).exists?
-raise "ns name" unless e.entryable_name == "notice_message"
+raise "ns name" unless e.entryable_name == "access_notice_message"
 puts "delegated_type namespaced optional passed"
 "#,
         )
