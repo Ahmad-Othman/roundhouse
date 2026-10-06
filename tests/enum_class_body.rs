@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use roundhouse::dialect::MethodReceiver;
+use roundhouse::dialect::{MethodReceiver, ModelBodyItem};
 use roundhouse::ingest::ingest_app_from_tree;
 
 #[path = "support/emit_and_run.rs"]
@@ -77,7 +77,22 @@ end
         "suffix: true must not emit the unsuffixed predicate: {names:?}"
     );
     let scopes = class_names(&app, "Post");
-    assert!(scopes.iter().any(|n| n == "black_theme"), "{scopes:?}");
+    assert!(
+        scopes.iter().any(|n| n == "themes"),
+        "plural mapping: {scopes:?}"
+    );
+    let post = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Post")
+        .unwrap();
+    assert!(
+        post.body.iter().any(|item| matches!(
+            item,
+            ModelBodyItem::Scope { scope, .. } if scope.name.as_str() == "black_theme"
+        )),
+        "suffixed scope"
+    );
 }
 
 /// `prefix: true` on the same string-backed mapping names
@@ -206,7 +221,7 @@ raise "included default" unless a.member?
 raise "helper" if a.can_administer?
 a.administrator!
 raise "bang" unless a.can_administer?
-raise "stored int" unless a.role == "administrator" || a.role == 1
+raise "stored label" unless a.role == "administrator"
 puts "included integer enum passed"
 "#,
         )

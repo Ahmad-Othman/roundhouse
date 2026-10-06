@@ -3102,10 +3102,18 @@ fn unknown_is_model_macro(item: &crate::dialect::ModelBodyItem) -> bool {
 /// Second return value: `enum` columns declared inside an `included
 /// do`, keyed by the concern module. They belong to every includer
 /// exactly as the DSL items do; the splice folds them into each
-/// including model's own `enums` table.
+/// including model's own `enums` table (and `enum_defaults` when
+/// `default:` is present).
 pub type ConcernModelItems = (
     Vec<(ClassId, Vec<crate::dialect::ModelBodyItem>)>,
-    Vec<(ClassId, Vec<(Symbol, Vec<(String, crate::expr::Literal)>)>)>,
+    Vec<(
+        ClassId,
+        Vec<(
+            Symbol,
+            Vec<(String, crate::expr::Literal)>,
+            Option<crate::expr::Literal>,
+        )>,
+    )>,
 );
 
 fn walk_dsl_stmts<'pr>(body: ruby_prism::Node<'pr>, out: &mut Vec<ruby_prism::Node<'pr>>) {
@@ -3155,7 +3163,11 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
 
         let Some(body) = module.body() else { continue };
         let mut items: Vec<ModelBodyItem> = Vec::new();
-        let mut enums: Vec<(Symbol, Vec<(String, crate::expr::Literal)>)> = Vec::new();
+        let mut enums: Vec<(
+            Symbol,
+            Vec<(String, crate::expr::Literal)>,
+            Option<crate::expr::Literal>,
+        )> = Vec::new();
         for stmt in flatten_statements(body) {
             let Some(call) = stmt.as_call_node() else { continue };
             if call.receiver().is_some() || constant_id_str(&call.name()) != "included" {
@@ -3179,7 +3191,7 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
                         &call, file, &[], &|_| None,
                     ) {
                         Ok(Some(expanded)) => {
-                            enums.push((expanded.column, expanded.mapping));
+                            enums.push((expanded.column, expanded.mapping, expanded.default));
                             items.extend(expanded.items);
                             continue;
                         }

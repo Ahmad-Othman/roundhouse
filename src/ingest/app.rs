@@ -243,7 +243,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // `enums` table, and nothing downstream reads them by module.
     let mut concern_enums: Vec<(
         crate::ident::ClassId,
-        Vec<(crate::ident::Symbol, Vec<(String, crate::expr::Literal)>)>,
+        Vec<(
+            crate::ident::Symbol,
+            Vec<(String, crate::expr::Literal)>,
+            Option<crate::expr::Literal>,
+        )>,
     )> = Vec::new();
 
     // The app's inflections come first: everything after this that
@@ -3370,7 +3374,11 @@ fn fold_concern_enums_into_models(
     app: &mut App,
     concern_enums: &[(
         crate::ident::ClassId,
-        Vec<(crate::ident::Symbol, Vec<(String, crate::expr::Literal)>)>,
+        Vec<(
+            crate::ident::Symbol,
+            Vec<(String, crate::expr::Literal)>,
+            Option<crate::expr::Literal>,
+        )>,
     )],
 ) {
     if concern_enums.is_empty() {
@@ -3382,8 +3390,11 @@ fn fold_concern_enums_into_models(
             if !includes.contains(module) {
                 continue;
             }
-            for (column, mapping) in decls {
+            for (column, mapping, default) in decls {
                 model.enums.entry(column.clone()).or_insert_with(|| mapping.clone());
+                if let Some(d) = default {
+                    model.enum_defaults.entry(column.clone()).or_insert_with(|| d.clone());
+                }
             }
         }
     }
