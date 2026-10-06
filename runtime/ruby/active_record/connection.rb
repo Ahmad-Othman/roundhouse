@@ -373,6 +373,11 @@ module ActiveRecord
       ActiveRecord::Relation.new(self).where(conditions.to_h)
     end
 
+    # Model Hash finders use the relation's NULL / IN predicates too.
+    def self.find_by(conditions)
+      ActiveRecord::Relation.new(self).find_by(conditions)
+    end
+
     # Rails-shape `all` fallback, same story as `where` above: a lazy
     # Relation so refiner chains the lowerers left dynamic
     # (`Category.all.order("category asc, tags.tag asc")…` on lobsters'
