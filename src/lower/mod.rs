@@ -416,6 +416,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // (which flattens the `capture { … }` this pass synthesizes for the
     // block form).
     ("tag_builder", &[]),
+    // Independent rewrites after tag_builder, before kwsplat: one fused
+    // controller/library/model walk in `fused::apply_fused_narrow_rewrites`
+    // plus one fused hook+view+test walk in `fused::apply_fused_mid_rewrites`.
     ("request_index", &[]),
     // `config.session_options[:key]` → `session_cookie_key`; rewrites a
     // receiver chain no other pass produces or consumes.
@@ -808,23 +811,20 @@ pub fn apply_post_analyze_lowerings(
     ran!("sum_symbol");
     diags.extend(tag_builder::apply_tag_builder_lowering(app, registry));
     ran!("tag_builder");
-    request_index::apply_request_index_lowering(app);
+    crate::timings::phase("post-analyze: fused narrow rewrites", || {
+        fused::apply_fused_narrow_rewrites(app);
+    });
     ran!("request_index");
-    session_options::apply_session_options_lowering(app);
     ran!("session_options");
-    status_literal::apply_status_literal_lowering(app);
     ran!("status_literal");
-    to_param_residue::apply_to_param_residue_lowering(app);
     ran!("to_param_residue");
-    route_format_suffix::apply_route_format_suffix_lowering(app);
+    crate::timings::phase("post-analyze: fused mid rewrites", || {
+        fused::apply_fused_mid_rewrites(app);
+    });
     ran!("route_format_suffix");
-    route_url_options::apply_route_url_options_lowering(app);
     ran!("route_url_options");
-    enum_symbols::apply_enum_symbol_lowering(app);
     ran!("enum_symbols");
-    diags.extend(has_json::apply_has_json_lowering(app));
     ran!("has_json");
-    diags.extend(assoc_loaded::apply_assoc_loaded_lowering(app));
     ran!("assoc_loaded");
     default_self_recv::apply_default_self_recv(app);
     ran!("default_self_recv");

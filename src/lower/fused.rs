@@ -13,9 +13,10 @@
 //! extra app-level context, diagnostics, or a later predecessor stay
 //! sequential.
 //!
-//! Three walks, split by the `kwsplat` constraint: the early group runs
+//! Five walks, split by ordering constraints: the early group runs
 //! before any pass that mutates argument lists; the context group sits
-//! after mocha; the late group runs after `kwsplat` (and after
+//! after mocha; the narrow and mid groups sit after `tag_builder` and
+//! before `kwsplat`; the late group runs after `kwsplat` (and after
 //! `tag_builder`, which `capture_inline` depends on).
 
 use crate::app::App;
@@ -88,6 +89,153 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
 
     app.time_formats = formats;
     app.global_id_locate_models.extend(gid_models);
+}
+
+/// Controller/library/model-only independent rewrites. Surfaces match
+/// the original per-pass walks: `request_index` is controllers only;
+/// `session_options`/`status_literal` add library methods;
+/// `to_param_residue` adds model methods. Not folded into the mid hook
+/// walk, which would rewrite `request[]` in helpers and views.
+pub fn apply_fused_narrow_rewrites(app: &mut App) {
+    use crate::dialect::{ControllerBodyItem, ModelBodyItem};
+    for controller in &mut app.controllers {
+        for item in &mut controller.body {
+            match item {
+                ControllerBodyItem::Action { action, .. } => {
+                    for (_name, default) in &mut action.opt_params {
+                        walk_postorder(default, &mut |e| {
+                            super::request_index::rewrite_node(e);
+                            super::session_options::rewrite_node(e);
+                        });
+                    }
+                    walk_postorder(&mut action.body, &mut rewrite_narrow_controller_node);
+                }
+                ControllerBodyItem::Unknown { expr, .. } => {
+                    walk_postorder(expr, &mut rewrite_narrow_controller_node);
+                }
+                _ => {}
+            }
+        }
+    }
+    for class in &mut app.library_classes {
+        for m in &mut class.methods {
+            walk_postorder(&mut m.body, &mut |e| {
+                super::session_options::rewrite_node(e);
+                super::status_literal::rewrite_node(e);
+                super::to_param_residue::rewrite_node(e);
+            });
+        }
+    }
+    for model in &mut app.models {
+        for item in &mut model.body {
+            if let ModelBodyItem::Method { method, .. } = item {
+                walk_postorder(&mut method.body, &mut super::to_param_residue::rewrite_node);
+            }
+        }
+    }
+}
+
+fn rewrite_narrow_controller_node(e: &mut Expr) {
+    super::request_index::rewrite_node(e);
+    super::session_options::rewrite_node(e);
+    super::status_literal::rewrite_node(e);
+    super::to_param_residue::rewrite_node(e);
+}
+
+/// Independent rewrites after `tag_builder` and before `kwsplat`: route
+/// helpers, enum symbols, `has_json` flatten, and assoc `loaded?`/
+/// `.target`. Collect tables once; one owned-hook walk, one view walk,
+/// one test walk. Tests skip `position_path_params`, matching the
+/// original `route_url_options` surface.
+pub fn apply_fused_mid_rewrites(app: &mut App) {
+    let helpers = super::route_format_suffix::route_helper_names(app);
+    let path_params = if helpers.is_empty() {
+        Default::default()
+    } else {
+        super::route_url_options::helper_path_params(app)
+    };
+    let enum_map = super::enum_symbols::enum_columns(app);
+    let json_map = super::has_json::has_json_columns(&app.models);
+    let by_model = super::assoc_loaded::has_many_by_model(app);
+    let readers = super::assoc_loaded::association_readers_by_model(app);
+    let sole_includer = app.sole_includer_of_modules();
+
+    super::for_each_owned_hook_body(app, &mut |owner, body| {
+        walk_postorder(body, &mut |e| {
+            rewrite_mid_node(
+                e,
+                owner,
+                &helpers,
+                &path_params,
+                true,
+                &enum_map,
+                &json_map,
+                &sole_includer,
+                &by_model,
+                &readers,
+            );
+        });
+    });
+    for view in &mut app.views {
+        walk_postorder(&mut view.body, &mut |e| {
+            rewrite_mid_node(
+                e,
+                None,
+                &helpers,
+                &path_params,
+                true,
+                &enum_map,
+                &json_map,
+                &sole_includer,
+                &by_model,
+                &readers,
+            );
+        });
+    }
+    super::for_each_test_body(app, &mut |body| {
+        walk_postorder(body, &mut |e| {
+            rewrite_mid_node(
+                e,
+                None,
+                &helpers,
+                &path_params,
+                false,
+                &enum_map,
+                &json_map,
+                &sole_includer,
+                &by_model,
+                &readers,
+            );
+        });
+    });
+}
+
+fn rewrite_mid_node(
+    e: &mut Expr,
+    enclosing: Option<&crate::ident::ClassId>,
+    helpers: &std::collections::HashSet<String>,
+    path_params: &std::collections::HashMap<String, Vec<String>>,
+    position_path: bool,
+    enum_map: &super::enum_symbols::EnumMap,
+    json_map: &super::has_json::HasJsonColumns,
+    sole_includer: &std::collections::HashMap<crate::ident::ClassId, crate::ident::ClassId>,
+    by_model: &std::collections::HashMap<crate::ident::ClassId, std::collections::HashSet<Symbol>>,
+    readers: &std::collections::HashMap<crate::ident::ClassId, std::collections::HashSet<Symbol>>,
+) {
+    if !helpers.is_empty() {
+        super::route_format_suffix::rewrite_node(e, helpers);
+        if position_path {
+            super::route_url_options::rewrite_position_node(e, path_params);
+        }
+        super::route_url_options::rewrite_node(e, helpers);
+    }
+    if !enum_map.is_empty() {
+        super::enum_symbols::rewrite_node(e, enum_map);
+    }
+    if !json_map.is_empty() {
+        super::has_json::rewrite_node(e, json_map);
+    }
+    super::assoc_loaded::rewrite_node(e, enclosing, sole_includer, by_model, readers);
 }
 
 fn rewrite_hook_node(
