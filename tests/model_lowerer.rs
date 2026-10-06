@@ -502,6 +502,48 @@ end
     );
 }
 
+/// Polymorphic `as:` autosave writes the type column in the lowered body.
+#[test]
+fn polymorphic_has_one_autosave_sets_type_column() {
+    use roundhouse::ingest::{ingest_model, ingest_schema};
+
+    let schema = ingest_schema(
+        br#"
+ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "users", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "avatars", force: :cascade do |t|
+    t.integer "imageable_id"
+    t.string "imageable_type"
+    t.string "url"
+  end
+end
+"#,
+        "db/schema.rb",
+    )
+    .expect("ingest schema");
+    let model = ingest_model(
+        b"class User < ApplicationRecord\n  has_one :avatar, as: :imageable, autosave: true\nend\n",
+        "app/models/user.rb",
+        &schema,
+        &Default::default(),
+    )
+    .expect("ingest")
+    .expect("model");
+    let lc = lower_model_to_library_class(&model, &schema);
+    let autosave = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "_autosave_avatar")
+        .expect("_autosave_avatar");
+    let dump = format!("{:?}", autosave.body);
+    assert!(
+        dump.contains("imageable_type=") || dump.contains("\"User\""),
+        "autosave should assign polymorphic type: {dump}"
+    );
+}
+
 /// `has_one …, dependent: :destroy` cascades the single child, not
 /// a collection `each`. Nil child is the else branch so destroy of an
 /// owner with no row does not raise.

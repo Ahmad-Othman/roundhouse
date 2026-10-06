@@ -260,6 +260,24 @@ fn class_local_types_constant_ingests() {
     assert!(sc.iter().any(|n| n == "messages"), "{sc:?}");
 }
 
+/// Documented freeze / array spellings for the same constant fold.
+#[test]
+fn frozen_and_string_array_types_constants_ingest() {
+    for body in [
+        "  TYPES = %w[ Message Comment ].freeze\n  delegated_type :entryable, types: TYPES\n",
+        "  TYPES = %w[ Message Comment ]\n  delegated_type :entryable, types: TYPES.freeze\n",
+        "  TYPES = [\"Message\", \"Comment\"]\n  delegated_type :entryable, types: TYPES\n",
+        "  TYPES = %i[Message Comment]\n  delegated_type :entryable, types: TYPES\n",
+    ] {
+        let app = entry_app(body);
+        let inst = instance_names(&app, "Entry");
+        assert!(
+            inst.iter().any(|n| n == "message?") && inst.iter().any(|n| n == "comment?"),
+            "failed for {body:?}: {inst:?}"
+        );
+    }
+}
+
 /// Concern-module constant `types: Leafable::TYPES` — Writebook's spelling
 /// as a general Rails pattern, not a product fork.
 #[test]
@@ -574,4 +592,12 @@ puts "delegated_type foreign_key foreign_type primary_key passed"
 "#,
         )
         .assert_passes();
+}
+
+#[test]
+fn probe_pct_i_constant_alone() {
+    let app = entry_app("  TYPES = %i[Message Comment]\n  delegated_type :entryable, types: TYPES\n");
+    let inst = instance_names(&app, "Entry");
+    eprintln!("INST={inst:?}");
+    assert!(inst.iter().any(|n| n == "message?"), "{inst:?}");
 }
