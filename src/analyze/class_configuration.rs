@@ -123,35 +123,49 @@ impl Analyzer {
                 // Except a `class_attribute` on the class that includes its
                 // Concern: the default is stored at the `include`, before
                 // any class method can run there.
-                let set_at_include = *configuration_role == ClassConfigurationRole::ClassAttribute
-                    && includes.contains(&configuration_slot.0);
-                ctx.ivar_bindings.insert(
-                    configuration_slot.1.clone(),
-                    if set_at_include { ty.clone() } else { union_of(ty.clone(), Ty::Nil) },
-                );
-                if *configuration_role == ClassConfigurationRole::ClassAttribute {
-                    ctx.ivar_bindings.insert(
-                        crate::ingest::class_attribute::written_flag(&configuration_slot.1),
-                        union_of(Ty::Bool, Ty::Nil),
-                    );
-                }
-                if *configuration_role == ClassConfigurationRole::Writer {
-                    for param in &method.params {
-                        ctx.local_bindings.insert(param.name.clone(), ty.clone());
+                match *configuration_role {
+                    ClassConfigurationRole::ClassAttribute => {
+                        let set_at_include = includes.contains(&configuration_slot.0);
+                        ctx.ivar_bindings.insert(
+                            configuration_slot.1.clone(),
+                            if set_at_include {
+                                ty.clone()
+                            } else {
+                                union_of(ty.clone(), Ty::Nil)
+                            },
+                        );
+                        ctx.ivar_bindings.insert(
+                            crate::ingest::class_attribute::written_flag(&configuration_slot.1),
+                            union_of(Ty::Bool, Ty::Nil),
+                        );
+                        // A default is the value when the argument is absent;
+                        // typed first, so the seed joins it in.
+                        for param in &mut method.params {
+                            if let Some(default) = &mut param.default {
+                                self.body_typer().analyze_expr(default, &ctx);
+                            }
+                        }
+                        ctx = self.seed_method_params(&ctx, &controller.name, method);
                     }
-                }
-                if *configuration_role == ClassConfigurationRole::ClassAttribute {
-                    // A default is the value when the argument is absent;
-                    // typed first, so the seed joins it in.
-                    for param in &mut method.params {
-                        if let Some(default) = &mut param.default {
-                            self.body_typer().analyze_expr(default, &ctx);
+                    ClassConfigurationRole::Writer => {
+                        ctx.ivar_bindings.insert(
+                            configuration_slot.1.clone(),
+                            union_of(ty.clone(), Ty::Nil),
+                        );
+                        for param in &method.params {
+                            ctx.local_bindings.insert(param.name.clone(), ty.clone());
                         }
                     }
-                    ctx = self.seed_method_params(&ctx, &controller.name, method);
+                    ClassConfigurationRole::Reader => {
+                        ctx.ivar_bindings.insert(
+                            configuration_slot.1.clone(),
+                            union_of(ty.clone(), Ty::Nil),
+                        );
+                    }
                 }
                 seed_empty_hashes(&mut method.body, &ty);
                 self.body_typer().analyze_expr(&mut method.body, &ctx);
+                method.effects = self.collect_effects(&mut method.body, &ctx);
                 method.signature = Some(Ty::Fn {
                     params: method
                         .params
@@ -160,10 +174,14 @@ impl Analyzer {
                             name: p.name.clone(),
                             // A writer takes the slot's value; any other
                             // method's parameter is what its sites seeded.
-                            ty: if *configuration_role == ClassConfigurationRole::Writer {
-                                ty.clone()
-                            } else {
-                                ctx.local_bindings.get(&p.name).cloned().unwrap_or(Ty::Untyped)
+                            ty: match *configuration_role {
+                                ClassConfigurationRole::Writer => ty.clone(),
+                                ClassConfigurationRole::Reader
+                                | ClassConfigurationRole::ClassAttribute => ctx
+                                    .local_bindings
+                                    .get(&p.name)
+                                    .cloned()
+                                    .unwrap_or(Ty::Untyped),
                             },
                             kind: p.ty_kind(),
                         })

@@ -144,7 +144,7 @@ pub(super) fn expand(
                         body.push(item.clone());
                         // The default is set where Rails sets it: when the
                         // Concern's `included` hook runs.
-                        for module in args.iter().filter_map(const_id) {
+                        for module in args.iter().filter_map(const_path_to_class_id) {
                             if let Some(carrier) = own.iter().find(|m| ***m == module) {
                                 for (name, default) in &admitted[*carrier].attributes {
                                     body.push(ControllerBodyItem::ClassIvarInit {
@@ -455,7 +455,9 @@ fn written_slots(expr: &Expr, names: &[Symbol], out: &mut Vec<Symbol>) {
     expr.node.for_each_child(&mut |c| written_slots(c, names, out));
 }
 
-fn const_id(expr: &Expr) -> Option<ClassId> {
+/// `Foo::Bar` → `ClassId("Foo::Bar")`. Shared with the finite class-
+/// configuration expander so both Concern walks join Const paths once.
+pub(crate) fn const_path_to_class_id(expr: &Expr) -> Option<ClassId> {
     let ExprNode::Const { path } = &*expr.node else { return None };
     Some(ClassId(Symbol::from(
         path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
