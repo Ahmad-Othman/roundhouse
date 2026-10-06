@@ -133,6 +133,7 @@ pub struct Analyzer {
 /// method return types plus `inferred_params`. HashMap equality is
 /// order-independent, so this matches the previous sorted-string
 /// fingerprint without `Debug`-formatting every `Ty` on every round.
+#[derive(Clone)]
 struct InferenceSig {
     instance: HashMap<ClassId, HashMap<Symbol, Ty>>,
     class_methods: HashMap<ClassId, HashMap<Symbol, Ty>>,
@@ -935,39 +936,54 @@ impl Analyzer {
             });
         }
 
-        // Intermediate rounds skip views/tests: they do not harvest
-        // returns (except test helpers, typed below) and their call
-        // sites are still walked by unify from the last typed trees.
-        // The initial pass is production-only too — typing views against
-        // the empty first registry just to unify from those trees for
-        // seven rounds was wasted work. Re-type them once against the
-        // converged production registry so templates see the final
-        // controller ivars and helper returns. Then harvest/unify; if
-        // view sites moved a param, one more production-only pass
-        // absorbs it.
-        crate::timings::phase("typing passes (views after fixpoint)", || {
-            self.run_typing_passes(
-                app,
-                &dynamic_render_ivars,
-                &existing_view_names,
-                &module_methods,
-                &module_includes,
-                &parent_link_by_name,
-                true,
-            )
-        });
-
-        // The loop's last act is a typing pass whose results nothing
-        // harvested — either it hit the cap, or it ran on the round
-        // that then converged. Either way `self.classes` is one round
-        // behind the bodies in `app`, and the signature stamping below
-        // reads the registry. Harvesting once more costs no re-typing
-        // and makes the two agree.
-        self.harvest_returns_to_registry(app);
-        crate::timings::phase("unify params (after views)", || {
-            self.unify_params_from_call_sites(app)
-        });
-        if !self.inference_matches(&prev_sig) {
+        // Intermediate rounds skip views/tests: production does not
+        // read test helper returns, and typing views against the empty
+        // first registry just to unify from those trees for seven
+        // rounds was wasted work. After production converges, type
+        // views once and then harvest/unify/retype *tests* until helper
+        // chains and default-parameter seeds settle — one pass cannot
+        // establish caller-before-callee test helpers. Views stay out
+        // of those extra rounds. If view/test sites moved a production
+        // param, one production-only pass absorbs it.
+        let production_sig = prev_sig.clone();
+        for round in 0..FIXPOINT_CAP {
+            crate::timings::phase(
+                if round == 0 {
+                    "typing passes (views after fixpoint)".to_string()
+                } else {
+                    format!("round {round}: tests")
+                },
+                || {
+                    if round == 0 {
+                        self.run_typing_passes(
+                            app,
+                            &dynamic_render_ivars,
+                            &existing_view_names,
+                            &module_methods,
+                            &module_includes,
+                            &parent_link_by_name,
+                            true,
+                        );
+                    } else {
+                        self.type_tests_only(app);
+                    }
+                },
+            );
+            self.harvest_returns_to_registry(app);
+            crate::timings::phase(
+                if round == 0 {
+                    "unify params (after views)".to_string()
+                } else {
+                    format!("round {round}: unify params (tests)")
+                },
+                || self.unify_params_from_call_sites(app),
+            );
+            if self.inference_matches(&prev_sig) {
+                break;
+            }
+            prev_sig = self.capture_inference_sig();
+        }
+        if !self.inference_matches(&production_sig) {
             crate::timings::phase("typing passes (after view unify)", || {
                 self.run_typing_passes(
                     app,
