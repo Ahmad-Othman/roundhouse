@@ -521,6 +521,24 @@ class BaseTest < Minitest::Test
     assert_equal 2, distinct.group_count["T0"]
   end
 
+  # HAVING must see the original grouped relation (aggregates / source
+  # columns), not the outer DISTINCT count wrapper.
+  def test_group_count_distinct_having_filters_groups_before_distinct
+    3.times { |i| it = Item.new; it.title = "T#{i % 2}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item)
+      .group("title")
+      .distinct
+      .having("COUNT(*) > 1")
+    got = rel.group_count
+    assert_equal 2, got["T0"]
+    refute got.key?("T1")
+    by_title = ActiveRecord::Relation.new(Item)
+      .group("title")
+      .distinct
+      .having("title = 'T0'")
+    assert_equal({ "T0" => 2 }, by_title.group_count)
+  end
+
   def test_scalar_count_on_grouped_relation_counts_groups
     4.times { |i| it = Item.new; it.title = "T#{i % 2}"; it.save() }
     rel = ActiveRecord::Relation.new(Item).group("title")

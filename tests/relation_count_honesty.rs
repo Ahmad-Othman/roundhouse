@@ -38,6 +38,14 @@ const METHODS: &str = r#"
   def self.distinct_title_id_per_group
     Article.select(:title, :id).group(:title).distinct.count
   end
+
+  def self.distinct_popular_title_counts
+    Article.group(:title).distinct.having("COUNT(*) > 1").count
+  end
+
+  def self.distinct_title_named_hello
+    Article.group(:title).distinct.having("articles.title = 'Hello world'").count
+  end
 "#;
 
 fn overlay() -> emit_and_run::Overlay {
@@ -142,6 +150,22 @@ got = Article.distinct_title_id_per_group
 raise "grouped distinct: #{{got.inspect}}" unless got["Hello world"] == 2 && got["Other title"] == 1
 raise "scalar" if got.is_a?(Integer)
 puts "grouped distinct multi-column passed"
+"#,
+        seed = seed_articles()
+    );
+    overlay().run_ruby(&script).assert_passes();
+}
+
+#[test]
+fn grouped_distinct_having_filters_on_original_groups() {
+    let script = format!(
+        r#"
+{seed}
+got = Article.distinct_popular_title_counts
+raise "distinct having aggregate: #{{got.inspect}}" unless got == {{ "Hello world" => 2 }}
+named = Article.distinct_title_named_hello
+raise "distinct having column: #{{named.inspect}}" unless named == {{ "Hello world" => 2 }}
+puts "distinct having before distinct passed"
 "#,
         seed = seed_articles()
     );

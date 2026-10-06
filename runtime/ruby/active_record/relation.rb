@@ -1235,21 +1235,33 @@ module ActiveRecord
       key = @groups.join(", ")
       # DISTINCT uses a subquery so a multi-column / aliased `select`
       # never lands inside SQLite's one-expression COUNT(DISTINCT …).
-      # Non-distinct keeps `@select_sql` in the projection so HAVING
+      # HAVING filters groups on the original grouped relation first
+      # (source columns and aggregates), then distinct-count rows that
+      # belong to survivors. Non-distinct keeps `@select_sql` so HAVING
       # can name selected aliases, matching `count_sql`.
-      if @distinct
+      sql = if @distinct
         inner = append_join_where(
           "#{cte_prefix}SELECT DISTINCT #{distinct_count_columns}, #{key} AS k FROM #{from_source}"
         )
-        sql = "SELECT k, COUNT(*) AS n FROM (#{inner}) AS __rh_gc GROUP BY k"
-        sql = "#{sql} HAVING #{@havings.join(" AND ")}" if @havings.length > 0
+        if @havings.length > 0
+          survivors = append_group_having(
+            append_join_where("#{cte_prefix}SELECT #{key} AS __rh_k FROM #{from_source}")
+          )
+          clause = "#{key} IN (SELECT __rh_k FROM (#{survivors}) AS __rh_surv)"
+          inner = if @wheres.length > 0
+            "#{inner} AND #{clause}"
+          else
+            "#{inner} WHERE #{clause}"
+          end
+        end
+        "SELECT k, COUNT(*) AS n FROM (#{inner}) AS __rh_gc GROUP BY k"
       else
         proj = if @select_sql.nil?
           "#{key} AS k, COUNT(*) AS n"
         else
           "#{@select_sql}, #{key} AS k, COUNT(*) AS n"
         end
-        sql = append_group_having(
+        append_group_having(
           append_join_where("#{cte_prefix}SELECT #{proj} FROM #{from_source}")
         )
       end
