@@ -333,7 +333,6 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // own — the dependent is the later pass.
     ("time_calendar", &[]),
     ("blank", &[]),
-    ("time_current", &[]),
     ("as_json_super", &[]),
     // `super` in a model's own `password=` → the `has_secure_password`
     // writer under its own name. Before `create_block`, which inlines
@@ -346,6 +345,12 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // constraints.
     ("class_body_new", &[]),
     ("mocha", &[]),
+    // Independent context-heavy send rewrites: one fused tree walk in
+    // `fused::apply_fused_context_rewrites`. Empty runs_after — they
+    // match disjoint method names and do not consume each other's
+    // output. Grouped after mocha so the executed-pass assert stays a
+    // straight list match.
+    ("time_current", &[]),
     // `WebMock.stub_request(v, u).to_return(...)` → `HttpStub.stub(...)`.
     // Keys on a `WebMock` Const receiver and a `to_return` send, neither
     // of which any other pass produces or consumes; the `.to_s` it
@@ -758,8 +763,6 @@ pub fn apply_post_analyze_lowerings(
         blank::apply_blank_lowering(app)
     }));
     ran!("blank");
-    time_current::apply_time_current_lowering(app);
-    ran!("time_current");
     as_json_super::apply_as_json_super_grounding(app);
     ran!("as_json_super");
     secure_password::apply_secure_password_super(app);
@@ -772,11 +775,12 @@ pub fn apply_post_analyze_lowerings(
         mocha::apply_mocha_lowering(app);
     });
     ran!("mocha");
-    webmock::apply_webmock_lowering(app);
+    crate::timings::phase("post-analyze: fused context rewrites", || {
+        fused::apply_fused_context_rewrites(app);
+    });
+    ran!("time_current");
     ran!("webmock");
-    global_id_locate::apply_global_id_locate_lowering(app);
     ran!("global_id_locate");
-    assoc_pluck::apply_assoc_pluck_lowering(app);
     ran!("assoc_pluck");
     try_guard::apply_try_guard_lowering(app);
     ran!("try_guard");

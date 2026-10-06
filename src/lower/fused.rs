@@ -13,13 +13,15 @@
 //! extra app-level context, diagnostics, or a later predecessor stay
 //! sequential.
 //!
-//! Two walks, split by the `kwsplat` constraint: the early group runs
-//! before any pass that mutates argument lists; the late group runs
-//! after `kwsplat` (and after `tag_builder`, which `capture_inline`
-//! depends on).
+//! Three walks, split by the `kwsplat` constraint: the early group runs
+//! before any pass that mutates argument lists; the context group sits
+//! after mocha; the late group runs after `kwsplat` (and after
+//! `tag_builder`, which `capture_inline` depends on).
 
 use crate::app::App;
 use crate::expr::Expr;
+use crate::ident::Symbol;
+use std::collections::BTreeSet;
 
 pub fn apply_fused_independent_rewrites(app: &mut App) {
     let skip_exclude = super::exclude_predicate::app_defines_exclude(app);
@@ -55,6 +57,37 @@ pub fn apply_fused_late_rewrites(app: &mut App) {
     super::for_each_test_body(app, &mut |body| {
         walk_postorder(body, &mut super::attachables_grep::rewrite_node);
     });
+}
+
+/// Context-heavy independent send rewrites that still do a full tree
+/// walk each: collect per-pass tables once, then one hook walk, one
+/// test walk, and one view walk matching the original surfaces.
+pub fn apply_fused_context_rewrites(app: &mut App) {
+    let formats = std::mem::take(&mut app.time_formats);
+    let mut gid_models: BTreeSet<Symbol> = BTreeSet::new();
+    let materialized = super::assoc_pluck::materialized_assoc_names(app);
+
+    super::for_each_hook_body(app, &mut |body| {
+        walk_postorder(body, &mut |e| {
+            super::time_current::rewrite_node(e, &formats);
+            super::global_id_locate::rewrite_node(e, &mut gid_models);
+            super::assoc_pluck::rewrite_node(e, &materialized);
+        });
+    });
+    super::for_each_test_body(app, &mut |body| {
+        walk_postorder(body, &mut |e| {
+            super::time_current::rewrite_node(e, &formats);
+            super::webmock::rewrite_node(e);
+        });
+    });
+    for view in &mut app.views {
+        walk_postorder(&mut view.body, &mut |e| {
+            super::global_id_locate::rewrite_node(e, &mut gid_models);
+        });
+    }
+
+    app.time_formats = formats;
+    app.global_id_locate_models.extend(gid_models);
 }
 
 fn rewrite_hook_node(
