@@ -318,6 +318,49 @@ fn recv_is_array(r: &Expr) -> bool {
             if matches!(instance_prop_ty(name.as_str()), Some(crate::ty::Ty::Array { .. })))
 }
 
+/// Elem type of an Array-typed receiver (ivar/local field table or
+/// expression ty), peeling a nullable outer `Array[T]?`.
+fn array_elem_ty(r: &Expr) -> Option<crate::ty::Ty> {
+    let from_prop = match &*r.node {
+        ExprNode::Ivar { name } | ExprNode::Var { name, .. } => instance_prop_ty(name.as_str()),
+        _ => None,
+    };
+    let array_ty = from_prop.as_ref().or(r.ty.as_ref());
+    match array_ty {
+        Some(crate::ty::Ty::Array { elem }) => Some((**elem).clone()),
+        Some(crate::ty::Ty::Union { variants }) => variants.iter().find_map(|t| match t {
+            crate::ty::Ty::Array { elem } => Some((**elem).clone()),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+/// `String?` into `MutableList<String>` (HeaderStore `@vals << value`
+/// after `header_value_ok?` rejects nil). Kotlin rejects the mismatch;
+/// coalesce to `""` so the write typechecks. Non-string / already-
+/// matching shapes pass through unchanged.
+fn coerce_list_elem_arg(recv: &Expr, arg: &Expr, arg_s: &str) -> String {
+    let Some(elem) = array_elem_ty(recv) else {
+        return arg_s.to_string();
+    };
+    let elem_is_plain_str = matches!(elem, crate::ty::Ty::Str | crate::ty::Ty::Sym);
+    let arg_nilable_str = matches!(
+        arg.ty.as_ref(),
+        Some(crate::ty::Ty::Union { variants })
+            if variants.len() == 2
+                && variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+                && variants
+                    .iter()
+                    .any(|v| matches!(v, crate::ty::Ty::Str | crate::ty::Ty::Sym))
+    );
+    if elem_is_plain_str && arg_nilable_str {
+        format!("({arg_s}) ?: \"\"")
+    } else {
+        arg_s.to_string()
+    }
+}
+
 /// Ruby's `Module#<` family. `RecordNotFound < StandardError` is a
 /// subclass test over two class objects, not a value comparison — the
 /// classifier hands it back as [`CmpCase::ClassSubclass`] and every
@@ -1218,6 +1261,9 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
         (LValue::Var { .. }, ExprNode::Hash { entries, .. }) if !entries.is_empty() => {
             emit_hash_precise(entries, value)
         }
+        (LValue::Index { recv, .. }, _) if !recv_is_hash(recv) => {
+            coerce_list_elem_arg(recv, value, &emit_expr(value))
+        }
         _ => emit_expr(value),
     };
     match target {
@@ -1712,7 +1758,8 @@ fn emit_send(
             }
             // `<<` / `push` → MutableList.add.
             crate::emit::shared::ops::BinopCase::Append => {
-                return format!("{}.add({})", emit_expr(r), args_s[0]);
+                let arg = coerce_list_elem_arg(r, &args[0], &args_s[0]);
+                return format!("{}.add({})", emit_expr(r), arg);
             }
             crate::emit::shared::ops::BinopCase::NotBinop => {}
         }
@@ -1742,7 +1789,12 @@ fn emit_send(
             } else {
                 args_s[0].clone()
             };
-            return format!("{}[{}] = {}", emit_expr(r), idx, args_s[1]);
+            let val = if recv_is_hash(r) {
+                args_s[1].clone()
+            } else {
+                coerce_list_elem_arg(r, &args[1], &args_s[1])
+            };
+            return format!("{}[{}] = {}", emit_expr(r), idx, val);
         }
         // `Hash#fetch(k, default)` → `(recv[k] ?: default)` (Ruby returns
         // the value or the default; Kotlin map-get is null for missing).
