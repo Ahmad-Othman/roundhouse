@@ -1,6 +1,8 @@
 # Typing contract for cookies.rb beside this file. Getter+setter def pairs
-# per the runtime .rbs convention; keys are untyped (controllers index with
-# Symbol constants and String literals both).
+# per the runtime .rbs convention; keys are String | Symbol (controllers
+# index with Symbol constants and String literals both). Values written
+# stay untyped — campfire assigns `@room.id` (Integer) and `raw_set`
+# coerces with `to_s`.
 module ActionController
   class CookieJar
     # THE STORES, DECLARED. Both are seeded `{}` in the constructor, and
@@ -22,22 +24,22 @@ module ActionController
     @flag_secure: Hash[String, String]
 
     def initialize: (?Hash[String, String] inbound) -> void
-    def []: (untyped key) -> String
+    def []: (String | Symbol key) -> String
     # The written value is untyped and the STORE is String: `raw_set`
     # coerces, because a cookie is a String on the wire and campfire
     # writes `cookies.permanent[:last_room] = @room.id`, an Integer.
     # Returning the stored String rather than the argument keeps the
     # return concrete; Ruby's `x[k] = v` evaluates to `v` regardless.
-    def []=: (untyped key, untyped value) -> String
+    def []=: (String | Symbol key, untyped value) -> String
     def permanent: () -> ActionController::CookieJar
     def signed: () -> ActionController::SignedCookieJar
-    def raw: (untyped key) -> String
-    def raw_set: (untyped key, untyped value) -> String
-    def record_flags: (untyped key, bool httponly, untyped same_site, bool secure) -> String
-    def flag_httponly?: (untyped key) -> bool
-    def flag_samesite: (untyped key) -> String
-    def flag_secure?: (untyped key) -> bool
-    def delete: (untyped key) -> String
+    def raw: (String | Symbol key) -> String
+    def raw_set: (String | Symbol key, untyped value) -> String
+    def record_flags: (String | Symbol key, bool httponly, String | Symbol same_site, bool secure) -> String
+    def flag_httponly?: (String | Symbol key) -> bool
+    def flag_samesite: (String | Symbol key) -> String
+    def flag_secure?: (String | Symbol key) -> bool
+    def delete: (String | Symbol key) -> String
     def pending: () -> Hash[String, String]
     def to_h: () -> Hash[String, String]
     def to_hash: () -> Hash[String, String]
@@ -47,11 +49,11 @@ module ActionController
   class SignedCookieJar
     def initialize: (ActionController::CookieJar jar) -> void
     # NULLABLE, unlike the unsigned jar's read — see the .rb.
-    def []: (untyped key) -> String?
-    def []=: (untyped key, untyped value) -> untyped
+    def []: (String | Symbol key) -> String?
+    def []=: (String | Symbol key, untyped value) -> untyped
     def permanent: () -> ActionController::SignedCookieJar
-    def delete: (untyped key) -> String
-    def self.value_of: (untyped value) -> String
+    def delete: (String | Symbol key) -> String
+    def self.value_of: (Hash[Symbol, untyped] | String | Integer | Symbol | bool value) -> String
   end
 
   class Base
@@ -65,7 +67,7 @@ end
 module ActionDispatch
   module Cookies
     class CookieJar
-      def self.build: (untyped request, Hash[String, String] cookies) -> ActionController::CookieJar
+      def self.build: (ActionDispatch::Request request, Hash[String, String] cookies) -> ActionController::CookieJar
     end
   end
 end
