@@ -4457,12 +4457,17 @@ impl Analyzer {
                 }
             }
         }
+        // The splat merges over the literal, so a named key may still
+        // take the splat's value.
         for (key, t) in keys {
             if let Some(i) = params
                 .iter()
                 .position(|(n, kind)| n == key && is_named(kind))
             {
-                out[i] = t.clone();
+                out[i] = match splat {
+                    Some(v) => crate::analyze::body::union_of(t.clone(), v.clone()),
+                    None => t.clone(),
+                };
             }
         }
         if let (Some(i), false) = (rest, has_named) {
@@ -7223,4 +7228,43 @@ pub(crate) fn tuple_return_ty(body: &Expr) -> Option<Ty> {
         return None;
     }
     Some(Ty::Tuple { elems })
+}
+
+#[cfg(test)]
+mod keyword_splat_tests {
+    use super::*;
+
+    /// `f(**{kind: :x, keys: codes}.merge(options))` against
+    /// `def f(kind:, keys:, only: nil)`: the literal's keys are typed from
+    /// the literal, but the splat merges over them, so each also takes the
+    /// splat's value type; an unnamed keyword takes only the splat's.
+    #[test]
+    fn a_merged_splat_joins_the_literal_keys_and_fills_the_rest() {
+        let shape = ParamShape {
+            slots: vec![
+                (Symbol::from("kind"), ParamKind::Keyword { required: true }),
+                (Symbol::from("keys"), ParamKind::Keyword { required: true }),
+                (Symbol::from("only"), ParamKind::Keyword { required: false }),
+            ],
+            keywords_by_kind: true,
+        };
+        let hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) };
+        let keys = vec![
+            (Symbol::from("kind"), Ty::Sym),
+            (Symbol::from("keys"), Ty::Array { elem: Box::new(Ty::Str) }),
+        ];
+        let placed = Analyzer::bind_keyword_group(&shape, &[hash], &keys, Some(&Ty::Bool))
+            .expect("placed");
+        assert_eq!(
+            placed,
+            vec![
+                union_of(Ty::Sym, Ty::Bool),
+                union_of(Ty::Array { elem: Box::new(Ty::Str) }, Ty::Bool),
+                Ty::Bool,
+            ]
+        );
+        let unsplatted = Analyzer::bind_keyword_group(&shape, &[Ty::Untyped], &keys, None)
+            .expect("placed");
+        assert_eq!(unsplatted[0], Ty::Sym, "without a splat the literal stands alone");
+    }
 }

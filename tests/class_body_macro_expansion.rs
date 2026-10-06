@@ -1279,7 +1279,8 @@ fn rest_actions_macro_refuses_what_it_cannot_read() {
 /// method using `@name` itself, leaves the macro call unexpanded.
 #[test]
 fn class_attribute_carrier_refuses_what_it_cannot_carry() {
-    fn class_attribute_methods(included: &str, writer: &str) -> usize {
+    /// `(method, slot)` of each carried class_attribute method.
+    fn class_attribute_methods(included: &str, writer: &str) -> Vec<(String, String)> {
         let concern = format!(
             "module Preloads\n  extend ActiveSupport::Concern\n  included do\n{included}\n  end\n  class_methods do\n    def preload(codes)\n      {writer}\n    end\n  end\nend\n"
         );
@@ -1306,28 +1307,43 @@ fn class_attribute_carrier_refuses_what_it_cannot_carry() {
             .expect("ThingsController ingested");
         c.body
             .iter()
-            .filter(|item| {
-                matches!(
-                    item,
-                    ControllerBodyItem::ClassMethod {
-                        configuration_role: roundhouse::dialect::ClassConfigurationRole::ClassAttribute,
-                        ..
-                    }
-                )
+            .filter_map(|item| match item {
+                ControllerBodyItem::ClassMethod {
+                    method,
+                    configuration_slot,
+                    configuration_role: roundhouse::dialect::ClassConfigurationRole::ClassAttribute,
+                    ..
+                } => Some((method.name.as_str().to_string(), configuration_slot.1.as_str().to_string())),
+                _ => None,
             })
-            .count()
+            .collect()
     }
+    let carried = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+        pairs.iter().map(|(m, s)| (m.to_string(), s.to_string())).collect()
+    };
     let attr = "    class_attribute :defs, default: []\n    before_action :run_preloads";
     let write = "self.defs += [codes]";
-    assert_eq!(class_attribute_methods(attr, write), 2, "reader and macro are carried");
     assert_eq!(
-        class_attribute_methods(&format!("{attr}\n    helper_method :defs"), write),
-        0,
+        class_attribute_methods(attr, write),
+        carried(&[("defs", "defs"), ("preload", "defs")]),
+        "reader and macro are carried"
+    );
+    assert!(
+        class_attribute_methods(&format!("{attr}\n    helper_method :defs"), write).is_empty(),
         "an `included` statement that is neither class_attribute nor filter DSL"
     );
-    assert_eq!(
-        class_attribute_methods(attr, "@defs = [codes]"),
-        0,
+    assert!(
+        class_attribute_methods(attr, "@defs = [codes]").is_empty(),
         "a source `@defs` is not the attribute's storage"
+    );
+    // Each method is keyed to the attribute it writes.
+    let two = format!("{attr}\n    class_attribute :more, default: []");
+    assert_eq!(
+        class_attribute_methods(&two, "self.more += [codes]"),
+        carried(&[("defs", "defs"), ("more", "more"), ("preload", "more")]),
+    );
+    assert!(
+        class_attribute_methods(&two, "self.defs += [codes]; self.more += [codes]").is_empty(),
+        "one method writing two attributes has no single slot"
     );
 }

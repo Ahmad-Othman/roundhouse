@@ -37,8 +37,9 @@ use super::{IngestError, survey};
 struct Carrier {
     /// `class_attribute` name and its default (nil when none is given).
     attributes: Vec<(Symbol, Expr)>,
-    /// Class methods with attribute writes rewritten to the class ivar.
-    methods: Vec<MethodDef>,
+    /// Class methods with attribute writes rewritten to the class ivar,
+    /// each with the attribute it writes (the first when it writes none).
+    methods: Vec<(MethodDef, Symbol)>,
 }
 
 pub(super) fn expand(
@@ -63,9 +64,22 @@ pub(super) fn expand(
         }
         let names: Vec<Symbol> = attributes.iter().map(|(n, _)| n.clone()).collect();
         let methods = catalog.get(&lc.name).map(|(m, _)| m.clone()).unwrap_or_default();
-        let rewritten: Option<Vec<MethodDef>> = methods
+        // One slot per method: one writing two attributes has no single
+        // configuration slot, and the carrier is refused.
+        let rewritten: Option<Vec<(MethodDef, Symbol)>> = methods
             .into_iter()
-            .map(|mut m| rewrite_writes(&mut m.body, &names).then_some(m))
+            .map(|mut m| {
+                if !rewrite_writes(&mut m.body, &names) {
+                    return None;
+                }
+                let mut written = Vec::new();
+                written_slots(&m.body, &names, &mut written);
+                match written.len() {
+                    0 => Some((m, names[0].clone())),
+                    1 => Some((m, written.remove(0))),
+                    _ => None,
+                }
+            })
             .collect();
         match rewritten {
             Some(methods) => {
@@ -73,7 +87,7 @@ pub(super) fn expand(
             }
             None => survey::record(&IngestError::Unsupported {
                 file: lc.name.0.as_str().to_string(),
-                message: "class_attribute written other than by `self.name = value` is not modeled"
+                message: "class_attribute written other than by `self.name = value`, or two written by one method, is not modeled"
                     .to_string(),
             }),
         }
@@ -87,7 +101,7 @@ pub(super) fn expand(
         if let Some(carrier) = admitted.get(&lc.name) {
             lc.methods.retain(|m| {
                 m.receiver != MethodReceiver::Class
-                    || !carrier.methods.iter().any(|c| c.name_span == m.name_span)
+                    || !carrier.methods.iter().any(|(c, _)| c.name_span == m.name_span)
             });
         }
     }
@@ -115,7 +129,7 @@ pub(super) fn expand(
         let callable: HashSet<&Symbol> = own
             .iter()
             .chain(&inherited)
-            .flat_map(|m| admitted[*m].methods.iter().map(|d| &d.name))
+            .flat_map(|m| admitted[*m].methods.iter().map(|(d, _)| &d.name))
             .collect();
 
         let mut body = Vec::new();
@@ -155,7 +169,7 @@ pub(super) fn expand(
                         let carrier = own
                             .iter()
                             .chain(&inherited)
-                            .find(|m| admitted[**m].methods.iter().any(|d| &d.name == method))
+                            .find(|m| admitted[**m].methods.iter().any(|(d, _)| &d.name == method))
                             .expect("callable");
                         body.push(ControllerBodyItem::ClassIvarInit {
                             expr: expr.clone(),
@@ -180,7 +194,7 @@ pub(super) fn expand(
                     name,
                 ));
             }
-            for method in &c.methods {
+            for (method, slot) in &c.methods {
                 let mut method = method.clone();
                 method.enclosing_class = Some(controller.name.0.clone());
                 for p in &mut method.params {
@@ -197,8 +211,7 @@ pub(super) fn expand(
                         p.from_kwrest = false;
                     }
                 }
-                let slot = c.attributes[0].0.clone();
-                body.push(class_method(method, carrier, &slot));
+                body.push(class_method(method, carrier, slot));
             }
         }
         // Unset on a subclass reads the parent's value; a write on the
@@ -416,6 +429,16 @@ fn rewrite_writes(expr: &mut Expr, names: &[Symbol]) -> bool {
     }
     rewrite(expr, names);
     true
+}
+
+/// The attributes a rewritten body stores, in order.
+fn written_slots(expr: &Expr, names: &[Symbol], out: &mut Vec<Symbol>) {
+    if let ExprNode::Assign { target: LValue::Ivar { name }, .. } = &*expr.node {
+        if names.contains(name) && !out.contains(name) {
+            out.push(name.clone());
+        }
+    }
+    expr.node.for_each_child(&mut |c| written_slots(c, names, out));
 }
 
 fn const_id(expr: &Expr) -> Option<ClassId> {

@@ -215,6 +215,26 @@ impl<'a> BodyTyper<'a> {
         self.classes
     }
 
+    /// Whether `self`'s class, its includes or its ancestors register
+    /// `method` — an app definition, whatever type it answered.
+    fn app_defines(&self, self_ty: Option<&Ty>, method: &Symbol) -> bool {
+        let Some(Ty::Class { id, .. }) = self_ty else { return false };
+        let mut stack = vec![id];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(cid) = stack.pop() {
+            if !seen.insert(cid) {
+                continue;
+            }
+            let Some(cls) = self.classes.get(cid) else { continue };
+            if cls.instance_methods.contains_key(method) || cls.class_methods.contains_key(method) {
+                return true;
+            }
+            stack.extend(cls.includes.iter());
+            stack.extend(cls.parent.iter());
+        }
+        false
+    }
+
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
         Self { classes, const_resolver: None, typed_constants: None, data_factories: None, inquirers: None }
     }
@@ -1075,7 +1095,10 @@ impl<'a> BodyTyper<'a> {
                 // RBS declares it `(untyped) -> Array[untyped]`; the
                 // argument says more.
                 if recv.is_none() && method.as_str() == "Array" && args.len() == 1
-                    && block.is_none() && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && block.is_none()
+                    && (matches!(dispatched, Ty::Var { .. })
+                        || (matches!(dispatched, Ty::Untyped)
+                            && !self.app_defines(ctx.self_ty.as_ref(), method)))
                 {
                     let elem = args[0].ty.as_ref().and_then(kernel_array_elem);
                     return Ty::Array { elem: Box::new(elem.unwrap_or_else(unknown)) };
@@ -1826,6 +1849,7 @@ fn qualify_resolved_path(path: &mut Vec<Symbol>, resolved: &ClassId) {
 fn kernel_array_elem(arg: &Ty) -> Option<Ty> {
     match arg {
         Ty::Array { elem } => Some((**elem).clone()),
+        Ty::Tuple { elems } => Some(elems.iter().cloned().reduce(union_of).unwrap_or(Ty::Bottom)),
         Ty::Nil => Some(Ty::Bottom),
         Ty::Union { variants } => variants
             .iter()
@@ -2233,10 +2257,10 @@ mod tests {
     fn kernel_array_does_not_capture_inherited_or_included_app_methods() {
         let owner = ClassId(Symbol::from("Owner"));
         let child = ClassId(Symbol::from("Child"));
-        for included in [false, true] {
+        for (included, ret) in [(false, Ty::Str), (true, Ty::Str), (false, Ty::Untyped)] {
             let mut classes = empty_classes();
             let mut info = ClassInfo::default();
-            info.instance_methods.insert(Symbol::from("Array"), Ty::Str);
+            info.instance_methods.insert(Symbol::from("Array"), ret.clone());
             classes.insert(owner.clone(), info);
             let mut info = ClassInfo::default();
             if included {
@@ -2248,7 +2272,7 @@ mod tests {
             let mut ctx = Ctx::default();
             ctx.self_ty = Some(Ty::Class { id: child.clone(), args: vec![] });
             let mut expr = send(None, "Array", vec![nil_lit()]);
-            assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expr, &ctx), Ty::Str);
+            assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expr, &ctx), ret);
         }
     }
 
@@ -2257,6 +2281,7 @@ mod tests {
         let array_of = |elem: Ty| Ty::Array { elem: Box::new(elem) };
         for (arg, elem) in [
             (array_of(Ty::Str), Ty::Str),
+            (Ty::Tuple { elems: vec![Ty::Str, Ty::Int] }, union_of(Ty::Str, Ty::Int)),
             (Ty::Sym, Ty::Sym),
             (Ty::Union { variants: vec![array_of(Ty::Sym), Ty::Sym, Ty::Nil] }, Ty::Sym),
         ] {
