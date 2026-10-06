@@ -7,7 +7,9 @@
 //! → `NameError` at boot. This suite pins the storage-side fix:
 //! model in `app.models`, table `action_text_markdowns`, attr `content`.
 //!
-//! Does **not** claim `has_markdown`, Page `#body`, renderer, or uploads.
+//! Does **not** claim `has_markdown`, Page `#body`, or uploads.
+//! Optioned `mattr_accessor :renderer, default:` is claimed (class +
+//! instance readers); bare `mattr_accessor :renderer` also expands.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

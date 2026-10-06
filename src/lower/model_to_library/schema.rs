@@ -2790,29 +2790,27 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
     // cache-aware reader's `@cache` reads are assigned on every
     // initialize path (Crystal). has_many gets `[] of <Target>`;
     // has_one gets `nil` (single record or absent). Harmless on dynamic
-    // targets. Mirrors `associations::cache_ivar` / `loaded_ivar`.
+    // targets. Names from `associations::{cache_ivar,loaded_ivar}`.
     for assoc in model.associations() {
         if let Association::HasOne { name, .. } = assoc {
             stmts.push(Expr::new(
                 Span::synthetic(),
                 ExprNode::Assign {
-                    target: LValue::Ivar { name: Symbol::from(format!("{}_cache", name.as_str())) },
+                    target: LValue::Ivar { name: super::associations::cache_ivar(name) },
                     value: with_ty(nil_lit(), Ty::Nil),
                 },
             ));
-            let false_lit = {
-                let mut e = Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Lit { value: Literal::Bool { value: false } },
-                );
-                e.ty = Some(Ty::Bool);
-                e
-            };
             stmts.push(Expr::new(
                 Span::synthetic(),
                 ExprNode::Assign {
-                    target: LValue::Ivar { name: Symbol::from(format!("{}_loaded", name.as_str())) },
-                    value: false_lit,
+                    target: LValue::Ivar { name: super::associations::loaded_ivar(name) },
+                    value: with_ty(
+                        Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Lit { value: Literal::Bool { value: false } },
+                        ),
+                        Ty::Bool,
+                    ),
                 },
             ));
             continue;

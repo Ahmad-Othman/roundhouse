@@ -185,6 +185,11 @@ fn class_body_mattr_and_cattr_defaults_run() {
     "hello"
   end
   mattr_accessor :probe, default: Object.new
+  # Multi-stmt block default — assign value is the last expression.
+  cattr_accessor :composed do
+    inner = "INNER"
+    "OUTER-#{inner}"
+  end
 "#,
         )
         .run_ruby(
@@ -196,6 +201,7 @@ raise "instance shares class seed" unless Article.new.channel == "news"
 Article.channel = "sports"
 raise "writer" unless Article.channel == "sports"
 raise "probe class" unless Article.probe.is_a?(Object)
+raise "multi-stmt block" unless Article.composed == "OUTER-INNER"
 puts "mattr_cattr_defaults_ok"
 "#,
         )

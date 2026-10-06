@@ -7388,11 +7388,12 @@ fn boolean_cast_body(col: &Symbol) -> Expr {
 // campfire's `Message.with_attachment_details` costs the room page two
 // queries where it cost eighty.
 //
-// Known gaps, deliberate: has_one, direct has_many with a scope or
-// polymorphic owner, and scope-carrying through-assocs (other than a
-// plain `order("...")`) get no batch arm — the dispatch
+// Known gaps, deliberate: scoped / polymorphic has_one, direct has_many
+// with a scope or polymorphic owner, and scope-carrying through-assocs
+// (other than a plain `order("...")`) get no batch arm — the dispatch
 // falls through and the lazy reader stays correct (just N+1, matching
-// Rails, which also lazy-loads what `includes` doesn't name). Assigning
+// Rails, which also lazy-loads what `includes` doesn't name). Unscoped
+// non-polymorphic has_one uses PreloadKind::HasOne (first-wins). Assigning
 // a belongs_to (`c.story = s`) on a PRELOADED record does not refresh
 // the cache (fresh records never have the loaded flag set, so the
 // benchmark's build-then-render flows are unaffected).

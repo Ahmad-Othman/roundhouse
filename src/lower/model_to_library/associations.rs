@@ -919,74 +919,66 @@ fn synth_has_one_preload_setter(owner: &ClassId, name: &Symbol, target: &ClassId
     let rec_ty = Ty::Union {
         variants: vec![Ty::Class { id: target.clone(), args: vec![] }, Ty::Nil],
     };
-    let body = seq(vec![
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Assign {
-                target: LValue::Ivar { name: cache_ivar(name) },
-                value: var_ref(rec.clone()),
-            },
-        ),
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Assign {
-                target: LValue::Ivar { name: loaded_ivar(name) },
-                value: lit_bool(true),
-            },
-        ),
-    ]);
-    MethodDef {
-        visibility: crate::dialect::MethodVisibility::Public,
-        unsupported_formals: None,
-        has_anonymous_block: false,
-        name_span: crate::span::Span::synthetic(),
-        name: Symbol::from(format!("_preload_{}", name.as_str())),
-        receiver: MethodReceiver::Instance,
-        params: vec![Param::positional(rec.clone())],
-        body,
-        signature: Some(fn_sig(vec![(rec, rec_ty)], Ty::Nil)),
-        effects: EffectSet::default(),
-        enclosing_class: Some(owner.0.clone()),
-        kind: AccessorKind::Method,
-        is_async: false,
-        mutates_self: true,
-        block_param: None,
-    }
+    synth_assoc_cache_seed(
+        owner,
+        Symbol::from(format!("_preload_{}", name.as_str())),
+        name,
+        rec,
+        rec_ty,
+    )
 }
 
 /// `def <name>=(value); @<name>_cache = value; @<name>_loaded = true; end`
 /// — stashes for read-back and for `autosave: true`'s after_save.
 fn synth_has_one_writer(owner: &ClassId, name: &Symbol, target: &ClassId) -> MethodDef {
     let value = Symbol::from("value");
+    let value_ty = Ty::Union {
+        variants: vec![Ty::Class { id: target.clone(), args: vec![] }, Ty::Nil],
+    };
+    synth_assoc_cache_seed(
+        owner,
+        Symbol::from(format!("{}=", name.as_str())),
+        name,
+        value,
+        value_ty,
+    )
+}
+
+/// Shared `@<assoc>_cache = param; @<assoc>_loaded = true` body for
+/// has_one writer, has_one preload setter, and has_many preload setter.
+fn synth_assoc_cache_seed(
+    owner: &ClassId,
+    method_name: Symbol,
+    assoc: &Symbol,
+    param: Symbol,
+    param_ty: Ty,
+) -> MethodDef {
     let body = seq(vec![
         Expr::new(
             Span::synthetic(),
             ExprNode::Assign {
-                target: LValue::Ivar { name: cache_ivar(name) },
-                value: var_ref(value.clone()),
+                target: LValue::Ivar { name: cache_ivar(assoc) },
+                value: var_ref(param.clone()),
             },
         ),
         Expr::new(
             Span::synthetic(),
             ExprNode::Assign {
-                target: LValue::Ivar { name: loaded_ivar(name) },
+                target: LValue::Ivar { name: loaded_ivar(assoc) },
                 value: lit_bool(true),
             },
         ),
     ]);
-    let value_ty = Ty::Union {
-        variants: vec![Ty::Class { id: target.clone(), args: vec![] }, Ty::Nil],
-    };
     MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
         name_span: crate::span::Span::synthetic(),
-        name: Symbol::from(format!("{}=", name.as_str())),
+        name: method_name,
         receiver: MethodReceiver::Instance,
-        params: vec![Param::positional(value.clone())],
+        params: vec![Param::positional(param.clone())],
         body,
-        signature: Some(fn_sig(vec![(value, value_ty)], Ty::Nil)),
+        signature: Some(fn_sig(vec![(param, param_ty)], Ty::Nil)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
@@ -1124,13 +1116,12 @@ fn synth_cache_reader(owner: &ClassId, name: Symbol, ivar: Symbol, ty: Ty) -> Me
     }
 }
 
-/// Cache + loaded-flag ivar names for a has_many association. Kept in
-/// one place so the reader (which reads them) and the setter (which
-/// writes them) can't drift.
-fn cache_ivar(name: &Symbol) -> Symbol {
+/// Cache + loaded-flag ivar names for a has_many / has_one association.
+/// Shared by synthesizers and schema `initialize` so names cannot drift.
+pub(in crate::lower::model_to_library) fn cache_ivar(name: &Symbol) -> Symbol {
     Symbol::from(format!("{}_cache", name.as_str()))
 }
-fn loaded_ivar(name: &Symbol) -> Symbol {
+pub(in crate::lower::model_to_library) fn loaded_ivar(name: &Symbol) -> Symbol {
     Symbol::from(format!("{}_loaded", name.as_str()))
 }
 
@@ -1193,41 +1184,13 @@ fn lit_bool(value: bool) -> Expr {
 fn synth_preload_setter(owner: &ClassId, name: &Symbol, target: &ClassId) -> MethodDef {
     let list = Symbol::from("list");
     let list_ty = Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) };
-
-    let body = seq(vec![
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Assign {
-                target: LValue::Ivar { name: cache_ivar(name) },
-                value: var_ref(list.clone()),
-            },
-        ),
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Assign {
-                target: LValue::Ivar { name: loaded_ivar(name) },
-                value: lit_bool(true),
-            },
-        ),
-    ]);
-
-    MethodDef {
-        visibility: crate::dialect::MethodVisibility::Public,
-        unsupported_formals: None,
-        has_anonymous_block: false,
-        name_span: crate::span::Span::synthetic(),
-        name: Symbol::from(format!("_preload_{}", name.as_str())),
-        receiver: MethodReceiver::Instance,
-        params: vec![Param::positional(list.clone())],
-        body,
-        signature: Some(fn_sig(vec![(list, list_ty)], Ty::Nil)),
-        effects: EffectSet::default(),
-        enclosing_class: Some(owner.0.clone()),
-        kind: AccessorKind::Method,
-        is_async: false,
-        mutates_self: true,
-        block_param: None,
-    }
+    synth_assoc_cache_seed(
+        owner,
+        Symbol::from(format!("_preload_{}", name.as_str())),
+        name,
+        list,
+        list_ty,
+    )
 }
 
 fn synth_belongs_to_reader(

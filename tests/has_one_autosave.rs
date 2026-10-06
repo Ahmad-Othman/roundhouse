@@ -7,14 +7,10 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/has_one_overlay.rs"]
+mod has_one_overlay;
 
-fn profile_schema_edit() -> (&'static str, &'static str, &'static str) {
-    (
-        "db/schema.rb",
-        "  create_table \"comments\", force: :cascade do |t|",
-        "  create_table \"profiles\", force: :cascade do |t|\n    t.integer \"article_id\"\n    t.string \"bio\"\n  end\n\n  create_table \"comments\", force: :cascade do |t|",
-    )
-}
+use has_one_overlay::profile_schema_edit;
 
 #[test]
 fn assigned_has_one_child_autosaves_with_owner() {
