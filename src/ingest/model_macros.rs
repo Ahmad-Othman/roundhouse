@@ -758,38 +758,47 @@ fn substitute(mut expr: Expr, bindings: &HashMap<Symbol, Expr>) -> Option<Expr> 
 /// `send(:title)` / `send("title")` / `__send__` with a literal first
 /// argument is a renamed call. Collapse after substitution so a bound
 /// `send(field)` becomes `title`, not `send(:title)`. A leftover
-/// computed name declines the whole expansion. `public_send` is not
-/// this method — collapsing it would let a private helper succeed.
+/// computed name declines the whole expansion. Only receiverless (or
+/// `self.`) forms collapse: `@helper.send(:secret)` must stay `send`
+/// so a private method still succeeds. `public_send` is not this
+/// method — collapsing it would let a private helper succeed.
 fn collapse_literal_send(expr: &mut Expr) -> bool {
-    let ExprNode::Send {
-        recv,
-        method,
-        args,
-        block: None,
-        parenthesized,
-    } = &*expr.node
-    else {
-        return true;
-    };
-    if !matches!(method.as_str(), "send" | "__send__") {
-        return true;
+    loop {
+        let ExprNode::Send {
+            recv,
+            method,
+            args,
+            block: None,
+            parenthesized,
+        } = &*expr.node
+        else {
+            return true;
+        };
+        if recv
+            .as_ref()
+            .is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef))
+        {
+            return true;
+        }
+        if !matches!(method.as_str(), "send" | "__send__") {
+            return true;
+        }
+        if args.is_empty() {
+            return false;
+        }
+        let Some(name) = interned_name(&args[0]) else {
+            return false;
+        };
+        if !valid_def_name(&name) {
+            return false;
+        }
+        let rest = args[1..].to_vec();
+        *expr.node = ExprNode::Send {
+            recv: None,
+            method: name,
+            args: rest,
+            block: None,
+            parenthesized: *parenthesized,
+        };
     }
-    if args.is_empty() {
-        return false;
-    }
-    let Some(name) = interned_name(&args[0]) else {
-        return false;
-    };
-    if !valid_def_name(&name) {
-        return false;
-    }
-    let rest = args[1..].to_vec();
-    *expr.node = ExprNode::Send {
-        recv: recv.clone(),
-        method: name,
-        args: rest,
-        block: None,
-        parenthesized: *parenthesized,
-    };
-    true
 }

@@ -170,6 +170,53 @@ end
     assert!(body.contains("public_send"), "{body}");
 }
 
+/// `@record.send(:literal)` keeps `send` so a private method on the
+/// receiver still succeeds. Collapsing it to `@record.secret` would not.
+#[test]
+fn send_on_explicit_receiver_is_not_collapsed() {
+    let concern = r#"module Labeled
+  extend ActiveSupport::Concern
+  class_methods do
+    def labeled(field)
+      define_method :label_of do
+        @article.send(field)
+      end
+    end
+  end
+end
+"#;
+    let app =
+        ingest_app_from_tree(tiny_overlay(concern, "Labeled", "labeled :title")).expect("ingest");
+    let body = roundhouse::emit::ruby::emit_expr(&instance(&app, "label_of").body);
+    assert!(
+        body.contains("send(") && !body.contains("public_send"),
+        "{body}"
+    );
+}
+
+/// Nested `send(:send, :literal)` collapses all the way to the name.
+#[test]
+fn nested_send_literal_collapses() {
+    let concern = r#"module Labeled
+  extend ActiveSupport::Concern
+  class_methods do
+    def labeled(field)
+      define_method :label_of do
+        send(:send, field)
+      end
+    end
+  end
+end
+"#;
+    let app =
+        ingest_app_from_tree(tiny_overlay(concern, "Labeled", "labeled :title")).expect("ingest");
+    let body = roundhouse::emit::ruby::emit_expr(&instance(&app, "label_of").body);
+    assert!(
+        body.contains("title") && !body.contains("send("),
+        "{body}"
+    );
+}
+
 #[test]
 fn dynamic_define_method_name_is_not_expanded() {
     let concern = r#"module Labeled
