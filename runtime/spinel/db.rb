@@ -827,13 +827,16 @@ class DbConn
 
   # Real finalize of every cached stmt — pool-shutdown path only.
   def finalize_all
-    release_all
-    i = 0
-    while i < @entries.length
-      SQL.sqlite3_finalize(@entries[i].ptr)
-      i += 1
+    begin
+      release_all
+    ensure
+      i = 0
+      while i < @entries.length
+        SQL.sqlite3_finalize(@entries[i].ptr)
+        i += 1
+      end
+      @entries.clear
     end
-    @entries.clear
     nil
   end
 end
@@ -976,13 +979,20 @@ class DbPool
 
   # Finalize every cached stmt on every connection, then close the handles.
   def close_all
+    error = nil
     i = 0
     while i < @conns.length
       c = @conns[i]
-      c.finalize_all
-      SQL.sqlite3_close(c.dbh)
+      begin
+        c.finalize_all
+      rescue StandardError => e
+        error = e if error.nil?
+      ensure
+        SQL.sqlite3_close(c.dbh)
+      end
       i += 1
     end
+    raise error if !error.nil?
   end
 end
 
@@ -1235,12 +1245,21 @@ module Db
 
   def self.close
     return if @pools.nil?
-    i = 0
-    while i < @pools.length
-      @pools[i].close_all
-      i += 1
+    error = nil
+    begin
+      i = 0
+      while i < @pools.length
+        begin
+          @pools[i].close_all
+        rescue StandardError => e
+          error = e if error.nil?
+        end
+        i += 1
+      end
+    ensure
+      @pools = nil
     end
-    @pools = nil
+    raise error if !error.nil?
   end
 
   # DDL + INSERT/UPDATE/DELETE. `sqlite3_exec` doesn't return rows;

@@ -412,3 +412,40 @@ raise "idle cached shutdown retry leaked the statement" unless idle_cached.close
 raise "idle cached shutdown retry retained quarantine" unless Db.instance_variable_get(:@quarantined).empty?
 raise "idle cached shutdown retry retained the pool" unless Db.instance_variable_get(:@pool).nil?
 puts "runtime: idle cached shutdown close failure and retry passed (8 assertions)"
+
+# A checked-out statement's release error must not stop cached statement or
+# connection disposal, including later connections with their own errors.
+Db.configure(":memory:", pool_size: 3)
+closing_conns = Db.instance_variable_get(:@pool).free.dup
+closing_statements = []
+first_shutdown_error = RuntimeError.new("first shutdown release failure")
+closing_conns.each_with_index do |conn, index|
+  Fiber[:db_handle] = conn
+  idle = Db.prepare("SELECT 37 AS shutdown_idle")
+  closing_statements.push(idle[:stmt])
+  Db.finalize(idle)
+  held = Db.prepare("SELECT 41 AS shutdown_held")
+  transient = Db.prepare("SELECT 41 AS shutdown_held")
+  closing_statements.push(held[:stmt], transient[:stmt])
+  raise "missing shutdown readers" unless Db.step?(held) && Db.step?(transient)
+  if index < 2
+    error = index == 0 ? first_shutdown_error : RuntimeError.new("later shutdown release failure")
+    held[:stmt].define_singleton_method(:reset!) { raise error }
+  end
+end
+Fiber[:db_handle] = nil
+shutdown_error = begin
+  Db.close
+  nil
+rescue RuntimeError => e
+  e
+end
+raise "shutdown leaked a cached or transient statement" unless closing_statements.all?(&:closed?)
+raise "shutdown skipped a connection" unless closing_conns.all?(&:closed?)
+raise "shutdown retained checkouts" unless closing_conns.all? { |conn| Db.open_statements(conn).empty? }
+raise "shutdown retained its pool" unless Db.instance_variable_get(:@pool).nil?
+raise "shutdown retained its owner" unless Db.instance_variable_get(:@owner_pid).nil?
+raise "shutdown retained quarantine" unless Db.instance_variable_get(:@quarantined).empty?
+raise "shutdown replaced its first release error" unless shutdown_error.equal?(first_shutdown_error)
+Db.close
+puts "runtime: gem shutdown drains all connections and preserves the first release error passed"
