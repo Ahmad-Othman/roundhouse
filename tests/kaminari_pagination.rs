@@ -24,6 +24,22 @@ const CONTROLLER: &str = r#"class ReportsController < ApplicationController
     reports = Report.page(params[:page])
     render plain: "page=#{reports.current_page} per=#{reports.limit_value} titles=#{reports.map(&:title).join(",")}"
   end
+
+  def distinct_index
+    reports = Report.select("title").distinct.order(:title).page(params[:page]).per(params[:per])
+    render plain: "page=#{reports.current_page} per=#{reports.limit_value} total=#{reports.total_count} " \
+                  "pages=#{reports.total_pages} next=#{reports.next_page.inspect} prev=#{reports.prev_page.inspect} " \
+                  "first=#{reports.first_page?} last=#{reports.last_page?} out=#{reports.out_of_range?} " \
+                  "titles=#{reports.map(&:title).join(",")}"
+  end
+
+  def grouped_index
+    reports = Report.select("title").group("title").order("title").page(params[:page]).per(params[:per])
+    render plain: "page=#{reports.current_page} per=#{reports.limit_value} total=#{reports.total_count} " \
+                  "pages=#{reports.total_pages} next=#{reports.next_page.inspect} prev=#{reports.prev_page.inspect} " \
+                  "first=#{reports.first_page?} last=#{reports.last_page?} out=#{reports.out_of_range?} " \
+                  "titles=#{reports.map(&:title).join(",")}"
+  end
 end
 "#;
 
@@ -54,7 +70,7 @@ fn app(initializer: Option<&str>) -> emit_and_run::Overlay {
         )
         .write(
             "config/routes.rb",
-            "Rails.application.routes.draw do\n  resources :reports, only: :index\n  get \"unordered\", to: \"reports#unordered\"\nend\n",
+            "Rails.application.routes.draw do\n  resources :reports, only: :index\n  get \"unordered\", to: \"reports#unordered\"\n  get \"distinct\", to: \"reports#distinct_index\"\n  get \"grouped\", to: \"reports#grouped_index\"\nend\n",
         )
         .write(
             "db/schema.rb",
@@ -121,6 +137,39 @@ expect("/reports", "page=2", "page=2 per=2 total=5 pages=3 next=3 prev=1 first=f
 "#
     );
     app(Some(initializer)).run_ruby(&script).assert_passes();
+}
+
+/// DISTINCT / GROUP BY pagination readers (#343 remainder): total_count
+/// is the unpaginated result-set size, not the underlying row count.
+#[test]
+fn distinct_and_grouped_pages_use_result_set_total_count() {
+    let script = format!(
+        r#"%w[c c b b a].each {{ |t| Report.create(title: t) }}
+def get(path, query)
+  status, _headers, body = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => query, "rack.input" => StringIO.new(""))
+  raise "GET #{{path}}?#{{query}} answered #{{status}}: #{{body.join}}" unless status == 200
+  body.join
+end
+def expect(path, query, want)
+  got = get(path, query)
+  raise "GET #{{path}}?#{{query}}\n got: #{{got}}\nwant: #{{want}}" unless got == want
+end
+# Five rows, three distinct titles. Page size 2 → two pages.
+expect("/distinct", "page=1&per=2", "page=1 per=2 total=3 pages=2 next=2 prev=nil first=true last=false out=false titles=a,b")
+expect("/distinct", "page=2&per=2", "page=2 per=2 total=3 pages=2 next=nil prev=1 first=false last=true out=false titles=c")
+expect("/distinct", "page=9&per=2", "page=9 per=2 total=3 pages=2 next=nil prev=nil first=false last=false out=true titles=")
+expect("/grouped", "page=1&per=2", "page=1 per=2 total=3 pages=2 next=2 prev=nil first=true last=false out=false titles=a,b")
+expect("/grouped", "page=2&per=2", "page=2 per=2 total=3 pages=2 next=nil prev=1 first=false last=true out=false titles=c")
+rel = Report.select("title").distinct.order(:title).page(2).per(2)
+sql = rel.to_sql
+loaded = rel.to_a.map(&:title)
+_ = rel.total_count
+_ = rel.total_pages
+raise "pagination metadata mutated SQL" unless rel.to_sql == sql
+raise "pagination metadata mutated loaded rows" unless rel.to_a.map(&:title) == loaded
+"#
+    );
+    app(Some(INITIALIZER)).run_ruby(&script).assert_passes();
 }
 
 /// A page size the initializer computes (an ENV read) cannot be carried
