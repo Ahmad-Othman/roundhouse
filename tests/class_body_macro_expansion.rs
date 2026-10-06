@@ -1201,3 +1201,47 @@ end
         }).collect::<Vec<_>>()
     );
 }
+
+/// `has_mobile_version :index, :show` — a `*actions` macro that peels its
+/// options with `extract_options!` and reads `options[:if]`. The call's
+/// symbols are the filter's `only`; an absent `if:` is nil, no guard.
+#[test]
+fn rest_actions_macro_with_extract_options_expands_to_a_scoped_filter() {
+    let concern = r#"
+module MobileableConcern
+  extend ActiveSupport::Concern
+
+  module ClassMethods
+    def has_mobile_version(*actions)
+      options = actions.extract_options!
+      before_action(:setup_mobile!, if: options[:if], only: actions)
+    end
+  end
+
+  private
+    def setup_mobile!
+    end
+end
+"#;
+    let tree = vec![
+        ("app/controllers/concerns/mobileable_concern.rb", concern),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  include MobileableConcern\nend\n",
+        ),
+        (
+            "app/controllers/things_controller.rb",
+            "class ThingsController < ApplicationController\n  has_mobile_version :index, :show\n  def index; end\n  def show; end\nend\n",
+        ),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec()))
+    .collect();
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    let before: Vec<_> = filters(&app)
+        .into_iter()
+        .filter(|(kind, target, ..)| *kind == FilterKind::Before && target == "setup_mobile!")
+        .collect();
+    assert_eq!(before.len(), 1, "macro should expand: {before:?}");
+    assert_eq!(before[0].2, vec!["index".to_string(), "show".to_string()]);
+}
