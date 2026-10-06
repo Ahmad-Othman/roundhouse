@@ -308,7 +308,7 @@ module ActionView
         s.include?("<") || s.include?("=") || s.include?(">") || s.include?("?") ||
         s.include?("@") || s.include?("[") || s.include?("\\") || s.include?("]") ||
         s.include?("^") || s.include?("`") || s.include?("{") || s.include?("|") ||
-        s.include?("}")
+        s.include?("}") || s.include?("\r") || s.include?("\n") || s.include?("\0")
     end
 
     # Like `needs_url_escape?` but without `@` — `MAILTO_ESCAPE_PATTERN`.

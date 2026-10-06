@@ -2,23 +2,22 @@ module ActionController
   def self.header_key_ok?: (String k) -> bool
   def self.header_value_ok?: (String v) -> bool
   def self.header_control?: (String c) -> bool
-  def self.sanitize_location: (untyped path) -> String
-  def self.location_host: (untyped url) -> String
+  def self.sanitize_location: (String path) -> String
+  def self.location_host: (String url) -> String
   def self.find_substr: (String hay, String needle) -> Integer
   def self.find_last: (String hay, String needle) -> Integer
+  def self.forgery_flag: () -> bool
+  def self.set_forgery_flag: (bool value) -> void
 
   class HeaderStore
-    @pairs: Hash[String, String]
+    @keys: Array[String]
+    @vals: Array[String]
     def initialize: () -> void
-    def []: (untyped key) -> String?
-    def []=: (untyped key, untyped value) -> untyped
-    def each: () { (String, String) -> void } -> HeaderStore
-  end
-
-  module Current
-    def self.controller: () -> Base?
-    def self.controller=: (untyped value) -> untyped
-    def self.session: () -> ActionDispatch::Session?
+    def []: (String key) -> String?
+    def []=: (String key, String value) -> void
+    def size: () -> Integer
+    def key_at: (Integer i) -> String
+    def val_at: (Integer i) -> String
   end
   # Symbolic-status to integer-code mapping (`STATUS_CODES`) is a
   # Ruby-level frozen Hash literal — module-level constant, not a
@@ -32,8 +31,8 @@ module ActionController
   # CRuby-only overlay feature — see runtime/action_controller_cookies.rb
   # — so it isn't declared on the shared/transpiled Base.)
   class Base
-    def self.allow_forgery_protection: () -> untyped
-    def self.allow_forgery_protection=: (untyped) -> untyped
+    def self.allow_forgery_protection: () -> bool
+    def self.allow_forgery_protection=: (bool) -> void
     # `attr_accessor` produces getter+setter pairs for each name.
     # `params` is a String-keyed Hash whose values are recursive
     # `Roundhouse::ParamValue` — String leaves, nested Hashes, and

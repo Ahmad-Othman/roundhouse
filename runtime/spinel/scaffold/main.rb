@@ -543,8 +543,13 @@ module Main
     # value is a header the app UNSET (campfire's `X-Rev` is
     # `ENV["GIT_REVISION"]`, absent outside its own deploy) and is not
     # written: the wire has no spelling for it.
-    controller.headers.each do |k, v|
+    i = 0
+    n = controller.headers.size
+    while i < n
+      k = controller.headers.key_at(i)
+      v = controller.headers.val_at(i)
       res.headers[k] = v unless v.nil?
+      i += 1
     end
 
     # Outbound flash: persist messages set THIS request for the NEXT one.

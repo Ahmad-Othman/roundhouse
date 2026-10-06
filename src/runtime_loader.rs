@@ -670,6 +670,7 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
             ("ParamValue", "param_value"),
             ("raise", "errors_ext"),
             ("NotImplementedError", "errors_ext"),
+            ("ArgumentError", "errors_ext"),
         ],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,

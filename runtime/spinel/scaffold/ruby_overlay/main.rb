@@ -260,7 +260,13 @@ module Main
     # Headers the action set beyond Content-Type/Location — a
     # `Content-Disposition` on a download, the Cache-Control a blob
     # route asks for — ride as the tuple's sixth element.
-    extra_headers = controller.headers
+    extra_headers = {}
+    hi = 0
+    hn = controller.headers.size
+    while hi < hn
+      extra_headers[controller.headers.key_at(hi)] = controller.headers.val_at(hi)
+      hi += 1
+    end
     if is_redirect
       [controller.status,
        %(<a href="#{controller.location}">Redirecting</a>),

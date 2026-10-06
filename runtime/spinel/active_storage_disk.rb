@@ -442,9 +442,9 @@ module ActiveStorage
         head(:not_found)
         return nil
       end
-      @headers["Content-Disposition"] = (disposition == "attachment" ? "attachment" : "inline") + "; filename=\"" +
+      headers["Content-Disposition"] = (disposition == "attachment" ? "attachment" : "inline") + "; filename=\"" +
         ActiveStorage.url_filename(blob.filename.to_s) + "\""
-      @headers["Cache-Control"] = "max-age=3600, public"
+      headers["Cache-Control"] = "max-age=3600, public"
       send_data(service.download(key), type: blob.content_type, disposition: disposition)
       nil
     end

@@ -5904,14 +5904,10 @@ raise "head location kept CR/LF: #{location.inspect}" if location.include?("\r")
 
 controller = WidgetsController.new
 controller.headers["X-Link"] = "a\r\nSet-Cookie: pwned=1"
-stored = false
-controller.headers.each { |k, v| stored = true if k == "X-Link" }
-raise "CR/LF header was stored" if stored
+raise "CR/LF header was stored" unless controller.headers["X-Link"].nil?
 
 controller.headers["X-Ok"] = "one-line"
-ok = false
-controller.headers.each { |k, v| ok = true if k == "X-Ok" && v == "one-line" }
-raise "legal header dropped" unless ok
+raise "legal header dropped" unless controller.headers["X-Ok"] == "one-line"
 puts "head and headers passed"
 "#)
         .assert_passes();
@@ -5957,6 +5953,26 @@ controller.request_method = "GET"
 begin
   controller.process_action(:bounce)
   raise "spoofed request.url honored: #{controller.location.inspect}"
+rescue ArgumentError
+end
+
+controller = WidgetsController.new
+controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.request_method = "GET"
+controller.params = { "back" => "/\\evil.example" }
+begin
+  controller.process_action(:bounce)
+  raise "backslash host honored: #{controller.location.inspect}"
+rescue ArgumentError
+end
+
+controller = WidgetsController.new
+controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.request_method = "GET"
+controller.params = { "back" => "///evil.example" }
+begin
+  controller.process_action(:bounce)
+  raise "triple-slash honored: #{controller.location.inspect}"
 rescue ArgumentError
 end
 puts "open redirect passed"

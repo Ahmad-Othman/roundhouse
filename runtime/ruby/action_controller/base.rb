@@ -3,6 +3,18 @@ require_relative "../action_dispatch/session"
 require_relative "../action_view"
 
 module ActionController
+  # One-slot array so class-level CSRF state is a store every target
+  # can index, not a `self` ivar or `class << self` writer.
+  FORGERY_SLOT = [true]
+
+  def self.forgery_flag
+    FORGERY_SLOT[0] == true
+  end
+
+  def self.set_forgery_flag(value)
+    FORGERY_SLOT[0] = value
+  end
+
   # What `Base#redirect_to` deletes from a location — see there.
   REDIRECT_LINE_BREAKS = { "\r" => "", "\n" => "", "\0" => "" }.freeze
   REDIRECT_LINE_BREAK_PATTERN = /[\r\n\0]/.freeze
@@ -48,17 +60,26 @@ module ActionController
     if s.include?("\r") || s.include?("\n") || s.include?("\0")
       s = s.gsub(REDIRECT_LINE_BREAK_PATTERN, REDIRECT_LINE_BREAKS)
     end
+    s = s.tr("\\", "/")
+    while s.start_with?(" ") || s.start_with?("\t")
+      s = s[1, s.length].to_s
+    end
     s
   end
 
   # Host of an absolute URL (`http://h/path`), or "" when the value is
-  # a relative path. Protocol-relative `//host/...` is a host.
+  # a relative path. Protocol-relative `//host/...` is a host. A
+  # backslash or tab is normalized in `sanitize_location` first so
+  # `/\evil` becomes `//evil` and is classified as a host.
   def self.location_host(url)
     s = url.to_s
     return "" if s.empty?
     rest = s
     if s.start_with?("//")
       rest = s[2, s.length].to_s
+      # `///path` has no host; treat as a dummy host so same-host
+      # refuses it instead of classifying it as relative.
+      return "." if rest.empty? || rest.start_with?("/")
     else
       at = find_substr(s, "://")
       return "" if at < 0
@@ -98,27 +119,50 @@ module ActionController
 
   class HeaderStore
     def initialize
-      @pairs = {}
+      @keys = []
+      @vals = []
     end
 
     def [](key)
-      @pairs[key.to_s]
-    end
-
-    def []=(key, value)
-      unless value.nil?
-        k = key.to_s
-        v = value.to_s
-        if ActionController.header_key_ok?(k) && ActionController.header_value_ok?(v)
-          @pairs[k] = v
-        end
+      i = 0
+      while i < @keys.length
+        return @vals[i] if @keys[i] == key
+        i += 1
       end
       nil
     end
 
-    def each
-      @pairs.each { |k, v| yield k, v }
-      self
+    # Void: a writer that returns the stored value would leak a
+    # dropped line back to the caller, and rust emit of `[]=` is
+    # `()` not `Option`.
+    def []=(key, value)
+      if ActionController.header_key_ok?(key) && ActionController.header_value_ok?(value)
+        i = 0
+        found = false
+        while i < @keys.length
+          if @keys[i] == key
+            @vals[i] = value
+            found = true
+          end
+          i += 1
+        end
+        unless found
+          @keys << key
+          @vals << value
+        end
+      end
+    end
+
+    def size
+      @keys.length
+    end
+
+    def key_at(i)
+      @keys[i].to_s
+    end
+
+    def val_at(i)
+      @vals[i].to_s
     end
   end
 
@@ -201,25 +245,6 @@ module ActionController
     network_authentication_required: 511,
   }.freeze
 
-  # Per-request controller seat so view helpers can mint a CSRF token
-  # without a Request-typed field (that stays on the ruby-family reopen).
-  module Current
-    def self.controller
-      @controller
-    end
-
-    def self.controller=(value)
-      @controller = value
-      value
-    end
-
-    def self.session
-      c = @controller
-      return nil if c.nil?
-      c.session
-    end
-  end
-
   # Base controller class. Holds the per-request state (params,
   # session, flash) and the response state (status, body, location).
   # Subclasses define their actions and a `process_action` dispatch
@@ -234,11 +259,11 @@ module ActionController
   # a feature none of them exercise yet.
   class Base
     def self.allow_forgery_protection
-      @allow_forgery_protection
+      ActionController.forgery_flag
     end
 
     def self.allow_forgery_protection=(value)
-      @allow_forgery_protection = value
+      ActionController.set_forgery_flag(value)
     end
 
     attr_accessor :params, :session, :flash, :request_method, :request_path, :request_format
@@ -517,7 +542,7 @@ module ActionController
     end
 
     def verified_request?
-      return true if ActionController::Base.allow_forgery_protection == false
+      return true unless ActionController.forgery_flag
       verb = @request_method.to_s
       return true if verb == "" || verb == "GET" || verb == "HEAD"
       expected = session[:_csrf_token].to_s
