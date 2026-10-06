@@ -3236,8 +3236,10 @@ fn is_known_class_method(name: &str) -> bool {
         // `self_methods` set — without parens, `go vet` flags
         // `self.VerifyAuthenticityToken` as an unused method value.
         | "verify_authenticity_token"
-        // Halt check after a filter that can render/redirect.
-        | "performed?"
+        // NOTE: do NOT force-parens `performed?` — Base emits it as the
+        // `Performed` struct field (trivial ivar reader), so the call
+        // site must stay a bare field read (`self.Performed`), not
+        // `self.PerformedPred()`.
     )
 }
 

@@ -443,7 +443,13 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         // FormBuilder.model is RBS-typed `ActiveRecord::Base`; the
         // emit surfaces `model: Base` on the field + constructor.
         // Type-only — runtime never instantiates Base directly.
-        imports: &[("type Base", "./active_record_base.js")],
+        // `ActionController.masked_authenticity_token` backs
+        // `form_authenticity_token` (Masked CSRF); the namespace
+        // class lives alongside Base in action_controller_base.ts.
+        imports: &[
+            ("type Base", "./active_record_base.js"),
+            ("ActionController", "./action_controller_base.js"),
+        ],
         prelude: NO_PRELUDE,
         // Roots for the hand-written server.ts that calls into
         // ViewHelpers directly. Suffix-renames apply (`reset_slots!`
@@ -630,6 +636,10 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
             // resolve. Trait lives in `runtime/rust/http.rs` so it
             // ships alongside the hand-written response shape.
             ("RubyToS", "http"),
+            // Masked CSRF: `form_authenticity_token` calls
+            // `ActionController::masked_authenticity_token`. The
+            // namespace struct lives in action_controller_base.rs.
+            ("ActionController", "action_controller_base"),
         ],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
