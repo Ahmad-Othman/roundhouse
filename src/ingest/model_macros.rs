@@ -746,7 +746,9 @@ fn substitute(mut expr: Expr, bindings: &HashMap<Symbol, Expr>) -> Option<Expr> 
             if !valid {
                 return None;
             }
-            collapse_literal_send(&mut expr);
+            if !collapse_literal_send(&mut expr) {
+                return None;
+            }
         }
         _ => return None,
     }
@@ -755,9 +757,10 @@ fn substitute(mut expr: Expr, bindings: &HashMap<Symbol, Expr>) -> Option<Expr> 
 
 /// `send(:title)` / `send("title")` / `__send__` with a literal first
 /// argument is a renamed call. Collapse after substitution so a bound
-/// `send(field)` becomes `title`, not `send(:title)`. `public_send`
-/// stays: collapsing it would let a private helper succeed.
-fn collapse_literal_send(expr: &mut Expr) {
+/// `send(field)` becomes `title`, not `send(:title)`. A leftover
+/// computed name declines the whole expansion. `public_send` is not
+/// this method — collapsing it would let a private helper succeed.
+fn collapse_literal_send(expr: &mut Expr) -> bool {
     let ExprNode::Send {
         recv,
         method,
@@ -766,16 +769,19 @@ fn collapse_literal_send(expr: &mut Expr) {
         parenthesized,
     } = &*expr.node
     else {
-        return;
+        return true;
     };
-    if !matches!(method.as_str(), "send" | "__send__") || args.is_empty() {
-        return;
+    if !matches!(method.as_str(), "send" | "__send__") {
+        return true;
+    }
+    if args.is_empty() {
+        return false;
     }
     let Some(name) = interned_name(&args[0]) else {
-        return;
+        return false;
     };
     if !valid_def_name(&name) {
-        return;
+        return false;
     }
     let rest = args[1..].to_vec();
     *expr.node = ExprNode::Send {
@@ -785,4 +791,5 @@ fn collapse_literal_send(expr: &mut Expr) {
         block: None,
         parenthesized: *parenthesized,
     };
+    true
 }
