@@ -970,8 +970,12 @@ module ActionView
       attrs.delete(:builder)
       url = opts.fetch(:url, nil)
       action = url.nil? ? "" : %( action="#{html_escape(url.to_s)}")
+      # Stringify at this boundary: `opts.fetch` is Hash[Symbol, untyped]
+      # and a gradual Value must not cross into `method_override_input`'s
+      # `String | Symbol` param (rust `&str`). Same shape as `mail_to`.
+      method = opts.fetch(:method, :post)
       %(<form#{render_attrs(attrs)}#{action} accept-charset="UTF-8" method="post">) +
-        method_override_input(opts.fetch(:method, :post)) +
+        method_override_input(method.to_s) +
         csrf_token_hidden_input +
         "</form>"
     end

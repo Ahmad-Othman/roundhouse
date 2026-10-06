@@ -965,4 +965,64 @@ end
             "fetch-nil at a String param must not call as_str on Option:\n{out}"
         );
     }
+
+    fn emit_view_helpers() -> String {
+        let ruby = include_str!("../../../runtime/ruby/action_view/view_helpers.rb");
+        let rbs = include_str!("../../../runtime/ruby/action_view/view_helpers.rbs");
+        let classes = crate::runtime_src::parse_library_with_rbs(
+            ruby.as_bytes(),
+            rbs,
+            "action_view/view_helpers.rb",
+        )
+        .expect("view_helpers parses and types");
+        crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
+            classes
+                .iter()
+                .map(|c| emit_library_class(c).expect("emits"))
+                .collect()
+        })
+    }
+
+    fn method_body<'a>(src: &'a str, name: &str) -> &'a str {
+        let needle = format!("pub fn {name}(");
+        let start = src.find(&needle).unwrap_or_else(|| panic!("missing {name}:\n{src}"));
+        let rest = &src[start..];
+        let next = rest[needle.len()..]
+            .find("\n    pub fn ")
+            .map(|i| needle.len() + i)
+            .unwrap_or(rest.len());
+        &rest[..next]
+    }
+
+    /// `form_with` must stringify the Hash fetch before
+    /// `method_override_input(&str)`.
+    #[test]
+    fn form_with_stringifies_method_before_override_input() {
+        let src = emit_view_helpers();
+        let body = method_body(&src, "form_with");
+        assert!(
+            body.contains("method_override_input") && body.contains("ruby_to_s()"),
+            "form_with must stringify the Hash fetch:\n{body}"
+        );
+        assert!(
+            !body.contains("method_override_input(opts"),
+            "gradual opts must not cross method_override_input:\n{body}"
+        );
+    }
+
+    /// Column-union params render as `serde_json::Value`; `nil?` is
+    /// `.is_null()`, not Option `.is_none()`.
+    #[test]
+    fn optional_value_attr_nil_check_uses_is_null() {
+        let src = emit_view_helpers();
+        let body = method_body(&src, "optional_value_attr");
+        assert!(
+            body.contains("is_null()"),
+            "optional_value_attr nil? should be Value::is_null:\n{body}"
+        );
+        assert!(
+            !body.contains("is_none()"),
+            "optional_value_attr must not emit Option::is_none on Value:\n{body}"
+        );
+    }
 }
