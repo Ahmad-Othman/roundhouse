@@ -26,6 +26,7 @@ mod library;
 mod rbs;
 pub mod shake;
 mod shared;
+pub mod source_markers;
 
 /// Render a `Ty` to its RBS string form (`String`, `Array[Comment]`,
 /// `Article`, `Integer?`). Re-exported for non-emit consumers — e.g. the
@@ -72,7 +73,19 @@ pub fn emit_method(m: &MethodDef) -> String {
         format!("({})", ps.join(", "))
     };
     let mut out = String::new();
+    if let Some(mk) = source_markers::marker_for(&m.name_span) {
+        writeln!(out, "{mk}").unwrap();
+    }
     writeln!(out, "def {prefix}{}{}", m.name, params).unwrap();
+    // The body's first statement: a Seq writes markers only between
+    // its statements, so the first is named here.
+    let first = match &*m.body.node {
+        crate::expr::ExprNode::Seq { exprs } => exprs.first().unwrap_or(&m.body),
+        _ => &m.body,
+    };
+    if let Some(mk) = source_markers::marker_for(&first.span) {
+        writeln!(out, "{mk}").unwrap();
+    }
     let body_text = emit_expr(&m.body);
     fn emit_default(default: &crate::expr::Expr) -> String {
         let src = expr::emit_expr(default);

@@ -1221,7 +1221,7 @@ pub fn target_files(
     }
     let files = crate::timings::phase(format_args!("emit {}: assemble", target.as_str()), || match target {
         BuildTarget::Blog => blog_files(fixture),
-        BuildTarget::Spinel => spinel_files(app, fixture).and_then(|(mut files, _)| {
+        BuildTarget::Spinel => spinel_files_with_source_markers(app, fixture).and_then(|(mut files, _)| {
             spinel_relation_model_handle(&mut files)?;
             spin_shape(files)
         }),
@@ -3703,7 +3703,7 @@ pub fn spinel_base_files(app: &App, fixture: &Path) -> Result<Vec<(String, Strin
     // got it — one layer down. A lane is evidence only if it runs the
     // same code. Idempotent: the gap scan skips a file that already
     // requires the library, so `spin_shape` running it again is inert.
-    let (mut files, _) = spinel_files(app, fixture)?;
+    let (mut files, _) = spinel_files_with_source_markers(app, fixture)?;
     spinel_relation_model_handle(&mut files)?;
 
     write_bundled_requires(&mut files);
@@ -3908,6 +3908,25 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
 
 // Return app-emitted test stems separately: merging the scaffold loses
 // their provenance, and the Ruby-family Makefile must exclude runtime tests.
+/// The spinel tree with `#<SPINEL_SOURCE>` markers naming the app
+/// `.rb`/`.erb` each emitted line came from (spinel#7630), so `#line`,
+/// debug stepping and perf report app positions rather than lowered
+/// Ruby. Spinel-only: the ruby family shares `spinel_files` and keeps
+/// its output unmarked. See `emit::ruby::source_markers`.
+fn spinel_files_with_source_markers(
+    app: &App,
+    fixture: &Path,
+) -> Result<(Vec<(String, String)>, Vec<String>), String> {
+    let (mut files, stems) =
+        emit::ruby::source_markers::with_source_markers(app, || spinel_files(app, fixture))?;
+    for (path, content) in files.iter_mut() {
+        if path.ends_with(".rb") {
+            *content = emit::ruby::source_markers::finish(content);
+        }
+    }
+    Ok((files, stems))
+}
+
 fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec<String>), String> {
     let mut files: Vec<(String, String)> = Vec::new();
 
@@ -8198,6 +8217,43 @@ mod tests {
             "stderr={}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    /// The spinel tree names the app source each emitted line came from
+    /// (`#<SPINEL_SOURCE>`, spinel#7630): a view's `<%= %>` tag reports
+    /// its ERB line, at column 0 where Spinel matches the marker. The
+    /// ruby family shares `spinel_files` and stays unmarked.
+    #[test]
+    fn spinel_tree_marks_app_source_lines() {
+        let fixture = Path::new("fixtures/real-blog");
+        if !fixture.is_dir() {
+            eprintln!("skip: fixtures/real-blog absent");
+            return;
+        }
+        let app = crate::ingest::ingest_app(fixture).expect("ingest real-blog");
+        let files = spinel_base_files(&app, fixture).expect("spinel base files");
+        let view = files
+            .iter()
+            .find(|(p, _)| p == "app/views/articles/_article.rb")
+            .map(|(_, c)| c.as_str())
+            .expect("_article.rb in spinel tree");
+        let lines: Vec<&str> = view.lines().collect();
+        let title = lines
+            .iter()
+            .position(|l| l.contains("article.title"))
+            .expect("the link_to article.title line");
+        assert_eq!(
+            lines[title - 1],
+            "#<SPINEL_SOURCE>real-blog/app/views/articles/_article.html.erb:4",
+            "{view}"
+        );
+        let ruby = ruby_runtime_files(&app, fixture).expect("ruby tree");
+        let marked: Vec<&str> = ruby
+            .iter()
+            .filter(|(_, c)| c.contains("#<SPINEL_SOURCE>"))
+            .map(|(p, _)| p.as_str())
+            .collect();
+        assert!(marked.is_empty(), "ruby tree carries spinel markers: {marked:?}");
     }
 
     /// Shared relation.rbs types `initialize` / terminals as `Base` for

@@ -1589,8 +1589,8 @@ fn index_ivar_ty(app: &roundhouse::App, name: &str) -> Ty {
 ///
 /// lobsters' `Search` is the shape: a PORO with `attr_accessor :page`,
 /// living in `app/models`. Because an instance receiver resolves
-/// `class_methods` before `instance_methods`, seeding kaminari's
-/// class-side `page` builder onto it made `@search.page` — an Integer
+/// `class_methods` before `instance_methods`, seeding the class-side
+/// `page` builder onto it made `@search.page` — an Integer
 /// the object assigns itself in `initialize` — resolve to a relation
 /// over `Search`. That mistyping was invisible while chain starts were
 /// `Array`-shaped and became a hard `relation_type` emit error the day
@@ -1649,7 +1649,7 @@ end
         index_ivar_ty(&app, "search"),
     );
 
-    // The attr_accessor answers, NOT kaminari's class-side `page`.
+    // The attr_accessor answers, NOT the class-side `page` builder.
     let page = index_ivar_ty(&app, "page");
     assert!(
         !matches!(page, Ty::Relation { .. } | Ty::Array { .. }),

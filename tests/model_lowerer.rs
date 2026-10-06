@@ -453,6 +453,63 @@ fn article_lowers_dependent_destroy_to_before_destroy() {
     assert!(block_present, "each call should carry a block");
 }
 
+/// `has_one …, dependent: :destroy` cascades the single child, not
+/// a collection `each`. Nil child is the else branch so destroy of an
+/// owner with no row does not raise.
+#[test]
+fn has_one_dependent_destroy_lowers_to_before_destroy() {
+    use roundhouse::ingest::{ingest_model, ingest_schema};
+
+    let schema = ingest_schema(
+        br#"
+ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "users", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "profiles", force: :cascade do |t|
+    t.integer "user_id"
+    t.string "bio"
+  end
+end
+"#,
+        "db/schema.rb",
+    )
+    .expect("ingest schema");
+    let model = ingest_model(
+        b"class User < ApplicationRecord\n  has_one :profile, dependent: :destroy\nend\n",
+        "app/models/user.rb",
+        &schema,
+        &Default::default(),
+    )
+    .expect("ingest")
+    .expect("model");
+    let lc = lower_model_to_library_class(&model, &schema);
+    let cb = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "before_destroy")
+        .expect("before_destroy method present (has_one dependent: :destroy)");
+    assert!(matches!(cb.receiver, MethodReceiver::Instance));
+    let first = &body_stmts(cb)[0];
+    match &*first.node {
+        roundhouse::ExprNode::If { cond, then_branch, .. } => {
+            match &*cond.node {
+                roundhouse::ExprNode::Send { method, .. } => {
+                    assert_eq!(method.as_str(), "profile");
+                }
+                other => panic!("expected profile reader cond; got {other:?}"),
+            }
+            match &*then_branch.node {
+                roundhouse::ExprNode::Send { method, .. } => {
+                    assert_eq!(method.as_str(), "destroy");
+                }
+                other => panic!("expected destroy in then; got {other:?}"),
+            }
+        }
+        other => panic!("expected If cascade for has_one destroy; got {other:?}"),
+    }
+}
+
 /// Statements of a method body as a list (single stmt = one element).
 fn body_stmts(m: &roundhouse::dialect::MethodDef) -> Vec<roundhouse::Expr> {
     match &*m.body.node {

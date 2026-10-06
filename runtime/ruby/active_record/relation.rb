@@ -451,33 +451,37 @@ module ActiveRecord
       self
     end
 
-    # ---- Kaminari's page / per, over LIMIT / OFFSET ------------------
+    # ---- page / per / paginate: LIMIT / OFFSET arithmetic ------------
     #
-    # The catalog types `page` and `per` as builders and the readers
-    # below as terminals; this is the runtime behind them, with
-    # Kaminari's arithmetic. `count` already leaves LIMIT and OFFSET out
-    # of its SQL (`count_sql`), which is exactly Kaminari's
-    # `total_count`. Not modeled: `padding`, `without_count`,
-    # `max_per_page` / `max_pages`, and the `Kaminari.paginate_array`
-    # wrapper for a loaded Array.
+    # The catalog types `page`, `per`, and `paginate` as builders and
+    # the readers below as terminals. `count` already leaves LIMIT and
+    # OFFSET out of its SQL (`count_sql`), which is the unpaginated
+    # total `total_count` needs. Not modeled: `padding`, `without_count`,
+    # `max_per_page` / `max_pages`, and wrapping a loaded Array.
     #
     # The readers go through locals rather than doing arithmetic on the
     # ivars: a runtime ivar reads as `T | Nil` (see `ActionController::
-    # Page`), and Kaminari's own nil cases are the ones guarded here.
+    # Page`).
 
     # `page(n)`: page `n` at the app's default page size. A nil, blank,
-    # non-numeric or non-positive `n` is page 1, as Kaminari's `to_i`
-    # makes it.
+    # non-numeric or non-positive `n` is page 1 (`to_i`).
     def page(num = nil)
-      per_page = Rails.application.kaminari_default_per_page
+      per_page = Rails.application.default_per_page
       n = num.to_s.to_i
       n = 1 if n < 1
       limit(per_page)
       offset((n - 1) * per_page)
     end
 
-    # `per(n)`: the same page at `n` rows. Kaminari leaves the relation
-    # as it is for a nil, blank or negative `n` (its `/^\d/` test), so
+    # Same builder as `page` under the `paginate` spelling. A
+    # positional page number, or `page:` / `per_page:` keywords.
+    # `per(nil)` is a no-op (`per` only applies a numeric string).
+    def paginate(num = nil, page: nil, per_page: nil)
+      self.page(page || num).per(per_page)
+    end
+
+    # `per(n)`: the same page at `n` rows. A nil, blank or negative `n`
+    # (the `/^\d/` test) leaves the relation as it is, so
     # `per(params[:per])` without the parameter keeps the default size;
     # `per(0)` is `limit(0)`.
     def per(num)
@@ -498,9 +502,8 @@ module ActiveRecord
       @offset
     end
 
-    # 1 for a relation that was never paged, where Kaminari divides by
-    # a nil limit; `per(0)` raises, as Kaminari's ZeroPerPageOperation
-    # (a ZeroDivisionError) does.
+    # 1 for a relation that was never paged (divide-by-nil limit);
+    # `per(0)` raises ZeroDivisionError.
     def current_page
       per_page = @limit
       return 1 if per_page.nil?
@@ -514,9 +517,9 @@ module ActiveRecord
       count
     end
 
-    # Rounded up; 0 for an empty relation, as in Kaminari, which makes
-    # page 1 of nothing out of range rather than the last page. A
-    # relation that was never paged is one page.
+    # Rounded up; 0 for an empty relation, which makes page 1 of
+    # nothing out of range rather than the last page. A relation that
+    # was never paged is one page.
     def total_pages
       per_page = @limit
       return 1 if per_page.nil?
@@ -1338,7 +1341,7 @@ module ActiveRecord
     # and unbounded. A LIMIT/OFFSET window must not answer the table
     # total — `limit(2).size` is at most 2 — so the limited path counts
     # a `SELECT 1` subquery rather than `count_sql` (which omits LIMIT
-    # on purpose for Kaminari `total_count`).
+    # so page totals see the unpaginated result set).
     def size
       r = @records
       return r.length unless r.nil?

@@ -381,6 +381,15 @@ pub enum Association {
         /// See `HasMany::as_interface`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_interface: Option<Symbol>,
+        /// Association scope lambda body, same contract as
+        /// [`HasMany::scope`] (`has_one :x, -> { where(name: "body") }`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<Expr>,
+        /// `autosave: true` — persist a built/assigned child after the
+        /// owner saves. Default false, matching Rails. Carried on IR;
+        /// has_one autosave lowering is still a separate claim.
+        #[serde(default, skip_serializing_if = "is_false")]
+        autosave: bool,
     },
     HasAndBelongsToMany {
         name: Symbol,

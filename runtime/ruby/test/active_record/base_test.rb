@@ -331,7 +331,7 @@ class BaseTest < Minitest::Test
 
   def test_relation_last_page_empty_out_of_range_is_not_last
     it = Item.new; it.title = "A"; it.save()
-    # Page past the end loads empty; Kaminari's last_page? is false there
+    # Page past the end loads empty; last_page? is false there
     # (current_page > total_pages), not true via the short-page shortcut.
     rel = ActiveRecord::Relation.new(Item).order("id").limit(10).offset(10)
     rel.to_a
