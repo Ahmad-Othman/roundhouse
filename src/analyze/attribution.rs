@@ -21,8 +21,9 @@
 //!    gap. Whatever the analyzer failed to resolve there, the skipped
 //!    construct is the prime suspect.
 //! 2. **Receiver class** — a `SendDispatchFailed` whose receiver class
-//!    is defined in a gap file: the method likely exists but its
-//!    definition (or the DSL declaring it) didn't ingest.
+//!    is defined in a gap file (registered, or declared there and dropped
+//!    by survey mode): the method likely exists but its definition (or the
+//!    DSL declaring it) didn't ingest.
 //! 3. **View feeders** — a diagnostic in a view any of whose feeding
 //!    controllers (per [`App::view_feeders`], ancestors included) is
 //!    tainted: the ivar channel that seeds the view runs through the
@@ -401,10 +402,14 @@ impl<'a> AttributionCtx<'a> {
     }
 
     /// Taint for a dispatch receiver: the root class of `ty` (unions:
-    /// any arm) defined in a gap file.
+    /// any arm) defined in a gap file, including a class survey mode
+    /// dropped and so never registered.
     fn recv_taint(&self, ty: &Ty) -> Option<&&str> {
         match ty {
-            Ty::Class { id, .. } => self.tainted_classes.get(id),
+            Ty::Class { id, .. } => self
+                .tainted_classes
+                .get(id)
+                .or_else(|| self.gap_namespaces.get(id.0.as_str().trim_start_matches("::"))),
             Ty::Union { variants } => variants.iter().find_map(|v| self.recv_taint(v)),
             _ => None,
         }

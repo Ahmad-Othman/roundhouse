@@ -23,11 +23,13 @@ fn references_to_a_class_dropped_by_an_ingest_gap_are_coverage_notes() {
         ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
         (
             "app/controllers/articles_controller.rb",
-            "class ArticlesController < ApplicationController\n  def show\n    @article = Article.find(params[:id])\n    Nope.call\n  end\nend\n",
+            "class ArticlesController < ApplicationController\n  def show\n    @article = Article.find(params[:id])\n    Nope.call\n  end\n\n  def index\n    @headline = latest_article.headline\n  end\n\n  private\n\n  def latest_article\n    nil\n  end\nend\n",
         ),
+        // The dropped class still names a type: a value typed `Article?` fails dispatch.
+        ("sig/articles_controller.rbs", "class ArticlesController\n  def latest_article: () -> Article?\nend\n"),
         ("app/views/articles/show.html.erb", "<h1><%= @article.title %></h1>\n"),
         ("db/schema.rb", "ActiveRecord::Schema[8.1].define do\n  create_table :articles do |t|\n    t.string :title\n  end\nend\n"),
-        ("config/routes.rb", "Rails.application.routes.draw do\n  resources :articles, only: :show\nend\n"),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  resources :articles, only: [:index, :show]\nend\n"),
     ] {
         let file = root.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -44,6 +46,10 @@ fn references_to_a_class_dropped_by_an_ingest_gap_are_coverage_notes() {
     let ivar = line("@article has no known type");
     assert!(ivar.contains("note[ivar_unresolved]"), "{ivar}");
     assert!(ivar.contains("@article is assigned from a class whose source did not ingest"), "{ivar}");
+
+    let dispatch = line("no known method `headline`");
+    assert!(dispatch.contains("note[send_dispatch_failed]"), "{dispatch}");
+    assert!(dispatch.contains("ingest gap in app/models/article.rb"), "{dispatch}");
 
     // Declared by no gap file: an error of its own, not a shadow.
     let nope = line("constant not supported (all targets): Nope");
