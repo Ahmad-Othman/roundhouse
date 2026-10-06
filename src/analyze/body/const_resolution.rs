@@ -314,6 +314,11 @@ impl ConstResolver {
         self.files.get(index as usize)?.as_ref()
     }
 
+    /// The namespaces (`class` / `module`, fully qualified) `file` declares.
+    pub(crate) fn namespaces_declared_in(&self, file: FileId) -> impl Iterator<Item = &str> {
+        self.file(file).into_iter().flat_map(|file| file.namespace_definitions.iter().map(|name| name.as_ref()))
+    }
+
     pub(super) fn has_source_file(&self, file: FileId) -> bool {
         self.file(file).is_some()
     }

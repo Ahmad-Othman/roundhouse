@@ -1,0 +1,53 @@
+//! A class survey mode drops for an ingest gap leaves every reference to it
+//! unresolved. Those shadows read as coverage notes naming the gap, the way
+//! an unknown gem's do, while an unrelated error stays an error.
+
+use std::process::Command;
+
+fn check_continue(root: &std::path::Path) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+        .args(["check", "--continue"])
+        .arg(root)
+        .output()
+        .expect("spawn roundhouse");
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn references_to_a_class_dropped_by_an_ingest_gap_are_coverage_notes() {
+    let root = std::env::temp_dir().join(format!("roundhouse-gap-cascade-{}", std::process::id()));
+    for (path, source) in [
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
+        // `has_role?` is a gem's method: the visibility change refuses the whole model.
+        ("app/models/article.rb", "class Article < ApplicationRecord\n  private :has_role?\nend\n"),
+        ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
+        (
+            "app/controllers/articles_controller.rb",
+            "class ArticlesController < ApplicationController\n  def show\n    @article = Article.find(params[:id])\n    Nope.call\n  end\nend\n",
+        ),
+        ("app/views/articles/show.html.erb", "<h1><%= @article.title %></h1>\n"),
+        ("db/schema.rb", "ActiveRecord::Schema[8.1].define do\n  create_table :articles do |t|\n    t.string :title\n  end\nend\n"),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  resources :articles, only: :show\nend\n"),
+    ] {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, source).unwrap();
+    }
+
+    let out = check_continue(&root);
+    let line = |needle: &str| out.lines().find(|l| l.contains(needle)).unwrap_or_else(|| panic!("no `{needle}` line:\n{out}"));
+
+    let article = line("constant not supported (all targets): Article");
+    assert!(article.contains("note[unsupported]"), "{article}");
+    assert!(article.contains("ingest gap in app/models/article.rb"), "{article}");
+
+    let ivar = line("@article has no known type");
+    assert!(ivar.contains("note[ivar_unresolved]"), "{ivar}");
+    assert!(ivar.contains("@article is assigned from a class whose source did not ingest"), "{ivar}");
+
+    // Declared by no gap file: an error of its own, not a shadow.
+    let nope = line("constant not supported (all targets): Nope");
+    assert!(nope.contains("error[unsupported]"), "{nope}");
+
+    std::fs::remove_dir_all(root).unwrap();
+}
