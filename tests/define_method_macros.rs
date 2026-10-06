@@ -171,7 +171,9 @@ end
 }
 
 /// `@record.send(:literal)` keeps `send` so a private method on the
-/// receiver still succeeds. Collapsing it to `@record.secret` would not.
+/// ivar still succeeds. Collapsing it to `@record.secret` would not.
+/// Call-chain receivers (`positioning_parent.send(:leaves)`) still
+/// collapse — see `tests/model_macro_expansion.rs`.
 #[test]
 fn send_on_explicit_receiver_is_not_collapsed() {
     let concern = r#"module Labeled

@@ -811,10 +811,13 @@ fn string_binding_read_as_value(expr: &Expr, bindings: &HashMap<Symbol, Expr>) -
 /// `send(:title)` / `send("title")` / `__send__` with a literal first
 /// argument is a renamed call. Collapse after substitution so a bound
 /// `send(field)` becomes `title`, not `send(:title)`. A leftover
-/// computed name declines the whole expansion. Only receiverless (or
-/// `self.`) forms collapse: `@helper.send(:secret)` must stay `send`
-/// so a private method still succeeds. `public_send` is not this
-/// method — collapsing it would let a private helper succeed.
+/// computed name declines the whole expansion.
+///
+/// Call-chain receivers collapse too (`positioning_parent.send(:leaves)`
+/// → `positioning_parent.leaves`). Ivar and local receivers stay
+/// reflective: `@helper.send(:secret)` must remain `send` so a private
+/// method still succeeds. `public_send` is not this method — collapsing
+/// it would let a private helper succeed.
 fn collapse_literal_send(expr: &mut Expr) -> bool {
     loop {
         let ExprNode::Send {
@@ -827,10 +830,9 @@ fn collapse_literal_send(expr: &mut Expr) -> bool {
         else {
             return true;
         };
-        if recv
-            .as_ref()
-            .is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef))
-        {
+        if recv.as_ref().is_some_and(|r| {
+            matches!(&*r.node, ExprNode::Ivar { .. } | ExprNode::Var { .. })
+        }) {
             return true;
         }
         if !matches!(method.as_str(), "send" | "__send__") {
@@ -846,8 +848,12 @@ fn collapse_literal_send(expr: &mut Expr) -> bool {
             return false;
         }
         let rest = args[1..].to_vec();
+        let recv = match recv {
+            Some(r) if matches!(&*r.node, ExprNode::SelfRef) => None,
+            other => other.clone(),
+        };
         *expr.node = ExprNode::Send {
-            recv: None,
+            recv,
             method: name,
             args: rest,
             block: None,
