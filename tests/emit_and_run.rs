@@ -5795,7 +5795,7 @@ end
   end
 
   def tails
-    render plain: Widget.order(:name).first_n(1).map { |w| w.name }.join(",") + Widget.order(:name).last_n(1).map { |w| w.name }.join(",")
+    render plain: Widget.order(:name).first(1).map { |w| w.name }.join(",") + Widget.order(:name).last(1).map { |w| w.name }.join(",")
   end
 end
 "#)
