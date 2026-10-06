@@ -641,32 +641,27 @@ impl<'a> BodyTyper<'a> {
                         // constant onto the test class as a bare name
                         // (`DnsTestHelper::WEB_PUSH_PUBLIC_TEST_IP` →
                         // `WEB_PUSH_PUBLIC_TEST_IP`) and never emits the
-                        // helper module — re-qualifying to the foreign
-                        // owner is a NameError at load. Skip qualify only
-                        // when the class owns the leaf AND the declaration
-                        // owner differs from `self` (Widget::MIN_PRICE still
-                        // expands so unsupported diagnostics keep the
-                        // qualified spelling).
-                        let leaf = path.last().cloned();
+                        // helper module — re-qualifying that bare path is a
+                        // NameError at load. Leave bare paths bare when the
+                        // class owns the leaf and the declaration's owner
+                        // is foreign. Do not strip an already-qualified
+                        // path (`FactoryModel::Result`) just because the
+                        // leaf name also exists locally — that collision
+                        // is a different constant (`data_factory_constants`).
+                        let leaf = path.last();
                         let locally_owned = leaf
-                            .as_ref()
                             .is_some_and(|n| ctx.constants.get_own(n).is_some());
                         let enclosing = match &ctx.self_ty {
                             Some(Ty::Class { id, .. }) => Some(id.0.as_str()),
                             _ => None,
                         };
                         let decl_owner = name.0.as_str().rsplit_once("::").map(|(o, _)| o);
-                        let spliced_foreign = locally_owned
+                        let keep_bare_splice = path.len() == 1
+                            && locally_owned
                             && enclosing
                                 .zip(decl_owner)
                                 .is_some_and(|(enc, owner)| enc != owner);
-                        if spliced_foreign {
-                            if let Some(n) = leaf {
-                                if path.len() != 1 {
-                                    *path = vec![n];
-                                }
-                            }
-                        } else {
+                        if !keep_bare_splice {
                             qualify_resolved_path(path, name);
                         }
                         self.typed_constants
