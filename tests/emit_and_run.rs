@@ -5853,6 +5853,10 @@ got = rejected(:sorted_str, { "sort" => "id DESC, (SELECT 1)" })
 raise "string ORDER took SQL: #{got}" unless got == "rejected"
 got = Widget.all.order("LOWER(name)").map { |w| w.name }.join(",")
 raise "LOWER(name) order: #{got}" unless got == "alpha,beta,gamma"
+got = Widget.all.order("RANDOM()").map { |w| w.name }.length
+raise "RANDOM() order rejected" unless got == 3
+got = rejected(:sorted_str, { "sort" => "SLEEP()" })
+raise "SLEEP() order: #{got}" unless got == "rejected"
 got = rejected(:sorted_str, { "sort" => "LOWER(name); SELECT 1" })
 raise "LOWER plus splice: #{got}" unless got == "rejected"
 
@@ -5973,6 +5977,16 @@ controller.params = { "back" => "///evil.example" }
 begin
   controller.process_action(:bounce)
   raise "triple-slash honored: #{controller.location.inspect}"
+rescue ArgumentError
+end
+
+controller = WidgetsController.new
+controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.request_method = "GET"
+controller.params = { "back" => "/\t/evil.example" }
+begin
+  controller.process_action(:bounce)
+  raise "tab host honored: #{controller.location.inspect}"
 rescue ArgumentError
 end
 puts "open redirect passed"

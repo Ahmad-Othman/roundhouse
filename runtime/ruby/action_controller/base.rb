@@ -15,9 +15,11 @@ module ActionController
     FORGERY_SLOT[0] = value
   end
 
-  # What `Base#redirect_to` deletes from a location — see there.
-  REDIRECT_LINE_BREAKS = { "\r" => "", "\n" => "", "\0" => "" }.freeze
-  REDIRECT_LINE_BREAK_PATTERN = /[\r\n\0]/.freeze
+  # WHATWG URL-parser preprocessing: drop tab/CR/LF/NUL anywhere, then
+  # strip leading and trailing C0 controls and spaces. A tab in the
+  # middle (`/\t/evil`) becomes `//evil` so host classification sees it.
+  REDIRECT_LINE_BREAKS = { "\r" => "", "\n" => "", "\0" => "", "\t" => "" }.freeze
+  REDIRECT_LINE_BREAK_PATTERN = /[\r\n\0\t]/.freeze
 
   # Puma's illegal-header rule: drop a key/value that cannot be one
   # HTTP/1.1 line. Character walks (`[i, 1]`), not `getbyte`/`bytesize`
@@ -57,20 +59,27 @@ module ActionController
 
   def self.sanitize_location(path)
     s = path.to_s
-    if s.include?("\r") || s.include?("\n") || s.include?("\0")
+    if s.include?("\r") || s.include?("\n") || s.include?("\0") || s.include?("\t")
       s = s.gsub(REDIRECT_LINE_BREAK_PATTERN, REDIRECT_LINE_BREAKS)
     end
     s = s.tr("\\", "/")
-    while s.start_with?(" ") || s.start_with?("\t")
+    while s.length > 0
+      c = s[0, 1].to_s
+      break unless c == " " || header_control?(c)
       s = s[1, s.length].to_s
+    end
+    while s.length > 0
+      c = s[s.length - 1, 1].to_s
+      break unless c == " " || header_control?(c)
+      s = s[0, s.length - 1].to_s
     end
     s
   end
 
   # Host of an absolute URL (`http://h/path`), or "" when the value is
   # a relative path. Protocol-relative `//host/...` is a host. A
-  # backslash or tab is normalized in `sanitize_location` first so
-  # `/\evil` becomes `//evil` and is classified as a host.
+  # backslash or interior tab is normalized in `sanitize_location`
+  # first so `/\evil` and `/\t/evil` become `//evil`.
   def self.location_host(url)
     s = url.to_s
     return "" if s.empty?
