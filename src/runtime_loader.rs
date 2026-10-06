@@ -1575,9 +1575,11 @@ fn elixir_format_constant(name: &str, value: &Expr) -> String {
 /// place module-level constants INSIDE their modules. `transpile_entry`
 /// emits constants (via `format_constant`) as lines ahead of the class
 /// bodies, but Elixir has no file-level constants and module attributes
-/// don't cross module boundaries — so inject any leading constant lines
-/// into **every** `defmodule` in the file (HeaderStore / Base /
-/// ActionController share FORGERY_SLOT and STATUS_CODES).
+/// don't cross module boundaries — so inject leading constant lines
+/// into each `defmodule` that actually references the attribute
+/// (`@status_codes` / `@forgery_slot` / …). Blanket injection into
+/// every sibling (HeaderStore + Base + ActionController) trips
+/// `--warnings-as-errors` on unused module attributes.
 /// The `namespace` arg is unused: V2-prefixing + naming happen in
 /// `emit_library_class`.
 fn elixir_wrap_namespace(_namespace: &str, body: &str) -> String {
@@ -1594,20 +1596,54 @@ fn elixir_wrap_namespace(_namespace: &str, body: &str) -> String {
     if consts.is_empty() {
         return body.to_string();
     }
-    let mut out = String::new();
-    // Drop the leading constant block — re-injected per module below.
+    // Pair each `@name …` constant line with the attribute token a
+    // module body must mention to justify the injection.
+    let const_attrs: Vec<(&str, &str)> = consts
+        .iter()
+        .filter_map(|c| {
+            let trimmed = c.trim_start();
+            if !trimmed.starts_with('@') {
+                return Some((*c, ""));
+            }
+            let name = trimmed[1..]
+                .split_whitespace()
+                .next()
+                .unwrap_or("");
+            if name.is_empty() {
+                return Some((*c, ""));
+            }
+            Some((*c, name))
+        })
+        .collect();
+
+    // Module spans: start line → end line (exclusive), sibling modules
+    // only (action_controller emit is flat — no nested defmodule).
+    let mut mod_starts: Vec<usize> = Vec::new();
     for (i, l) in lines.iter().enumerate().skip(first_mod) {
-        out.push_str(l);
-        out.push('\n');
         if l.trim_start().starts_with("defmodule ") {
-            // Peek: only inject once, right after the opening line.
-            // Nested `defmodule` inside a body would also match — the
-            // action_controller emit is flat sibling modules only.
-            for c in &consts {
+            mod_starts.push(i);
+        }
+    }
+    let mut out = String::new();
+    for (m_idx, &start) in mod_starts.iter().enumerate() {
+        let end = mod_starts
+            .get(m_idx + 1)
+            .copied()
+            .unwrap_or(lines.len());
+        // Emit the defmodule line, then only the constants this body
+        // references, then the rest of the module.
+        out.push_str(lines[start]);
+        out.push('\n');
+        let body_text = lines[start + 1..end].join("\n");
+        for (c, attr) in &const_attrs {
+            if attr.is_empty() || body_text.contains(&format!("@{attr}")) {
                 out.push_str(c);
                 out.push('\n');
             }
-            let _ = i;
+        }
+        for l in &lines[start + 1..end] {
+            out.push_str(l);
+            out.push('\n');
         }
     }
     out
@@ -1900,6 +1936,7 @@ const PYTHON_RUNTIME: &[RuntimeEntry] = &[
         // encoding rides the Base64/JSON stdlib mappings.
         imports: &[
             ("Base", "app.active_record_base"),
+            ("ActionController", "app.action_controller_base"),
             ("re", ""),
             ("base64", ""),
             ("json", ""),
