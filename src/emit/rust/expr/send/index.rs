@@ -604,22 +604,20 @@ pub(super) fn try_recv_typed_method(
                     }} }}"
             ));
         }
-        // `value.nil?` on a `Ty::Untyped` or unresolved-Var receiver —
-        // `serde_json::Value` exposes `.is_null()` (not `.is_none`,
-        // which is the Option method the generic `nil?` bridge below
-        // produces). The Var-typed case covers receivers the body-
-        // typer didn't fully resolve (e.g. `value = @model[field]`
-        // where `@model[field]` is typed Untyped per Base's RBS but
-        // the local-let propagation leaves `value`'s recv ty
-        // unresolved at the emit-walk's view of the Var-read site).
-        // The generic bridge stays in place for true Option-typed
-        // receivers (typical Ruby `attr_reader` getters typed `T?`).
+        // `value.nil?` on a receiver that rust emits as
+        // `serde_json::Value` — `.is_null()` (not `.is_none`, which
+        // is the Option method the generic `nil?` bridge below
+        // produces). Untyped/Var are the gradual-escape cases; RBS
+        // heterogeneous unions (`String | Integer | Float | bool |
+        // nil` on `optional_value_attr`) also render as Value, and
+        // must take the same predicate or rustc E0599s. The generic
+        // bridge stays in place for true Option-typed receivers
+        // (typical Ruby `attr_reader` getters typed `T?`).
         if method == "nil?"
             && args.is_empty()
-            && matches!(
-                r.ty.as_ref(),
-                Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Var { .. })
-            )
+            && r.ty
+                .as_ref()
+                .is_some_and(super::super::super::ty::rust_value_shaped)
         {
             return Some(format!("{}.is_null()", emit_expr(r)));
         }
