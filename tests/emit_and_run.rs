@@ -6328,3 +6328,35 @@ raise "host ancestry changed" unless Article.ancestors.index(Signing) < Article.
         )
         .assert_passes();
 }
+
+#[test]
+fn a_shared_factory_respects_an_overridden_constructor() {
+    emit_and_run::real_blog()
+        .write("app/services/custom_factory.rb", r#"module CustomFactory
+  class_methods do
+    def build
+      new
+    end
+  end
+end
+class FactoryReading < T::Struct
+  const :label, String
+end
+class FactoryPacket
+  include CustomFactory
+  def self.new
+    FactoryReading.new(label: "custom")
+  end
+end
+class FactoryConsumer
+  def self.label
+    FactoryPacket.build.label.upcase
+  end
+end
+"#)
+        .run_ruby(r#"
+raise "constructor identity" unless FactoryPacket.build.class == FactoryReading
+raise "constructor consumer" unless FactoryConsumer.label == "CUSTOM"
+"#)
+        .assert_passes();
+}
