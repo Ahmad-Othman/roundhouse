@@ -122,6 +122,14 @@ fn concern_class_attribute_macros_run_at_class_load() {
     assert!(run.stdout.contains("class_attribute contract passed"));
 }
 
+/// An explicit nil on a subclass is its value; unset reads the parent's.
+#[test]
+fn concern_class_attribute_set_to_nil_is_not_unset() {
+    let run = class_attribute::nil_overlay().run_ruby(class_attribute::NIL_ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("class_attribute nil contract passed"));
+}
+
 /// The same Concern types without a diagnostic of any severity: the
 /// macro parameters from the class-body calls (a subclass's included),
 /// the helper's keywords through `**options`, `Array(...)`'s elements,
@@ -164,6 +172,17 @@ fn concern_class_attribute_macros_are_fully_typed() {
         params[0].ty,
         roundhouse::ty::Ty::Array { elem: Box::new(roundhouse::ty::Ty::Str) },
         "codes"
+    );
+    // `only: nil` is nil when absent, which the signature has to say.
+    let add = probe.class_methods().find(|m| m.name.as_str() == "add_preload_definition").unwrap();
+    let Some(roundhouse::ty::Ty::Fn { params, .. }) = &add.signature else {
+        panic!("unsigned: {:?}", add.signature)
+    };
+    let only = params.iter().find(|p| p.name.as_str() == "only").expect("only");
+    assert!(
+        matches!(&only.ty, roundhouse::ty::Ty::Union { variants } if variants.contains(&roundhouse::ty::Ty::Nil)),
+        "only: {:?}",
+        only.ty
     );
 }
 

@@ -116,3 +116,46 @@ raise "cleared" unless ClearedController._preload_definitions.length == 0
 raise "parent untouched" unless ProbeController._preload_definitions.length == 2
 puts "class_attribute contract passed"
 "#;
+
+/// A subclass that sets the attribute to nil reads nil, as in Rails; one
+/// that never set it reads its parent's.
+pub fn nil_overlay() -> super::emit_and_run::Overlay {
+    super::emit_and_run::real_blog()
+        .write(
+            "app/controllers/concerns/configurable_defs.rb",
+            r#"
+module ConfigurableDefs
+  extend ActiveSupport::Concern
+
+  included do
+    class_attribute :defs, default: ["a"]
+  end
+
+  class_methods do
+    def configure_defs(value)
+      self.defs = value
+    end
+  end
+end
+"#,
+        )
+        .write(
+            "app/controllers/defs_controller.rb",
+            "class DefsController < ApplicationController\n  include ConfigurableDefs\nend\n",
+        )
+        .write("app/controllers/unset_defs_controller.rb", "class UnsetDefsController < DefsController\nend\n")
+        .write(
+            "app/controllers/nil_defs_controller.rb",
+            "class NilDefsController < DefsController\n  configure_defs nil\nend\n",
+        )
+}
+
+pub const NIL_ASSERTIONS: &str = r#"
+require_relative "app/controllers/defs_controller"
+require_relative "app/controllers/unset_defs_controller"
+require_relative "app/controllers/nil_defs_controller"
+raise "parent" unless DefsController.defs == ["a"]
+raise "unset inherits" unless UnsetDefsController.defs == ["a"]
+raise "explicit nil" unless NilDefsController.defs.nil?
+puts "class_attribute nil contract passed"
+"#;

@@ -241,8 +241,15 @@ fn class_method(method: MethodDef, carrier: &ClassId, slot: &Symbol) -> Controll
     }
 }
 
+/// The class ivar a write also sets, so a subclass tells an attribute it
+/// never wrote from one it set to nil (Spinel has no
+/// `instance_variable_defined?` on a class).
+pub(crate) fn written_flag(name: &Symbol) -> Symbol {
+    Symbol::from(format!("{}__written", name.as_str()))
+}
+
 /// `def self.name; @name; end`, or on a subclass
-/// `def self.name; @name.nil? ? Parent.name : @name; end`.
+/// `def self.name; @name__written ? @name : Parent.name; end`.
 fn reader(name: &Symbol, parent: Option<&ClassId>, owner: &str) -> MethodDef {
     let span = crate::span::Span::synthetic();
     let ivar = || Expr::new(span, ExprNode::Ivar { name: name.clone() });
@@ -251,17 +258,9 @@ fn reader(name: &Symbol, parent: Option<&ClassId>, owner: &str) -> MethodDef {
         Some(parent) => Expr::new(
             span,
             ExprNode::If {
-                cond: Expr::new(
-                    span,
-                    ExprNode::Send {
-                        recv: Some(ivar()),
-                        method: Symbol::from("nil?"),
-                        args: vec![],
-                        block: None,
-                        parenthesized: false,
-                    },
-                ),
-                then_branch: Expr::new(
+                cond: Expr::new(span, ExprNode::Ivar { name: written_flag(name) }),
+                then_branch: ivar(),
+                else_branch: Expr::new(
                     span,
                     ExprNode::Send {
                         recv: Some(Expr::new(
@@ -276,7 +275,6 @@ fn reader(name: &Symbol, parent: Option<&ClassId>, owner: &str) -> MethodDef {
                         parenthesized: false,
                     },
                 ),
-                else_branch: ivar(),
             },
         ),
     };
@@ -353,7 +351,8 @@ fn class_attribute(stmt: &Expr) -> Option<(Symbol, Expr)> {
 }
 
 /// Rewrite `self.name = v` to `@name = v`, and `self.name op= v` to
-/// `@name = name op v` — the read goes through the reader, so a subclass
+/// `@name = name op v` (each also setting `written_flag`) — the read goes
+/// through the reader, so a subclass
 /// appends to the value it inherits, as in Rails. False when the body
 /// reaches the storage any other way: `||=`/`&&=` on the attribute, or a
 /// source `@name`, which Rails keeps apart from the attribute and the
@@ -420,8 +419,23 @@ fn rewrite_writes(expr: &mut Expr, names: &[Symbol]) -> bool {
             }
             _ => None,
         };
+        // `@name = v; @name__written = true; @name`: the flag after the
+        // value (computing it may read the inherited one), the value last.
         if let Some((name, value)) = replacement {
-            *expr.node = ExprNode::Assign { target: LValue::Ivar { name }, value };
+            let flag = written_flag(&name);
+            *expr.node = ExprNode::Seq {
+                exprs: vec![
+                    Expr::new(span, ExprNode::Assign { target: LValue::Ivar { name: name.clone() }, value }),
+                    Expr::new(
+                        span,
+                        ExprNode::Assign {
+                            target: LValue::Ivar { name: flag },
+                            value: Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: true } }),
+                        },
+                    ),
+                    Expr::new(span, ExprNode::Ivar { name }),
+                ],
+            };
         }
     }
     if touches_storage(expr, names) {

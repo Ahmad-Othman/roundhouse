@@ -62,6 +62,15 @@ fn concern_class_attribute_macros_run_at_class_load_natively() {
     assert!(run.stdout.contains("class_attribute contract passed"));
 }
 
+/// The native half of `emit_and_run::concern_class_attribute_set_to_nil_is_not_unset`.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn concern_class_attribute_set_to_nil_is_not_unset_natively() {
+    let run = class_attribute::nil_overlay().run_spinel(class_attribute::NIL_ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("class_attribute nil contract passed"));
+}
+
 /// The native half of `emit_and_run::rails_root_join_takes_any_number_of_parts`:
 /// the fixtures never call `join` with more than one part, so no other
 /// Spinel lane compiles the variadic `Rails::AppPath#join`.

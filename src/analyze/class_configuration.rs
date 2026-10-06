@@ -129,12 +129,25 @@ impl Analyzer {
                     configuration_slot.1.clone(),
                     if set_at_include { ty.clone() } else { union_of(ty.clone(), Ty::Nil) },
                 );
+                if *configuration_role == ClassConfigurationRole::ClassAttribute {
+                    ctx.ivar_bindings.insert(
+                        crate::ingest::class_attribute::written_flag(&configuration_slot.1),
+                        union_of(Ty::Bool, Ty::Nil),
+                    );
+                }
                 if *configuration_role == ClassConfigurationRole::Writer {
                     for param in &method.params {
                         ctx.local_bindings.insert(param.name.clone(), ty.clone());
                     }
                 }
                 if *configuration_role == ClassConfigurationRole::ClassAttribute {
+                    // A default is the value when the argument is absent;
+                    // typed first, so the seed joins it in.
+                    for param in &mut method.params {
+                        if let Some(default) = &mut param.default {
+                            self.body_typer().analyze_expr(default, &ctx);
+                        }
+                    }
                     ctx = self.seed_method_params(&ctx, &controller.name, method);
                 }
                 seed_empty_hashes(&mut method.body, &ty);
