@@ -1941,9 +1941,11 @@ module ActiveRecord
     end
 
     # Developer SQL like campfire's `order("LOWER(name)")` /
-    # `order("LOWER(rooms.name)")`. A request-steered fragment such as
-    # `(SELECT 1)` does not match.
+    # `order("LOWER(rooms.name)")`, plus the documented zero-arg
+    # `RANDOM()` / `random()`. A request-steered fragment such as
+    # `(SELECT 1)` or `SLEEP()` does not match.
     def order_fn_term?(c)
+      return true if c == "RANDOM()" || c == "random()"
       c.match?(/\A[A-Za-z_][A-Za-z0-9_]*\([A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?\)\z/)
     end
 
