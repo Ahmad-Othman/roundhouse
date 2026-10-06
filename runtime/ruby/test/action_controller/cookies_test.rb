@@ -129,8 +129,10 @@ class ActionControllerCookiesTest < Minitest::Test
     jar.signed[:cross] = { value: "tok", same_site: :none, secure: true }
     assert_equal "None", jar.flag_samesite(:cross)
     assert jar.flag_secure?(:cross)
+    assert jar.flag_httponly?(:cross), "options hash without httponly keeps the default"
     jar.signed[:strict] = { value: "tok", same_site: :strict }
     assert_equal "Strict", jar.flag_samesite(:strict)
+    assert jar.flag_httponly?(:strict)
   end
 
   # NIL, as Rails answers — the signed read is the one nullable read in

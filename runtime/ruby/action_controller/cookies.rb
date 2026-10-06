@@ -239,7 +239,10 @@ module ActionController
       if value.is_a?(Hash)
         ss = value[:same_site]
         ss = "" if ss.nil?
-        @jar.record_flags(key, value[:httponly] == true, ss.to_s, value[:secure] == true)
+        # Omitted httponly is the default (on). Only an explicit
+        # `httponly: false` records an opt-out; `== true` treated a
+        # missing key as off and dropped HttpOnly on Rack.
+        @jar.record_flags(key, value[:httponly] != false, ss.to_s, value[:secure] == true)
       end
       value
     end
