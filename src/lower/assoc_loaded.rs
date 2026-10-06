@@ -79,8 +79,9 @@ fn class_id_of(expr: &Expr) -> Option<ClassId> {
 }
 
 /// Resolve which model owns the association hop: typed receiver first,
-/// then the enclosing class for implicit-self, then a unique-name
-/// fallback when the receiver is untyped and no enclosing class is known.
+/// then the enclosing **model** for implicit-self (concern modules are
+/// not model keys — fall through), then a unique-name fallback when the
+/// receiver is untyped and no model enclosing class is known.
 fn resolve_owner_model(
     recv: Option<&Expr>,
     enclosing: Option<&ClassId>,
@@ -91,11 +92,17 @@ fn resolve_owner_model(
         if let Some(id) = class_id_of(base) {
             return Some(id);
         }
-    } else if let Some(id) = enclosing {
-        return Some(id.clone());
     }
-    // Untyped explicit receiver (or no enclosing class): rewrite only
-    // when exactly one model declares this name.
+    // Implicit-self / untyped: prefer the enclosing model when this
+    // walk's owner is a real model. Concern modules (`Message::Searchable`)
+    // are not keys in `by_model` — fall through so Campfire's
+    // `association(:rich_text_body).target` inside the concern still
+    // resolves via the unique-name path onto `Message`.
+    if let Some(id) = enclosing {
+        if by_model.contains_key(id) {
+            return Some(id.clone());
+        }
+    }
     let mut matches = by_model
         .iter()
         .filter(|(_, names)| names.contains(name))

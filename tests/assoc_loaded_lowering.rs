@@ -171,6 +171,62 @@ end
 }
 
 #[test]
+fn association_target_collapses_inside_concern_module() {
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "messages", force: :cascade do |t|
+    t.string "body"
+  end
+  create_table "action_text_rich_texts", force: :cascade do |t|
+    t.string "name"
+    t.text "body"
+    t.string "record_type"
+    t.integer "record_id"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+  include Message::Searchable
+  has_rich_text :body
+end
+"#,
+        ),
+        (
+            "app/models/message/searchable.rb",
+            r#"module Message::Searchable
+  extend ActiveSupport::Concern
+
+  def indexed_text_changed?
+    association(:rich_text_body).target&.saved_change_to_body?
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = ruby::emit_library(&app);
+    let src = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().contains("searchable"))
+        .map(|f| f.content.as_str())
+        .unwrap_or("");
+    assert!(
+        !src.contains("association(:rich_text_body)"),
+        "concern-module association(:rich_text_body).target must collapse:\n{src}"
+    );
+    assert!(
+        src.contains("rich_text_body"),
+        "expected collapse onto rich_text_body reader inside concern:\n{src}"
+    );
+}
+
+#[test]
 fn association_target_skips_reader_on_unrelated_model() {
     let mut app = ingest_app_from_tree(tree(&[
         (
