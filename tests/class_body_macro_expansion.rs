@@ -1337,6 +1337,17 @@ fn class_attribute_carrier_refuses_what_it_cannot_carry() {
         class_attribute_methods(&format!("{attr}\n    helper_method :defs"), write).is_empty(),
         "an `included` statement that is neither class_attribute nor filter DSL"
     );
+    roundhouse::ingest::survey::activate();
+    let _ = class_attribute_methods(&format!("{attr}\n    helper_method :defs"), write);
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|g| matches!(
+            g,
+            roundhouse::ingest::IngestError::Unsupported { message, .. }
+                if message.contains("included do")
+        )),
+        "unsupported included body must be carrier-ledgered; got {gaps:?}"
+    );
     assert!(
         class_attribute_methods(attr, "@defs = [codes]").is_empty(),
         "a source `@defs` is not the attribute's storage"

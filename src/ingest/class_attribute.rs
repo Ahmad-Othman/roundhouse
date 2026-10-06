@@ -57,6 +57,11 @@ pub(super) fn expand(
             continue;
         }
         let Some(attributes) = included_attributes(&lc.unknown_calls, &lc.name) else {
+            survey::record(&IngestError::Unsupported {
+                file: lc.name.0.as_str().to_string(),
+                message: "class_attribute carrier `included do` must contain only class_attribute and filter DSL"
+                    .to_string(),
+            });
             continue;
         };
         if attributes.is_empty() {
@@ -133,6 +138,9 @@ pub(super) fn expand(
             .collect();
 
         let mut body = Vec::new();
+        // Rails Concern inclusion is once per class; a second textual
+        // `include` must not re-seed the default after macros have run.
+        let mut seeded: HashSet<ClassId> = HashSet::new();
         for item in std::mem::take(&mut controller.body) {
             match &item {
                 ControllerBodyItem::Unknown { expr, leading_comments, leading_blank_line } => {
@@ -146,6 +154,9 @@ pub(super) fn expand(
                         // Concern's `included` hook runs.
                         for module in args.iter().filter_map(const_path_to_class_id) {
                             if let Some(carrier) = own.iter().find(|m| ***m == module) {
+                                if !seeded.insert((*carrier).clone()) {
+                                    continue;
+                                }
                                 for (name, default) in &admitted[*carrier].attributes {
                                     body.push(ControllerBodyItem::ClassIvarInit {
                                         expr: Expr::new(
