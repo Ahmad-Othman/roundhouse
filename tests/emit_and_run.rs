@@ -5912,6 +5912,10 @@ raise "CR/LF header was stored" unless controller.headers["X-Link"].nil?
 
 controller.headers["X-Ok"] = "one-line"
 raise "legal header dropped" unless controller.headers["X-Ok"] == "one-line"
+
+controller.headers["X-Rev"] = nil
+raise "nil header write stored a value" unless controller.headers["X-Rev"].nil?
+raise "nil header wiped a sibling" unless controller.headers["X-Ok"] == "one-line"
 puts "head and headers passed"
 "#)
         .assert_passes();

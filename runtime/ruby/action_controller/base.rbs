@@ -1,6 +1,6 @@
 module ActionController
-  def self.header_key_ok?: (String k) -> bool
-  def self.header_value_ok?: (String v) -> bool
+  def self.header_key_ok?: (String? k) -> bool
+  def self.header_value_ok?: (String? v) -> bool
   def self.header_control?: (String c) -> bool
   def self.sanitize_location: (String path) -> String
   def self.location_host: (String url) -> String
@@ -14,7 +14,7 @@ module ActionController
     @vals: Array[String]
     def initialize: () -> void
     def []: (String key) -> String?
-    def []=: (String key, String value) -> void
+    def []=: (String key, String? value) -> void
     def size: () -> Integer
     def key_at: (Integer i) -> String
     def val_at: (Integer i) -> String

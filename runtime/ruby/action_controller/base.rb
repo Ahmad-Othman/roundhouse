@@ -25,6 +25,7 @@ module ActionController
   # HTTP/1.1 line. Character walks (`[i, 1]`), not `getbyte`/`bytesize`
   # — those do not exist on strict-target strings.
   def self.header_key_ok?(k)
+    return false if k.nil?
     n = k.length
     return false if n == 0
     i = 0
@@ -37,6 +38,9 @@ module ActionController
   end
 
   def self.header_value_ok?(v)
+    # Nil is an unset (`headers["X-Rev"] = ENV["GIT_REVISION"]` when
+    # the env is absent). Drop it; do not ask it for length.
+    return false if v.nil?
     n = v.length
     i = 0
     while i < n
