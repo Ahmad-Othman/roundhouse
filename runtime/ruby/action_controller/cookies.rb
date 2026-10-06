@@ -107,8 +107,14 @@ module ActionController
       k
     end
 
+    # Rails defaults HttpOnly on. A bare `cookies[:k] = v` (or
+    # `cookies.signed[:k] = v`) never calls `record_flags`, so a missing
+    # entry means the default, not an opt-out. Explicit `httponly: false`
+    # records "" and stays off.
     def flag_httponly?(key)
-      @flag_httponly[key.to_s] == "1"
+      k = key.to_s
+      return true unless @flag_httponly.key?(k)
+      @flag_httponly[k] == "1"
     end
 
     def flag_samesite(key)
@@ -218,10 +224,10 @@ module ActionController
     end
 
     # Rails takes either a bare value or an options Hash carrying
-    # `value:` beside `httponly:`/`same_site:` — campfire writes the
-    # latter. The transport attributes are not modeled (the dispatcher
-    # emits Path=/ + HttpOnly for every cookie it writes), so what
-    # survives is the value.
+    # `value:` beside `httponly:`/`same_site:`/`secure:` — campfire
+    # writes the latter. Bare writes leave flags unrecorded so
+    # `flag_httponly?` keeps the HttpOnly default; an options Hash
+    # records the explicit bits the dispatcher reads.
     def []=(key, value)
       signed = ActionController::MessageVerifier.generate(
         Rails.application.secret_key_base,
