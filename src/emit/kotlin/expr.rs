@@ -1271,9 +1271,28 @@ fn lvalue_ref(target: &LValue) -> String {
         LValue::Var { name, .. } => camel(name.as_str()),
         LValue::Ivar { name } => format!("this.{}", camel(name.as_str())),
         LValue::Attr { recv, name } => format!("{}.{}", emit_expr(recv), camel(name.as_str())),
-        LValue::Index { recv, index } => format!("{}[{}]", emit_expr(recv), emit_expr(index)),
+        LValue::Index { recv, index } => {
+            // List indices are `Long` in the IR; Kotlin wants `Int`.
+            // Also cover module constants like `FORGERY_SLOT[0] =` whose
+            // recv ty may not be stamped as Array yet.
+            let idx = if list_index_needs_int_cast(recv, index) {
+                format!("({}).toInt()", emit_expr(index))
+            } else {
+                emit_expr(index)
+            };
+            format!("{}[{}]", emit_expr(recv), idx)
+        }
         LValue::Const { path } => path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("."),
     }
+}
+
+/// True when `recv[index]` is a List/Array access (not a Hash) that
+/// needs a Kotlin `Int` index cast from the IR's `Long`.
+fn list_index_needs_int_cast(recv: &Expr, index: &Expr) -> bool {
+    if recv_is_hash(recv) {
+        return false;
+    }
+    recv_is_array(recv) || matches!(index.ty.as_ref(), Some(crate::ty::Ty::Int))
 }
 
 fn emit_op_assign(target: &LValue, op: OpAssignOp, value: &Expr) -> String {
@@ -1664,7 +1683,7 @@ fn emit_send(
                     return emit_slice_range(&rs, begin.as_ref(), end.as_ref(), *exclusive);
                 }
                 // List/Array index needs an Int (indices are `Long`).
-                if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Array { .. })) {
+                if recv_is_array(r) {
                     return format!("{rs}[({}).toInt()]", args_s[0]);
                 }
                 return format!("{rs}[{}]", args_s[0]);
@@ -1718,7 +1737,12 @@ fn emit_send(
     }
     if let (Some(r), 2) = (recv, args.len()) {
         if method == "[]=" {
-            return format!("{}[{}] = {}", emit_expr(r), args_s[0], args_s[1]);
+            let idx = if list_index_needs_int_cast(r, &args[0]) {
+                format!("({}).toInt()", args_s[0])
+            } else {
+                args_s[0].clone()
+            };
+            return format!("{}[{}] = {}", emit_expr(r), idx, args_s[1]);
         }
         // `Hash#fetch(k, default)` → `(recv[k] ?: default)` (Ruby returns
         // the value or the default; Kotlin map-get is null for missing).
