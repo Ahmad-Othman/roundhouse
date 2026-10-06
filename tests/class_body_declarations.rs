@@ -187,7 +187,8 @@ fn dynamic_class_eval_string_is_not_expanded() {
   extend ActiveSupport::Concern
   class_methods do
     def titled(name)
-      class_eval "def #{name}; 99; end"
+      template = "def #{name}; 99; end"
+      class_eval template
     end
   end
 end
@@ -204,7 +205,7 @@ end
         ("app/models/concerns/title_macro.rb", concern),
         (
             "app/models/article.rb",
-            "class Article < ApplicationRecord\n  include TitleMacro\n  titled choose\nend\n",
+            "class Article < ApplicationRecord\n  include TitleMacro\n  titled :headline\nend\n",
         ),
     ]);
     roundhouse::ingest::survey::activate();
@@ -222,7 +223,7 @@ end
     )));
     assert!(!article
         .methods()
-        .any(|m| m.name.as_str() == "choose" && m.receiver == MethodReceiver::Instance));
+        .any(|m| m.name.as_str() == "headline" && m.receiver == MethodReceiver::Instance));
 }
 
 #[test]
@@ -464,5 +465,55 @@ end
     assert!(
         !names.iter().any(|n| n == "headline"),
         "must not invent a helper: {names:?}"
+    );
+}
+
+const LEFTOVER_MACRO: &str = r##"module AttachMacro
+  extend ActiveSupport::Concern
+  class_methods do
+    def attached(name, strict_loading: false)
+      has_one :"#{name}_record", class_name: "Comment", foreign_key: :article_id, strict_loading: strict_loading
+      scope :"with_#{name}", -> { all }
+      class_eval <<-CODE, __FILE__, __LINE__ + 1
+        def #{name}
+          1
+        end
+      CODE
+    end
+  end
+end
+"##;
+
+/// Interpolatable class_eval plus leftover interpolated association /
+/// scope names must fail closed: do not emit the class_eval methods
+/// when the rest of the macro is not ingestible.
+#[test]
+fn leftover_interpolated_association_does_not_expand() {
+    roundhouse::ingest::survey::activate();
+    let app = ingest_app_from_tree(article_with_macro(
+        "app/models/concerns/attach_macro.rb",
+        LEFTOVER_MACRO,
+        "AttachMacro",
+        "attached :spotlight",
+    ))
+    .expect("survey ingest");
+    roundhouse::ingest::survey::drain();
+    let article = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Article")
+        .unwrap();
+    assert!(
+        article.body.iter().any(|item| matches!(
+            item,
+            ModelBodyItem::Unknown { expr, .. }
+                if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "attached")
+        )),
+        "call must stay unexpanded"
+    );
+    let names = instance_names(&app, "Article");
+    assert!(
+        !names.iter().any(|n| n == "spotlight" || n == "spotlight_record"),
+        "must not invent readers: {names:?}"
     );
 }

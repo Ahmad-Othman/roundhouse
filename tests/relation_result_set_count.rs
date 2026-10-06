@@ -18,7 +18,9 @@ fn distinct_and_grouped_count_use_the_result_set_size() {
         .run_ruby(
             r#"
 %w[c c b b a].each { |t| Article.create!(title: t, body: "abcdefghij") }
-# Five rows, three distinct titles.
+# Five rows, three distinct titles. Scalar `#count` on a grouped
+# relation is group cardinality (`count_sql`), not Rails' Hash of
+# group → n.
 n = Article.named.select("title").distinct.count
 raise "distinct count #{n}" unless n == 3
 g = Article.named.group("title").count

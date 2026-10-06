@@ -1,4 +1,5 @@
-//! Load-hook mixin installation is a reported gap, not Markdown support.
+//! Load-hook mixin installation is a reported gap. Overlays are
+//! abstract stems; Writebook-shaped macros are extra coverage only.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,8 +15,14 @@ fn tree(hooks: &str) -> HashMap<PathBuf, Vec<u8>> {
     [
         ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
         ("lib/rails_ext/hooks.rb", hooks),
-        ("app/models/page.rb", "class Page < ApplicationRecord\n  has_markdown :body\nend\n"),
-        ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table :pages do |t|\n    t.string :title\n  end\n  create_table :action_text_markdowns do |t|\n    t.string :record_type\n    t.integer :record_id\n    t.string :name\n    t.text :content\n  end\nend\n"),
+        (
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  labeled :headline\nend\n",
+        ),
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table :articles do |t|\n    t.string :title\n  end\nend\n",
+        ),
     ]
     .into_iter()
     .map(|(p, s)| (PathBuf::from(p), s.as_bytes().to_vec()))
@@ -24,11 +31,9 @@ fn tree(hooks: &str) -> HashMap<PathBuf, Vec<u8>> {
 
 #[test]
 fn direct_includes_name_the_hook_and_source_without_installing_anything() {
-    // First hook is Writebook's installer, verbatim. Later hooks prove
-    // that a literal-name-only recognizer cannot silently skip other shapes.
     let files = tree(
         r#"ActiveSupport.on_load :active_record do
-  include ActionText::HasMarkdown
+  include LabelMacro
 end
 ActiveSupport.on_load(:action_text_markdown) do
   include First, Second
@@ -44,7 +49,7 @@ end
     let messages: Vec<_> = gaps.iter().map(ToString::to_string).collect();
     assert_eq!(messages.len(), 3, "one gap per include: {messages:?}");
     for (hook, include) in [
-        ("active_record", "include ActionText::HasMarkdown"),
+        ("active_record", "include LabelMacro"),
         ("action_text_markdown", "include First, Second"),
         (
             "action_text_markdown",
@@ -63,18 +68,14 @@ end
         );
     }
     assert_eq!(surveyed, strict, "reporting must not change ingested IR");
-    let page = surveyed
+    let article = surveyed
         .models
         .iter()
-        .find(|m| m.name.0.as_str() == "Page")
+        .find(|m| m.name.0.as_str() == "Article")
         .unwrap();
-    assert!(page.body.iter().any(|item| matches!(item,
+    assert!(article.body.iter().any(|item| matches!(item,
         ModelBodyItem::Unknown { expr, .. } if matches!(&*expr.node,
-            ExprNode::Send { method, .. } if method.as_str() == "has_markdown"))));
-    assert!(!surveyed.models.iter().any(|m| matches!(
-        m.name.0.as_str(),
-        "ActionText::Markdown" | "ActionText::RichText"
-    )));
+            ExprNode::Send { method, .. } if method.as_str() == "labeled"))));
     let strict_diags = roundhouse::session::analyze_and_lower(&mut strict);
     let survey_diags = roundhouse::session::analyze_and_lower(&mut surveyed);
     assert_eq!(
@@ -90,31 +91,21 @@ end
     assert_eq!(survey_files, strict_files, "no emitted behavior changed");
     assert_eq!(survey_emit, strict_emit);
     assert!(
-        survey_emit
-            .iter()
-            .any(|d| d.message.contains("has_markdown")),
+        survey_emit.iter().any(|d| d.message.contains("labeled")),
         "declaration warning must remain: {survey_emit:?}"
     );
-    let page = survey_files
+    let article = survey_files
         .iter()
-        .find(|f| f.path.ends_with("page.rb"))
+        .find(|f| f.path.ends_with("article.rb"))
         .unwrap();
-    for method in [
-        "body",
-        "body?",
-        "body=",
-        "markdown_body",
-        "build_markdown_body",
-        "with_markdown_body",
-        "with_markdown_body_and_embeds",
-    ] {
+    for method in ["headline", "headline?", "headline=", "build_headline", "with_headline"] {
         assert!(
-            !page.content.lines().any(|line| line
+            !article.content.lines().any(|line| line
                 .trim_start()
                 .starts_with(&format!("def {method}("))
                 || line.trim() == format!("def {method}")),
             "not supported: {method}\n{}",
-            page.content
+            article.content
         );
     }
 }

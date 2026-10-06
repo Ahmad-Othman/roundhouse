@@ -87,6 +87,10 @@ pub(super) fn expand(
         };
         ingest_rewritten_body(&rewritten, owner, file, &mut methods, &mut items)?;
     }
+    // Any leftover Unknown (interpolated association name, `scope`,
+    // non-symbol kwarg) declines the *entire* expansion, including
+    // already-rewritten class_eval methods. That is fail-closed, not
+    // a support claim — pin with a negative overlay.
     if items
         .iter()
         .any(|item| matches!(item, ModelBodyItem::Unknown { .. }))

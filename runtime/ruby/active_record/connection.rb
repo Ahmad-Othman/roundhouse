@@ -410,12 +410,7 @@ module ActiveRecord
     end
 
     def self.paginate(num = nil, page: nil, per_page: nil)
-      rel = ActiveRecord::Relation.new(self).page(page.nil? ? num : page)
-      if per_page.nil?
-        rel
-      else
-        rel.per(per_page)
-      end
+      ActiveRecord::Relation.new(self).paginate(num, page: page, per_page: per_page)
     end
 
     # Rails-shape `first` fallback, same story as `where`/`all` above:
