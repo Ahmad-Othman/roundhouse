@@ -51,9 +51,13 @@ module Db
   @pool_size = 0
   @mutex   = nil
   @cv      = nil
-  # THE WRITE PERMIT: one writer at a time per process, handed out by a
-  # Mutex instead of by SQLite's busy handler. See `exec`.
-  @write_lock = Mutex.new
+  # THE WRITE PERMIT: one writer at a time per process, handed out here
+  # instead of by SQLite's busy handler. See `acquire_permit`.
+  @permit_lock  = Mutex.new
+  @permit_cv    = ConditionVariable.new
+  @permit_owner = nil
+  WRITE_PERMIT_TIMEOUT = 5.0
+  @write_permit_timeout = WRITE_PERMIT_TIMEOUT
   # Background WAL checkpointing: asked for by the server boot
   # (`checkpoint_in_background!`), started per process on the first
   # lease. See `start_checkpointer`.
@@ -212,18 +216,19 @@ module Db
     begin
       yield
     ensure
-      # A transaction the request opened and never closed — only a
-      # non-StandardError (an Interrupt, a Timeout) gets past
-      # `transaction`'s own ROLLBACK — would otherwise hand the next
-      # request a connection mid-transaction and keep the write permit
-      # forever, stopping every writer in the process.
-      release_abandoned_write(h)
-      # Likewise a snapshot bracket left open: the state is the
-      # connection's, and the next lease must not inherit it.
+      # A snapshot bracket left open: the state is the connection's,
+      # and the next lease must not inherit it. Closed FIRST, so the
+      # check below sees only a transaction the request itself began.
       if h.instance_variable_get(:@rh_snapshot_depth).to_i > 0
         h.instance_variable_set(:@rh_snapshot_depth, 1)
         read_snapshot_end
       end
+      # A transaction the request opened and never closed — only a
+      # non-StandardError (an Interrupt, a Timeout) gets past
+      # `transaction`'s own ROLLBACK — would otherwise hand the next
+      # request a connection mid-transaction and keep the write permit,
+      # stopping every writer in the process.
+      release_abandoned_write(h)
       Fiber[:db_handle] = nil
       @mutex.synchronize do
         @pool.checkin(h)
@@ -261,26 +266,36 @@ module Db
     # End the snapshot first; the next read opens a fresh one that sees
     # this write.
     end_snapshot(conn)
-    if @write_lock.owned?
+    if permit_owned?
       # Inside this fiber's own transaction: the permit is already held.
       begin
         run_exec(conn, sql)
       ensure
-        @write_lock.unlock if sql == "ROLLBACK" || (sql == "COMMIT" && !conn.transaction_active?)
+        release_permit if sql == "ROLLBACK" || (sql == "COMMIT" && !conn.transaction_active?)
       end
+    elsif conn.transaction_active?
+      # Inside a transaction that began WITHOUT the permit (its wait
+      # timed out — see `acquire_permit`): SQLite's lock is already
+      # held, so there is nothing to queue for.
+      run_exec(conn, sql)
     elsif sql == "BEGIN"
       # IMMEDIATE, as Rails 8's SQLite adapter begins: the write lock is
       # taken at BEGIN, not at the first write, so a transaction never
       # fails part way through upgrading a stale read.
-      @write_lock.lock
+      got = acquire_permit
       begin
         run_exec(conn, "BEGIN IMMEDIATE")
       rescue Exception
-        @write_lock.unlock
+        release_permit if got
         raise
       end
     else
-      @write_lock.synchronize { run_exec(conn, sql) }
+      got = acquire_permit
+      begin
+        run_exec(conn, sql)
+      ensure
+        release_permit if got
+      end
     end
   end
 
@@ -297,22 +312,58 @@ module Db
   # gets SQLITE_BUSY and the busy handler retries on a timer, so writers
   # race: whoever retries at the right moment wins, and an unlucky one
   # loses again and again (the post-message tail). `exec` instead takes
-  # `@write_lock` — an autocommit write for one statement, a transaction
-  # from BEGIN to COMMIT/ROLLBACK — so writers in this process queue on a
-  # Mutex and go in turn. The SQL still runs on the caller's own pooled
-  # connection; only the permission is shared. A writer in another
-  # process still meets SQLite's lock, and waits in `busy_handler_timeout`.
+  # the permit — for one statement in autocommit, or from BEGIN to
+  # COMMIT/ROLLBACK — so writers in this process queue and go in turn.
+  # The SQL still runs on the caller's own pooled connection; only the
+  # permission is shared. A writer in another process still meets
+  # SQLite's lock, and waits in `busy_handler_timeout`.
   #
-  # Mutexes are fiber-owned, which is what makes `owned?` the right
-  # "inside my own transaction" test: BEGIN and COMMIT run on the same
-  # fiber, and a different request on the same thread is a different
-  # fiber.
+  # The owner is a FIBER: BEGIN and COMMIT run on the same fiber, and a
+  # different request on the same thread (Falcon) is a different fiber.
+  #
+  # THE WAIT IS BOUNDED. A transaction that starts a thread which writes
+  # and then joins it would otherwise wait on itself forever. Before the
+  # permit existed that case waited out SQLite's busy timeout and raised
+  # SQLITE_BUSY; a hang is worse than that error. So after
+  # `@write_permit_timeout` seconds a writer stops queueing and goes
+  # straight to SQLite, which is exactly the old behaviour: it waits in
+  # the busy handler and, if the lock never frees, raises BUSY.
+  def self.acquire_permit
+    fiber = Fiber.current
+    @permit_lock.synchronize do
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @write_permit_timeout
+      # A dead owner (a killed thread) never releases; a Mutex would
+      # have been freed with it, so this permit treats it as free too.
+      until @permit_owner.nil? || !@permit_owner.alive?
+        remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        return false if remaining <= 0
+        @permit_cv.wait(@permit_lock, remaining)
+      end
+      @permit_owner = fiber
+    end
+    true
+  end
+
+  def self.release_permit
+    @permit_lock.synchronize do
+      @permit_owner = nil
+      @permit_cv.signal
+    end
+  end
+
+  # Read without the lock: only the owning fiber ever sets the owner to
+  # itself or clears it, so the answer for the CURRENT fiber is exact.
+  def self.permit_owned?
+    @permit_owner.equal?(Fiber.current)
+  end
+
   def self.release_abandoned_write(conn)
-    return unless @write_lock.owned?
+    owned = permit_owned?
+    return unless owned || conn.transaction_active?
     begin
       conn.execute("ROLLBACK") if conn.transaction_active?
     ensure
-      @write_lock.unlock
+      release_permit if owned
     end
   end
 
@@ -433,7 +484,13 @@ module Db
         row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)")[0]
         log_frames = row.nil? ? 0 : row[1].to_i
         if log_frames >= CHECKPOINT_RESTART_FRAMES
-          @write_lock.synchronize { conn.execute("PRAGMA wal_checkpoint(RESTART)") }
+          if acquire_permit
+            begin
+              conn.execute("PRAGMA wal_checkpoint(RESTART)")
+            ensure
+              release_permit
+            end
+          end
         end
       rescue StandardError
         # A busy or failed checkpoint is retried on the next tick; the

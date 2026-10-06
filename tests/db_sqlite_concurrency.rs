@@ -206,3 +206,58 @@ check("background checkpoint copied the log (#{before} -> #{File.size(path)})",
 "#,
     );
 }
+
+/// The permit wait is bounded. A transaction that starts a writer
+/// thread and joins it would wait on itself forever; instead the
+/// writer stops queueing after the timeout and goes to SQLite, which
+/// answers exactly as it did before the permit existed: SQLITE_BUSY
+/// once its busy handler gives up. A hang is worse than that error.
+#[test]
+fn a_writer_waiting_on_its_own_transaction_errors_instead_of_hanging() {
+    run(
+        "self_wait",
+        r#"
+Db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+Db.instance_variable_set(:@write_permit_timeout, 0.2)
+Db.instance_variable_get(:@pool).free.each { |c| c.busy_handler_timeout = 100 }
+outcome = nil
+Db.with_connection do
+  Db.exec("BEGIN")
+  Db.exec("INSERT INTO t VALUES (1)")
+  child = Thread.new do
+    Db.with_connection do
+      begin
+        Db.exec("INSERT INTO t VALUES (2)")
+        outcome = :wrote
+      rescue SQLite3::BusyException
+        outcome = :busy
+      end
+    end
+  end
+  check("the inner writer finished rather than hanging", !child.join(5).nil?)
+  Db.exec("COMMIT")
+end
+check("the inner writer met SQLITE_BUSY, as before the permit (#{outcome.inspect})", outcome == :busy)
+check("the outer transaction committed", count("t") == 1)
+check("the permit is free again", Db.acquire_permit && (Db.release_permit; true))
+"#,
+    );
+}
+
+/// A permit held by a thread that died (killed, not unwound) is free:
+/// the Mutex it replaced was released with its owner.
+#[test]
+fn a_permit_held_by_a_dead_thread_is_free() {
+    run(
+        "dead_owner",
+        r#"
+Db.instance_variable_set(:@write_permit_timeout, 5)
+Thread.new { Db.acquire_permit }.join
+started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+check("acquired", Db.acquire_permit)
+Db.release_permit
+check("without waiting out the timeout",
+      Process.clock_gettime(Process::CLOCK_MONOTONIC) - started < 1)
+"#,
+    );
+}
