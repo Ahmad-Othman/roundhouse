@@ -1233,14 +1233,26 @@ module ActiveRecord
     # distinct projection counts distinct values per group (#343).
     def group_count
       key = @groups.join(", ")
-      agg = if @distinct
-        "COUNT(DISTINCT #{distinct_count_columns}) AS n"
+      # DISTINCT uses a subquery so a multi-column / aliased `select`
+      # never lands inside SQLite's one-expression COUNT(DISTINCT …).
+      # Non-distinct keeps `@select_sql` in the projection so HAVING
+      # can name selected aliases, matching `count_sql`.
+      if @distinct
+        inner = append_join_where(
+          "#{cte_prefix}SELECT DISTINCT #{distinct_count_columns}, #{key} AS k FROM #{from_source}"
+        )
+        sql = "SELECT k, COUNT(*) AS n FROM (#{inner}) AS __rh_gc GROUP BY k"
+        sql = "#{sql} HAVING #{@havings.join(" AND ")}" if @havings.length > 0
       else
-        "COUNT(*) AS n"
+        proj = if @select_sql.nil?
+          "#{key} AS k, COUNT(*) AS n"
+        else
+          "#{@select_sql}, #{key} AS k, COUNT(*) AS n"
+        end
+        sql = append_group_having(
+          append_join_where("#{cte_prefix}SELECT #{proj} FROM #{from_source}")
+        )
       end
-      sql = append_group_having(
-        append_join_where("#{cte_prefix}SELECT #{key} AS k, #{agg} FROM #{from_source}")
-      )
       h = {}
       rows = ActiveRecord.adapter.select_rows(sql)
       rows.each { |row| h[row["k"]] = row["n"].to_i }

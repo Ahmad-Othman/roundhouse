@@ -30,6 +30,14 @@ const METHODS: &str = r#"
     rel = Article.group(:title)
     rel.count
   end
+
+  def self.popular_via_alias
+    Article.select("COUNT(*) AS total").group(:title).having("total > 1").count
+  end
+
+  def self.distinct_title_id_per_group
+    Article.select(:title, :id).group(:title).distinct.count
+  end
 "#;
 
 fn overlay() -> emit_and_run::Overlay {
@@ -105,6 +113,35 @@ got = Article.grouped_then_scalar_count
 raise "grouped scalar: #{{got.inspect}}" unless got == 2
 raise "hash" if got.is_a?(Hash)
 puts "grouped scalar count passed"
+"#,
+        seed = seed_articles()
+    );
+    overlay().run_ruby(&script).assert_passes();
+}
+
+#[test]
+fn grouped_count_having_on_selected_alias() {
+    let script = format!(
+        r#"
+{seed}
+got = Article.popular_via_alias
+raise "alias having: #{{got.inspect}}" unless got == {{ "Hello world" => 2 }}
+puts "alias having passed"
+"#,
+        seed = seed_articles()
+    );
+    overlay().run_ruby(&script).assert_passes();
+}
+
+#[test]
+fn grouped_distinct_count_with_multi_column_select() {
+    let script = format!(
+        r#"
+{seed}
+got = Article.distinct_title_id_per_group
+raise "grouped distinct: #{{got.inspect}}" unless got["Hello world"] == 2 && got["Other title"] == 1
+raise "scalar" if got.is_a?(Integer)
+puts "grouped distinct multi-column passed"
 "#,
         seed = seed_articles()
     );
