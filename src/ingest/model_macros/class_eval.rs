@@ -6,7 +6,7 @@
 //! [`crate::ingest::model::ingest_model_body_items`]. Dynamic
 //! `class_eval` and unknown interpolations stay unexpanded.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::dialect::{MethodDef, ModelBodyItem};
 use crate::ident::ClassId;
@@ -28,6 +28,13 @@ pub(super) fn expand(
     for (k, v) in &bindings {
         idents.insert(k.as_str().to_string(), symbol(v)?.as_str().to_string());
     }
+    // Optional non-symbol kwargs are omitted from `bindings`. A later
+    // receiverless read of that name must decline, not drop the option.
+    let param_names: HashSet<String> = def
+        .params
+        .iter()
+        .map(|p| p.name.as_str().to_string())
+        .collect();
     let source = def
         .name_span
         .file
@@ -83,7 +90,7 @@ pub(super) fn expand(
     for piece in collect.pieces {
         let rewritten = match piece {
             Piece::ClassEval(template) => template,
-            Piece::Stmt(src) => bind_local_reads(&src, &idents)?,
+            Piece::Stmt(src) => bind_local_reads(&src, &idents, &param_names)?,
         };
         ingest_rewritten_body(&rewritten, owner, file, &mut methods, &mut items)?;
     }
@@ -187,9 +194,15 @@ fn interpolate_string_node(
 /// After `#{param}` has been substituted, remaining local reads of a
 /// bound param become symbol literals (`name` → `:body`). A statement
 /// sliced out of its `def` parses those names as receiverless calls,
-/// which must get the same rewrite. Offset surgery stays in this
-/// module: the orchestrator never sees the source rewrite.
-fn bind_local_reads(src: &str, idents: &HashMap<String, String>) -> Option<String> {
+/// which must get the same rewrite. A `LocalVariableReadNode` of a
+/// bound name is slice-local (block/lambda shadow) and declines.
+/// Offset surgery stays in this module: the orchestrator never sees
+/// the source rewrite.
+fn bind_local_reads(
+    src: &str,
+    idents: &HashMap<String, String>,
+    param_names: &HashSet<String>,
+) -> Option<String> {
     let parsed = ruby_prism::parse(src.as_bytes());
     if parsed.errors().next().is_some() {
         return None;
@@ -197,11 +210,15 @@ fn bind_local_reads(src: &str, idents: &HashMap<String, String>) -> Option<Strin
     struct Locals {
         hits: Vec<(usize, usize, String)>,
         idents: HashMap<String, String>,
+        param_names: HashSet<String>,
+        decline: bool,
     }
     impl Locals {
         fn record(&mut self, name: String, loc: ruby_prism::Location<'_>) {
             if self.idents.contains_key(&name) {
                 self.hits.push((loc.start_offset(), loc.end_offset(), name));
+            } else if self.param_names.contains(&name) {
+                self.decline = true;
             }
         }
     }
@@ -210,10 +227,12 @@ fn bind_local_reads(src: &str, idents: &HashMap<String, String>) -> Option<Strin
             &mut self,
             node: &ruby_prism::LocalVariableReadNode<'pr>,
         ) {
-            self.record(
-                String::from_utf8_lossy(node.name().as_slice()).into_owned(),
-                node.location(),
-            );
+            // Standalone-slice local reads are bound inside the slice
+            // (block/lambda param) and shadow the macro parameter.
+            let name = String::from_utf8_lossy(node.name().as_slice()).into_owned();
+            if self.idents.contains_key(&name) {
+                self.decline = true;
+            }
         }
         fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
             if node.receiver().is_none() && node.arguments().is_none() && node.block().is_none() {
@@ -238,8 +257,13 @@ fn bind_local_reads(src: &str, idents: &HashMap<String, String>) -> Option<Strin
     let mut locals = Locals {
         hits: Vec::new(),
         idents: idents.clone(),
+        param_names: param_names.clone(),
+        decline: false,
     };
     ruby_prism::Visit::visit(&mut locals, &parsed.node());
+    if locals.decline {
+        return None;
+    }
     let mut out = src.to_string();
     locals.hits.sort_by_key(|(start, _, _)| *start);
     locals.hits.reverse();

@@ -569,6 +569,102 @@ fn load_hook_leftover_interpolated_association_does_not_expand() {
     );
 }
 
+/// Optional non-symbol kwargs are omitted from the binding set. A
+/// leftover `strict_loading: strict_loading` must decline the whole
+/// expansion rather than ingest `has_one` without that option.
+#[test]
+fn omitted_optional_keyword_read_does_not_expand() {
+    let concern = r#"module TitleMacro
+  extend ActiveSupport::Concern
+  class_methods do
+    def titled(name, strict_loading: false)
+      has_one :spotlight, class_name: "Comment", foreign_key: :article_id, strict_loading: strict_loading
+      class_eval <<-CODE, __FILE__, __LINE__ + 1
+        def #{name}
+          1
+        end
+      CODE
+    end
+  end
+end
+"#;
+    roundhouse::ingest::survey::activate();
+    let app = ingest_app_from_tree(article_with_macro(
+        "app/models/concerns/title_macro.rb",
+        concern,
+        "TitleMacro",
+        "titled :headline",
+    ))
+    .expect("survey ingest");
+    roundhouse::ingest::survey::drain();
+    let article = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Article")
+        .unwrap();
+    assert!(
+        article.body.iter().any(|item| matches!(
+            item,
+            ModelBodyItem::Unknown { expr, .. }
+                if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "titled")
+        )),
+        "omitted keyword read must stay unexpanded"
+    );
+    let names = instance_names(&app, "Article");
+    assert!(
+        !names.iter().any(|n| n == "headline" || n == "spotlight"),
+        "must not invent readers: {names:?}"
+    );
+}
+
+/// A slice-local that shadows a macro parameter (`->(name) { … name }`)
+/// is not the bound symbol. Decline rather than rewrite Ruby's lambda
+/// argument into `:headline`.
+#[test]
+fn shadowed_macro_parameter_does_not_expand() {
+    let concern = r#"module TitleMacro
+  extend ActiveSupport::Concern
+  class_methods do
+    def titled(name)
+      scope :named, ->(name) { where(title: name) }
+      class_eval <<-CODE, __FILE__, __LINE__ + 1
+        def #{name}
+          1
+        end
+      CODE
+    end
+  end
+end
+"#;
+    roundhouse::ingest::survey::activate();
+    let app = ingest_app_from_tree(article_with_macro(
+        "app/models/concerns/title_macro.rb",
+        concern,
+        "TitleMacro",
+        "titled :headline",
+    ))
+    .expect("survey ingest");
+    roundhouse::ingest::survey::drain();
+    let article = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Article")
+        .unwrap();
+    assert!(
+        article.body.iter().any(|item| matches!(
+            item,
+            ModelBodyItem::Unknown { expr, .. }
+                if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "titled")
+        )),
+        "shadowed parameter must stay unexpanded"
+    );
+    let names = instance_names(&app, "Article");
+    assert!(
+        !names.iter().any(|n| n == "headline"),
+        "must not invent readers: {names:?}"
+    );
+}
+
 /// Strict ingest keeps the abort as an error — survey records a gap,
 /// emit-and-run would panic, and we must not drop the diagnostic to
 /// emit a reader without the association.
