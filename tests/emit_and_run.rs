@@ -1296,6 +1296,34 @@ fn date_blog() -> emit_and_run::Overlay {
         .write("app/models/calendar_entry.rb", include_str!("date_columns_model.rb"))
 }
 
+/// ActiveSupport's Date calendar extensions and `Date.current`, which
+/// reads today in the app's zone rather than the host's.
+#[test]
+fn date_calendar_extensions_and_current_run() {
+    date_blog()
+        .edit(
+            "app/models/calendar_entry.rb",
+            "\nend\n",
+            "\n  def month_span\n    [due_on.beginning_of_month, due_on.end_of_month]\n  end\n\n  def day_edges\n    [due_on.beginning_of_day, due_on.end_of_day]\n  end\n\n  def self.current_day\n    Date.current\n  end\nend\n",
+        )
+        .run_ruby(r#"
+entry = CalendarEntry.create!(due_on: Date.new(2024, 2, 10))
+first, last = entry.month_span
+raise first.inspect unless first == Date.new(2024, 2, 1)
+raise last.inspect unless last == Date.new(2024, 2, 29)
+ActiveSupport.use_zone("Asia/Tokyo") do
+  b, e = entry.day_edges
+  raise b.inspect unless [b.year, b.month, b.day, b.hour, b.min, b.sec] == [2024, 2, 10, 0, 0, 0]
+  raise e.inspect unless [e.year, e.month, e.day, e.hour, e.min, e.sec] == [2024, 2, 10, 23, 59, 59]
+  raise b.utc_offset.inspect unless b.utc_offset == 9 * 3600
+end
+east = ActiveSupport.use_zone("Pacific/Kiritimati") { CalendarEntry.current_day }
+west = ActiveSupport.use_zone("Pacific/Pago_Pago") { CalendarEntry.current_day }
+raise [east, west].inspect unless east.is_a?(Date) && east > west
+"#)
+        .assert_passes();
+}
+
 fn date_json_blog() -> emit_and_run::Overlay {
     date_blog()
         .edit("app/models/calendar_entry.rb", "\nend\n", "\n  def as_json(options = {})\n    attrs = [:due_on, :observed_at]\n    json = super(only: attrs)\n    json\n  end\nend\n")

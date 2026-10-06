@@ -43,6 +43,28 @@ module ActiveSupport
     date.iso8601
   end
 
+  # Not `Date.today`: that reads the host clock, ignoring the app's zone and `travel`.
+  def self.current_date
+    now = ActiveSupport.now
+    Date.new(now.year, now.month, now.day)
+  end
+
+  def self.date_beginning_of_month(date)
+    Date.new(date.year, date.month, 1)
+  end
+
+  def self.date_end_of_month(date)
+    Date.new(date.year, date.month, -1)
+  end
+
+  def self.date_beginning_of_day(date)
+    ActiveSupport.local_time(date.year, date.month, date.day, 0, 0, 0, 0)
+  end
+
+  def self.date_end_of_day(date)
+    ActiveSupport.local_time(date.year, date.month, date.day, 23, 59, 59, 999_999_999)
+  end
+
   # Rails zone name → IANA identifier (the ActiveSupport::TimeZone::
   # MAPPING subset corpora have needed; extend as apps demand). Names
   # not listed pass through unchanged — a valid IANA string works

@@ -47,6 +47,25 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
         expr.ty = Some(Ty::Time);
         return;
     }
+    // Not the Time helpers: they take a Time, and a Date-taking function only loads where the app uses Date.
+    if is_date_const(r) && method.as_str() == "current" && args.is_empty() {
+        *expr.node = active_support_call("current_date", vec![]);
+        expr.ty = Some(Ty::Date);
+        return;
+    }
+    if is_date_value(r) && args.is_empty() {
+        let (target, ty) = match method.as_str() {
+            "beginning_of_month" | "at_beginning_of_month" => ("date_beginning_of_month", Ty::Date),
+            "end_of_month" | "at_end_of_month" => ("date_end_of_month", Ty::Date),
+            "beginning_of_day" | "at_beginning_of_day" | "midnight" | "at_midnight" => ("date_beginning_of_day", Ty::Time),
+            "end_of_day" | "at_end_of_day" => ("date_end_of_day", Ty::Time),
+            _ => return,
+        };
+        let grounded = active_support_call(target, vec![r.clone()]);
+        *expr.node = grounded;
+        expr.ty = Some(ty);
+        return;
+    }
     if !is_time_value(r) {
         return;
     }
@@ -185,6 +204,25 @@ fn is_time_zone_send(e: &Expr) -> bool {
     matches!(&*e.node,
         ExprNode::Send { recv: Some(z), method, args, block: None, .. }
             if method.as_str() == "zone" && args.is_empty() && is_time_const(z))
+}
+
+fn is_date_const(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Const { path } if path.last().is_some_and(|s| s.as_str() == "Date")
+        && path.iter().rev().skip(1).all(|s| s.as_str().is_empty()))
+}
+
+fn is_date_value(e: &Expr) -> bool {
+    if is_date_const(e) {
+        return false;
+    }
+    match &e.ty {
+        Some(Ty::Union { variants }) => {
+            variants.iter().any(|v| matches!(v, Ty::Date))
+                && variants.iter().all(|v| matches!(v, Ty::Date | Ty::Nil))
+        }
+        Some(t) => matches!(t, Ty::Date),
+        None => false,
+    }
 }
 
 // Not every `Time`-typed receiver: the `Time` constant and `Time.zone` flatten onto the same type as a Time value.
