@@ -839,10 +839,13 @@ fn build_params_object(
     with_ty(Expr::new(span, ExprNode::Seq { exprs: stmts }), owner_ty)
 }
 
-pub fn helper_spec_map<'a>(
-    actions: &[crate::dialect::Action],
+pub fn helper_spec_map<'a, 'b, I>(
+    actions: I,
     specs: &'a ParamsSpecs,
-) -> BTreeMap<Symbol, &'a ParamsSpec> {
+) -> BTreeMap<Symbol, &'a ParamsSpec>
+where
+    I: IntoIterator<Item = &'b crate::dialect::Action>,
+{
     let mut out = BTreeMap::new();
     for a in actions {
         if !a.name.as_str().ends_with("_params") {

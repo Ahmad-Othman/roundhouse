@@ -66,8 +66,8 @@ use rubydex::model::ids::DeclarationId;
 use crate::adapter::{DatabaseAdapter, SqliteAdapter};
 use crate::App;
 use crate::dialect::{
-    Action, Controller, ControllerBodyItem, Filter, FilterKind, LayoutDecl, ModelBodyItem,
-    RenderTarget,
+    Action, Controller, ControllerBodyItem, Filter, FilterKind, LayoutDecl, MethodDef,
+    ModelBodyItem, RenderTarget,
 };
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
@@ -866,9 +866,36 @@ impl Analyzer {
         }
         let existing_view_names: std::collections::HashSet<Symbol> =
             app.views.iter().map(|v| v.name.clone()).collect();
+        // Module method tables and controller parent links are invariant
+        // across fixpoint rounds — clone once instead of rebuilding them
+        // on every `run_typing_passes` (Campfire: 1 initial + 8 rounds).
+        let module_methods: HashMap<ClassId, Vec<MethodDef>> = app
+            .library_classes
+            .iter()
+            .filter(|lc| lc.is_module)
+            .map(|lc| (lc.name.clone(), lc.methods.clone()))
+            .collect();
+        let module_includes: HashMap<ClassId, Vec<ClassId>> = app
+            .library_classes
+            .iter()
+            .filter(|lc| lc.is_module)
+            .map(|lc| (lc.name.clone(), lc.includes.clone()))
+            .collect();
+        let parent_link_by_name: HashMap<ClassId, Option<ClassId>> = app
+            .controllers
+            .iter()
+            .map(|c| (c.name.clone(), c.parent.clone()))
+            .collect();
 
         crate::timings::phase("typing passes (initial)", || {
-            self.run_typing_passes(app, &dynamic_render_ivars, &existing_view_names)
+            self.run_typing_passes(
+                app,
+                &dynamic_render_ivars,
+                &existing_view_names,
+                &module_methods,
+                &module_includes,
+                &parent_link_by_name,
+            )
         });
 
         // Whole-program fixpoint: harvest returns + unify params, re-type,
@@ -895,7 +922,14 @@ impl Analyzer {
             // BodyTyper means a second pass simply resolves dispatches
             // and Var bindings the first pass couldn't.
             crate::timings::phase(format_args!("round {round}: typing passes"), || {
-                self.run_typing_passes(app, &dynamic_render_ivars, &existing_view_names)
+                self.run_typing_passes(
+                    app,
+                    &dynamic_render_ivars,
+                    &existing_view_names,
+                    &module_methods,
+                    &module_includes,
+                    &parent_link_by_name,
+                )
             });
         }
 
@@ -1370,11 +1404,16 @@ impl Analyzer {
         app: &mut App,
         dynamic_render_ivars: &std::collections::HashSet<Symbol>,
         existing_view_names: &std::collections::HashSet<Symbol>,
+        module_methods: &HashMap<ClassId, Vec<MethodDef>>,
+        module_includes: &HashMap<ClassId, Vec<ClassId>>,
+        parent_link_by_name: &HashMap<ClassId, Option<ClassId>>,
     ) {
         // Source-backed constant reads use Rubydex declaration IDs.
         // A bare-name fallback remains for generated expressions without
         // a Ruby source reference.
-        let (fallback, resolved_values) = self.build_constant_registry(app);
+        let (fallback, resolved_values) = crate::timings::phase("typing: constants", || {
+            self.build_constant_registry(app)
+        });
         self.typed_constants = resolved_values;
         let global_constants = body::ConstScope::global(fallback);
         // Controller→view ivar channel: as each action is analyzed, we harvest
@@ -1447,38 +1486,15 @@ impl Analyzer {
             layout: LayoutDecl,
         }
         let mut meta_by_name: HashMap<ClassId, ControllerMeta> = HashMap::new();
-        // Snapshot parent links separately so Phase B can walk
-        // arbitrary-depth chains without re-borrowing `app.controllers`
-        // (which is mutably borrowed inside the analysis loops).
-        let parent_link_by_name: HashMap<ClassId, Option<ClassId>> = app
-            .controllers
-            .iter()
-            .map(|c| (c.name.clone(), c.parent.clone()))
-            .collect();
-
-        // Concern-module metadata for the mixed-in expansion inside
-        // Phase A: each module's method defs (cloned so their bodies can
-        // be typed against each includer's own self) and its `include`s
-        // (concerns include concerns; the expansion chases the closure).
-        // Filters captured from `included do` blocks ride on
-        // `App::concern_filters`.
-        let module_methods: HashMap<ClassId, Vec<crate::dialect::MethodDef>> = app
-            .library_classes
-            .iter()
-            .filter(|lc| lc.is_module)
-            .map(|lc| (lc.name.clone(), lc.methods.clone()))
-            .collect();
-        let module_includes: HashMap<ClassId, Vec<ClassId>> = app
-            .library_classes
-            .iter()
-            .filter(|lc| lc.is_module)
-            .map(|lc| (lc.name.clone(), lc.includes.clone()))
-            .collect();
+        // Parent links and concern-module tables are cloned once in
+        // `analyze` and reused every round — they do not depend on the
+        // refined registry.
 
         self.analyze_class_configuration(&mut app.controllers);
 
         // ── Phase A: type Unknown body items + every action body
         // ── once per controller, with no parent inheritance.
+        let _typing_controllers_a = crate::timings::begin("typing: controllers A");
         for controller in &mut app.controllers {
             // Phase 0: type the controller's `Unknown` body items so
             // in-class constants (`COMMENTS_PER_PAGE = 20`,
@@ -1683,6 +1699,7 @@ impl Analyzer {
                 },
             );
         }
+        drop(_typing_controllers_a);
 
         // Controller→layout-view ivar channel: every action that
         // renders also flows its ivars into whatever layout wraps it
@@ -1723,6 +1740,7 @@ impl Analyzer {
         // Action bindings are merged with NEAREST parent first so the
         // closest definition wins on name conflicts (mirrors Ruby
         // method-resolution order).
+        let _typing_controllers_b = crate::timings::begin("typing: controllers B");
         for controller in &mut app.controllers {
             let ctrl_name = controller.name.clone();
             let Some(meta) = meta_by_name.get(&ctrl_name) else { continue };
@@ -1843,15 +1861,16 @@ impl Analyzer {
             // Phase-B refinement layer — it exists only to give
             // `collect_transitive_filter_ivars` a body to resolve a
             // filter target's own receiverless calls into, immediately
-            // below.
-            let mut chained_bodies: HashMap<Symbol, Expr> = HashMap::new();
+            // below. Borrowed from `action_bodies` so we do not clone
+            // every ancestor filter-target tree per controller per round.
+            let mut chained_bodies: HashMap<Symbol, &Expr> = HashMap::new();
             for (_, ancestor) in ancestors.iter().rev() {
                 for (name, body) in &ancestor.action_bodies {
-                    chained_bodies.insert(name.clone(), body.clone());
+                    chained_bodies.insert(name.clone(), body);
                 }
             }
             for (name, body) in &meta.action_bodies {
-                chained_bodies.insert(name.clone(), body.clone());
+                chained_bodies.insert(name.clone(), body);
             }
 
             // Transitive filter-target ivar writes: a Before/Around
@@ -2391,6 +2410,7 @@ impl Analyzer {
             }
 
         }
+        drop(_typing_controllers_b);
         // Flush Phase B's refinements. Later rounds of the whole-program
         // fixpoint read them back through `layer` above, which is what
         // carries a parent's refined binding down to a subclass.
@@ -2424,6 +2444,7 @@ impl Analyzer {
         // the controller's own binding still wins wherever it has one, and
         // only names the includer lacks are filled from the concern.
         if !app.concern_spliced_actions.is_empty() {
+            let _typing_concerns = crate::timings::begin("typing: concern splice");
             let concern_env =
                 concern_ivar_env_of(app, &controller_ivar_env, &module_includes);
             let origins = app.concern_spliced_actions.clone();
@@ -2483,6 +2504,7 @@ impl Analyzer {
                 }
             }
         }
+        let _typing_models = crate::timings::begin("typing: models");
         for model in &mut app.models {
             // Seed class ivars for the body-typer. Three shapes in play:
             // 1. `@attributes` — the legacy Hash-storage access path
@@ -2621,6 +2643,7 @@ impl Analyzer {
                 }
             }
         }
+        drop(_typing_models);
 
         // Library classes (non-model classes under app/models/): mirror
         // the per-model body typing pass on a smaller surface — no
@@ -2724,6 +2747,7 @@ impl Analyzer {
         let mailer_with_params = harvest_mailer_with_params(app, &mailer_names);
         let mut mailer_params_by_view: HashMap<Symbol, Ty> = HashMap::new();
 
+        let _typing_library = crate::timings::begin("typing: library");
         for lc in &mut app.library_classes {
             if let Some(row) = mailer_with_params.get(&lc.name) {
                 self.classes
@@ -2887,6 +2911,7 @@ impl Analyzer {
                 }
             }
         }
+        drop(_typing_library);
 
         // Partial-locals channel: we need action/top-level views analyzed first
         // so their expression types are known at each `render` call site. We
@@ -2915,6 +2940,7 @@ impl Analyzer {
         // Phase 3a: non-partial views (action views + layouts). Analyze with
         // the controller→view ivar seed, then walk the body to record every
         // `render` call's effect on partial_locals_by_name.
+        let _typing_views = crate::timings::begin("typing: views");
         for view in &mut app.views {
             if is_partial_view_name(&view.name) {
                 continue;
@@ -3169,6 +3195,7 @@ impl Analyzer {
             self.body_typer().analyze_expr(expr, &ctx);
             let _ = self.collect_effects(expr, &ctx);
         }
+        drop(_typing_views);
     }
 
 
@@ -5105,7 +5132,7 @@ const MAX_FILTER_CALL_DEPTH: usize = 4;
 /// the backstop for a long-but-non-cyclic chain.
 fn collect_transitive_filter_ivars(
     expr: &Expr,
-    bodies: &HashMap<Symbol, Expr>,
+    bodies: &HashMap<Symbol, &Expr>,
     depth: usize,
     visited: &mut BTreeSet<Symbol>,
     own: bool,

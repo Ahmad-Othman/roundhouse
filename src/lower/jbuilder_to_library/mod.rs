@@ -176,7 +176,21 @@ pub fn jbuilder_signature_classes(views: &[View], app: &App) -> Vec<LibraryClass
     views
         .iter()
         .filter(|v| v.jbuilder && !v.analysis_only)
-        .map(|v| build_library_class(v, app, /*type_body=*/ false))
+        .map(|v| {
+            let (module_id, method) = jbuilder_signature_method(v, app);
+            LibraryClass {
+                name: module_id,
+                is_module: true,
+                parent: None,
+                includes: Vec::new(),
+                methods: vec![method],
+                nullable_columns: Vec::new(),
+                origin: None,
+                constants: Vec::new(),
+                unknown_calls: Vec::new(),
+                class_ivar_initializers: Vec::new(),
+            }
+        })
         .collect()
 }
 
@@ -190,7 +204,84 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     let (dir, base) = split_view_name(view.name.as_str());
     let stem = base.trim_start_matches('_');
     let is_partial = base.starts_with('_');
+    let (module_id, mut method, arg_name, _extra_params, known_models) =
+        jbuilder_method_parts(view, app, dir, stem, is_partial);
 
+    // Rewrite `@ivar` → bare `ivar` so the inferred arg / extras
+    // read as plain locals. Mirrors the ERB lowerer.
+    let rewritten = rewrite_ivars_to_locals(&view.body);
+
+    let arg_columns = if arg_name.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        columns_for_arg(&arg_name, dir, is_partial, stem, app)
+    };
+    let ctx = Ctx {
+        resource_dir: dir.to_string(),
+        accumulator: "io".to_string(),
+        arg_name: arg_name.clone(),
+        arg_columns,
+        direct_helpers: app
+            .routes
+            .direct_helpers
+            .iter()
+            .map(|h| h.name.as_str().to_string())
+            .collect(),
+        models: known_models.iter().cloned().collect(),
+        temps: Default::default(),
+    };
+
+    let mut body_stmts: Vec<Expr> = Vec::new();
+    body_stmts.push(assign_accumulator_string_new(&ctx.accumulator));
+    body_stmts.extend(walk_template(&rewritten, &ctx));
+    let mut result = var_ref(Symbol::from(ctx.accumulator.as_str()));
+    result.hint = Some(IrHint::StringBuilderResult);
+    body_stmts.push(result);
+
+    let mut body = seq(body_stmts);
+    // File-grain catch-all: whatever the walk-level stamps didn't reach
+    // (`io = String.new`, the `{`/`}` wrappers, the trailing `io`)
+    // attributes to the template as a whole — same convention as the
+    // ERB lowerer.
+    body.inherit_span(view.body.span);
+    method.body = body;
+
+    if type_body {
+        type_method_body_solo(&mut method);
+    }
+
+    LibraryClass {
+        name: module_id,
+        is_module: true,
+        parent: None,
+        includes: Vec::new(),
+        methods: vec![method],
+        nullable_columns: Vec::new(),
+        origin: None,
+        constants: Vec::new(),
+        unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
+    }
+}
+
+fn jbuilder_signature_method(view: &View, app: &App) -> (ClassId, MethodDef) {
+    let (dir, base) = split_view_name(view.name.as_str());
+    let stem = base.trim_start_matches('_');
+    let is_partial = base.starts_with('_');
+    let (module_id, method, _, _, _) = jbuilder_method_parts(view, app, dir, stem, is_partial);
+    (module_id, method)
+}
+
+/// Params + signature for a jbuilder template. The controller lowerer
+/// only needs this shape; `build_library_class` then walks the template
+/// into `method.body`.
+fn jbuilder_method_parts(
+    view: &View,
+    app: &App,
+    dir: &str,
+    stem: &str,
+    is_partial: bool,
+) -> (ClassId, MethodDef, String, Vec<String>, Vec<String>) {
     let module_id = view_module_id(dir);
     let method_name = Symbol::from(format!("{stem}_json"));
 
@@ -200,10 +291,6 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         .map(|m| m.name.0.as_str().to_string())
         .collect();
     let arg_name = infer_view_arg(stem, dir, is_partial, &known_models);
-
-    // Rewrite `@ivar` → bare `ivar` so the inferred arg / extras
-    // read as plain locals. Mirrors the ERB lowerer.
-    let rewritten = rewrite_ivars_to_locals(&view.body);
 
     // The IVARS THIS TEMPLATE READS decide an action view's parameters,
     // and the NAME CONVENTION is only the fallback.
@@ -270,41 +357,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         crate::lower::view_to_library::build_view_signature_from(&typed, &extra_params)
     };
 
-    let arg_columns = if arg_name.is_empty() {
-        std::collections::HashMap::new()
-    } else {
-        columns_for_arg(&arg_name, dir, is_partial, stem, app)
-    };
-    let ctx = Ctx {
-        resource_dir: dir.to_string(),
-        accumulator: "io".to_string(),
-        arg_name: arg_name.clone(),
-        arg_columns,
-        direct_helpers: app
-            .routes
-            .direct_helpers
-            .iter()
-            .map(|h| h.name.as_str().to_string())
-            .collect(),
-        models: known_models.iter().cloned().collect(),
-        temps: Default::default(),
-    };
-
-    let mut body_stmts: Vec<Expr> = Vec::new();
-    body_stmts.push(assign_accumulator_string_new(&ctx.accumulator));
-    body_stmts.extend(walk_template(&rewritten, &ctx));
-    let mut result = var_ref(Symbol::from(ctx.accumulator.as_str()));
-    result.hint = Some(IrHint::StringBuilderResult);
-    body_stmts.push(result);
-
-    let mut body = seq(body_stmts);
-    // File-grain catch-all: whatever the walk-level stamps didn't reach
-    // (`io = String.new`, the `{`/`}` wrappers, the trailing `io`)
-    // attributes to the template as a whole — same convention as the
-    // ERB lowerer.
-    body.inherit_span(view.body.span);
-
-    let mut method = MethodDef {
+    let method = MethodDef {
         visibility: crate::dialect::MethodVisibility::Public,
         unsupported_formals: None,
         has_anonymous_block: false,
@@ -312,32 +365,16 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         name: method_name,
         receiver: MethodReceiver::Class,
         params,
-        body,
+        body: seq(Vec::new()),
         signature,
         effects: EffectSet::default(),
         enclosing_class: Some(module_id.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
-            mutates_self: false,
-            block_param: None,
+        mutates_self: false,
+        block_param: None,
     };
-
-    if type_body {
-        type_method_body_solo(&mut method);
-    }
-
-    LibraryClass {
-        name: module_id,
-        is_module: true,
-        parent: None,
-        includes: Vec::new(),
-        methods: vec![method],
-        nullable_columns: Vec::new(),
-        origin: None,
-        constants: Vec::new(),
-        unknown_calls: Vec::new(),
-        class_ivar_initializers: Vec::new(),
-    }
+    (module_id, method, arg_name, extra_params, known_models)
 }
 
 fn type_method_body_solo(method: &mut MethodDef) {

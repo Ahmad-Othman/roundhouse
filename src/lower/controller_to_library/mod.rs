@@ -323,18 +323,20 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         crate::lower::view_to_library::partial_call_contracts(views, controllers, library_classes);
 
     let mut all_methods: Vec<(Vec<MethodDef>, &Controller)> = Vec::new();
-    for controller in controllers {
-        let json_actions = json_actions_for(controller, views);
-        let text_format_actions = text_format_actions_for(controller, views);
-        // `Some(map)` → this controller's routed actions (empty set if it
-        // has no routes, e.g. a base controller → all publics are helpers).
-        // `None` → legacy: every public method is an action.
-        let routed = routed_by_controller
-            .map(|m| m.get(&controller.name).cloned().unwrap_or_default());
-        let methods = build_methods(controller, controllers, &params_specs, &json_actions, &text_format_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params);
-        all_methods.push((methods, controller));
-    }
-    subclass_template_hooks(&mut all_methods, controllers, &view_ivars, &partials);
+    crate::timings::phase("lower: controllers build", || {
+        for controller in controllers {
+            let json_actions = json_actions_for(controller, views);
+            let text_format_actions = text_format_actions_for(controller, views);
+            // `Some(map)` → this controller's routed actions (empty set if it
+            // has no routes, e.g. a base controller → all publics are helpers).
+            // `None` → legacy: every public method is an action.
+            let routed = routed_by_controller
+                .map(|m| m.get(&controller.name).cloned().unwrap_or_default());
+            let methods = build_methods(controller, controllers, &params_specs, &json_actions, &text_format_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments, inferred_params);
+            all_methods.push((methods, controller));
+        }
+        subclass_template_hooks(&mut all_methods, controllers, &view_ivars, &partials);
+    });
 
     let mut classes: std::collections::HashMap<ClassId, crate::analyze::ClassInfo> =
         std::collections::HashMap::new();
@@ -395,7 +397,8 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // Signatures only — body typing belongs to the jbuilder lowerer,
     // which dump_ir / emit already ran (or will run) separately.
     let app_stub = crate::App::new();
-    for lc in crate::lower::jbuilder_signature_classes(views, &app_stub) {
+    crate::timings::phase("lower: controllers jbuilder sigs", || {
+        for lc in crate::lower::jbuilder_signature_classes(views, &app_stub) {
         let info = classes.entry(lc.name.clone()).or_default();
         for m in &lc.methods {
             if let Some(sig) = &m.signature {
@@ -426,7 +429,8 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                 }
             }
         }
-    }
+        }
+    });
 
     // Ivar bindings: `@params` is framework-guaranteed (the lowerer
     // itself rewrites bare `params` → `@params` in action bodies, so
@@ -488,6 +492,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     let permitted_fields = self::params::permitted_field_tys(&params_specs);
 
     let mut out = Vec::new();
+    crate::timings::phase("lower: controllers type", || {
     for (mut methods, controller) in all_methods {
         // Surveyed over the WHOLE controller before any body is
         // rewritten: which of its own methods does it call and then
@@ -583,6 +588,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // its own `app/models/<resource>_params.{rb,ts}` file via the
     // standard per-LC emit path.
     out.extend(params_lcs);
+    });
     out
 }
 
@@ -1017,6 +1023,8 @@ fn build_methods(
     let shadows = route_helper_shadows(controller, all_controllers);
 
     let (publics_all, privs) = split_public_private_actions(controller);
+    let publics_all: Vec<Action> = publics_all.into_iter().cloned().collect();
+    let privs: Vec<Action> = privs.into_iter().cloned().collect();
     // Params helpers resolve through Ruby's MRO: `Rooms::OpensController`
     // writes `@room.update! room_params`, and `room_params` is defined on
     // `RoomsController`. The helper→spec map behind
@@ -1055,7 +1063,7 @@ fn build_methods(
         let mut out = privs.clone();
         for c in chain.iter().rev() {
             let (pubs, ancestor_privs) = split_public_private_actions(c);
-            for a in ancestor_privs.iter().chain(pubs.iter()) {
+            for a in ancestor_privs.into_iter().chain(pubs) {
                 if !a.name.as_str().ends_with("_params") {
                     continue;
                 }
@@ -1093,12 +1101,14 @@ fn build_methods(
     // filter falls through to the preamble, which emits them in
     // declaration order.
     let inlining_ordered = own_filter_inlining_is_ordered(controller, &privs);
-    let resolve_own = |name: &Symbol| {
-        privs
+    let resolve_own = |name: &Symbol, visit: &mut dyn FnMut(&Expr)| {
+        if let Some(a) = privs
             .iter()
             .chain(publics.iter())
             .find(|a| &a.name == name)
-            .map(|a| a.body.clone())
+        {
+            visit(&a.body);
+        }
     };
     let publics_inlined: Vec<Action> = publics
         .iter()
@@ -1398,7 +1408,7 @@ fn inline_before_filters(
     action: &Action,
     filters: &[&Filter],
     privs: &[Action],
-    resolve: &dyn Fn(&Symbol) -> Option<Expr>,
+    resolve: &dyn Fn(&Symbol, &mut dyn FnMut(&Expr)),
 ) -> Action {
     let action_name = &action.name;
     let mut prepended: Vec<Expr> = Vec::new();
@@ -1493,13 +1503,12 @@ fn build_filter_preamble(
     // Resolve a filter target's body — self first, then nearest ancestor
     // (Ruby method resolution order) — so the halting check can be
     // scoped to filters that can actually render/redirect.
-    let find_target = |name: &Symbol| -> Option<Action> {
+    let find_target = |name: &Symbol| -> Option<&Action> {
         let mut scopes: Vec<&Controller> = vec![controller];
         scopes.extend(chain.iter().rev().copied());
         for c in scopes {
-            let (pubs, privs) = split_public_private_actions(c);
-            if let Some(a) = privs.iter().chain(pubs.iter()).find(|a| &a.name == name) {
-                return Some(a.clone());
+            if let Some(a) = c.actions().find(|a| &a.name == name) {
+                return Some(a);
             }
         }
         None
@@ -1561,7 +1570,11 @@ fn build_filter_preamble(
             // `require_authentication`) still halts the chain.
             halt_check: can_respond_within(
                 &target.body,
-                &|name| find_target(name).map(|a| a.body),
+                &|name, visit| {
+                    if let Some(a) = find_target(name) {
+                        visit(&a.body);
+                    }
+                },
                 &mut std::collections::BTreeSet::new(),
             ),
         });
@@ -1857,13 +1870,11 @@ fn inherited_params_spec<'a>(
     helper: &Symbol,
     specs: &'a ParamsSpecs,
 ) -> Option<&'a ParamsSpec> {
-    let own: Vec<crate::dialect::Action> = controller.actions().cloned().collect();
-    if helper_spec_map(&own, specs).contains_key(helper) {
+    if helper_spec_map(controller.actions(), specs).contains_key(helper) {
         return None;
     }
     for ancestor in ancestor_chain(controller, all).iter().rev() {
-        let acts: Vec<crate::dialect::Action> = ancestor.actions().cloned().collect();
-        if let Some(spec) = helper_spec_map(&acts, specs).get(helper) {
+        if let Some(spec) = helper_spec_map(ancestor.actions(), specs).get(helper) {
             return Some(*spec);
         }
     }
@@ -1966,7 +1977,7 @@ fn ancestor_chain<'a>(controller: &Controller, all: &'a [Controller]) -> Vec<&'a
 /// halting check to filters that need it — pure-assignment filters
 /// (and every blog controller) add no dispatch noise.
 fn can_respond(body: &Expr) -> bool {
-    can_respond_within(body, &|_| None, &mut std::collections::BTreeSet::new())
+    can_respond_within(body, &|_, _| {}, &mut std::collections::BTreeSet::new())
 }
 
 /// Whether this body can render/redirect/head — DIRECTLY, or through a
@@ -1985,16 +1996,17 @@ fn can_respond(body: &Expr) -> bool {
 /// controller (or an ancestor) defines it; `seen` stops a cycle. Only
 /// receiverless sends are followed: a call on another object is that
 /// object's business, and Rails' halting is about THIS controller's
-/// filter chain.
+/// filter chain. Super-chain definitions are visited in MRO order by
+/// calling `visit` once per body, matching a concatenated `Seq`.
 fn can_respond_within(
     body: &Expr,
-    resolve: &dyn Fn(&Symbol) -> Option<Expr>,
+    resolve: &dyn Fn(&Symbol, &mut dyn FnMut(&Expr)),
     seen: &mut std::collections::BTreeSet<Symbol>,
 ) -> bool {
     fn walk(
         e: &Expr,
         found: &mut bool,
-        resolve: &dyn Fn(&Symbol) -> Option<Expr>,
+        resolve: &dyn Fn(&Symbol, &mut dyn FnMut(&Expr)),
         seen: &mut std::collections::BTreeSet<Symbol>,
     ) {
         if *found {
@@ -2014,11 +2026,13 @@ fn can_respond_within(
                 Some(r) => matches!(&*r.node, ExprNode::SelfRef),
             };
             if self_call && seen.insert(method.clone()) {
-                if let Some(callee) = resolve(method) {
-                    walk(&callee, found, resolve, seen);
-                    if *found {
-                        return;
+                resolve(method, &mut |callee| {
+                    if !*found {
+                        walk(callee, found, resolve, seen);
                     }
+                });
+                if *found {
+                    return;
                 }
             }
         }
@@ -2274,7 +2288,7 @@ fn rename_local(body: &Expr, from: &Symbol, to: &Symbol) -> Expr {
 /// the `private` marker. Filters and unknown class-body statements are
 /// dropped here — filters get re-synthesized into `process_action`,
 /// unknowns (e.g. `allow_browser`) carry no semantics in spinel.
-fn split_public_private_actions(c: &Controller) -> (Vec<Action>, Vec<Action>) {
+fn split_public_private_actions(c: &Controller) -> (Vec<&Action>, Vec<&Action>) {
     let mut pubs = Vec::new();
     let mut privs = Vec::new();
     let mut seen_private = false;
@@ -2283,9 +2297,9 @@ fn split_public_private_actions(c: &Controller) -> (Vec<Action>, Vec<Action>) {
             ControllerBodyItem::PrivateMarker { .. } => seen_private = true,
             ControllerBodyItem::Action { action, .. } => {
                 if seen_private {
-                    privs.push(action.clone());
+                    privs.push(action);
                 } else {
-                    pubs.push(action.clone());
+                    pubs.push(action);
                 }
             }
             _ => {}
@@ -2383,17 +2397,14 @@ fn action_to_method(
     // definition that calls `super` brings the next one with it.
     let can_respond_via_helper = {
         let chain = ancestor_chain(controller, all_controllers_for_params);
-        let resolve = |name: &Symbol| -> Option<Expr> {
-            let mut bodies = Vec::new();
+        let resolve = |name: &Symbol, visit: &mut dyn FnMut(&Expr)| {
             for c in std::iter::once(controller).chain(chain.iter().rev().copied()) {
                 let Some(m) = c.actions().find(|m| &m.name == name) else { continue };
-                bodies.push(m.body.clone());
+                visit(&m.body);
                 if !calls_super(&m.body) {
                     break;
                 }
             }
-            (!bodies.is_empty())
-                .then(|| Expr::new(Span::synthetic(), ExprNode::Seq { exprs: bodies }))
         };
         can_respond_within(&a.body, &resolve, &mut std::collections::BTreeSet::new())
     };
