@@ -3186,6 +3186,18 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
                 // User::Role. Expanded here for the same reason the
                 // model walk expands it: one statement, many items.
                 if let Some(call) = inner.as_call_node() {
+                    match super::delegated_type::expand_delegated_type_decl(&call, file, &[]) {
+                        Ok(Some(expanded)) => {
+                            items.extend(expanded);
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            super::survey::record(&err);
+                            unclaimed = true;
+                            continue;
+                        }
+                    }
                     match super::model::expand_enum_decl(
                         &call, file, &[], &|_| None,
                     ) {

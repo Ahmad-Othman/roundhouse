@@ -296,6 +296,8 @@ mod tests {
             polymorphic_targets: vec![],
             default: None,
             touch: None,
+            foreign_type: None,
+            primary_key: None,
         }
     }
 

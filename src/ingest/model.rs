@@ -222,6 +222,24 @@ pub(super) fn ingest_model_with_enum_constants(
             // scope + predicate + bang writer per label, so it expands
             // in the walk loop for the same reason `class << self` does.
             if let Some(call) = stmt.as_call_node() {
+                match super::delegated_type::expand_delegated_type_decl(&call, file, &leading) {
+                    Ok(Some(expanded)) => {
+                        let mut blank = leading_blank;
+                        for mut item in expanded {
+                            item.set_leading_blank_line(std::mem::take(&mut blank));
+                            body.push(item);
+                        }
+                        prev_end = Some(stmt.location().end_offset());
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(err) if super::survey::is_active() => {
+                        super::survey::record(&err);
+                        prev_end = Some(stmt.location().end_offset());
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                }
                 match expand_enum_decl(&call, file, &leading, &resolve_constant) {
                     Ok(Some(expanded)) => {
                         if let Some(d) = expanded.default {
@@ -2247,6 +2265,8 @@ fn parse_association(
             polymorphic_targets: Vec::new(),
             default: belongs_to_default,
             touch,
+            foreign_type: None,
+            primary_key: None,
         }),
         "has_and_belongs_to_many" => Some(Association::HasAndBelongsToMany {
             name: name.clone(),
@@ -2353,7 +2373,7 @@ fn parse_table_name_decl(body: Node<'_>, file: &str) -> IngestResult<Option<(Str
     }
 }
 
-fn dependent_from_sym(s: &str) -> Option<crate::dialect::Dependent> {
+pub(crate) fn dependent_from_sym(s: &str) -> Option<crate::dialect::Dependent> {
     use crate::dialect::Dependent;
     Some(match s {
         "destroy" => Dependent::Destroy,

@@ -3652,6 +3652,9 @@ fn resolve_polymorphic_targets(app: &mut App) {
             else {
                 continue;
             };
+            if !polymorphic_targets.is_empty() {
+                continue;
+            }
             if let Some(targets) = implementors.get(name) {
                 *polymorphic_targets = targets.clone();
             } else if let Some((_, found)) =
