@@ -4266,6 +4266,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         "inflector_ext",
         "json_builder",
         "active_support_ext",
+        "security_utils",
         "params",
         "action_text",
         "active_storage",
