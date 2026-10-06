@@ -258,6 +258,22 @@ fn other_dependent_stays_unexpanded() {
     assert!(!inst.iter().any(|n| n == "destroy_entryable"), "{inst:?}");
 }
 
+/// Unmodeled belongs_to kwargs must not expand: dropping `class_name` /
+/// `autosave` would change save/type behavior with no ledger entry.
+#[test]
+fn unmodeled_belongs_to_kwargs_stay_unexpanded() {
+    for extra in ["class_name: \"Thing\"", "autosave: true", "unknown: true"] {
+        let app = entry_app(&format!(
+            "  delegated_type :entryable, types: %w[ Message Comment ], {extra}\n"
+        ));
+        let inst = instance_names(&app, "Entry");
+        assert!(
+            !inst.iter().any(|n| n == "message?"),
+            "{extra} still expanded: {inst:?}"
+        );
+    }
+}
+
 fn runtime_app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write(

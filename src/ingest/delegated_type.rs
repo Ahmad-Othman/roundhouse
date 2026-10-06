@@ -5,7 +5,8 @@
 //! `["Message", …]`), including namespaced `Access::NoticeMessage`.
 //! Documented options (`foreign_key`, `foreign_type`, `primary_key`,
 //! `dependent: :destroy`, plus `optional`/`touch`/`default` forwarded
-//! to `belongs_to`) are honored; other `dependent:` values stay
+//! to `belongs_to`) are honored; other `dependent:` values and
+//! unmodeled belongs_to kwargs (`class_name`, `autosave`, …) stay
 //! unexpanded so the unsupported ledger remains honest.
 
 use ruby_prism::Node;
@@ -139,10 +140,10 @@ fn parse_declaration(
                         return Ok(None);
                     }
                 }
-                // Forwarded to belongs_to in Rails; we do not model them
-                // on BelongsTo yet, so they must not swallow the expand.
-                "inverse_of" | "class_name" | "validate" | "autosave" | "strict_loading" => {}
-                _ => {}
+                // Unmodeled belongs_to kwargs (`class_name`, `autosave`,
+                // `validate`, …) and unknown keys fail closed: expanding
+                // would drop save/type behavior without a ledger entry.
+                _ => return Ok(None),
             }
         }
     }
