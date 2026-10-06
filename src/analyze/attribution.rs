@@ -348,8 +348,9 @@ impl<'a> AttributionCtx<'a> {
 
     /// The rendered cause for an unsupported constant a gap file declares.
     /// The name is the declaration Rubydex resolved the reference to (a
-    /// relative `Slack` inside `module Util` is `Util::Slack`), else the path
-    /// as written. Not a suffix match: `::Article` is not `Admin::Article`.
+    /// relative `Slack` inside `module Util` is `Util::Slack`), never the
+    /// path as written: `::Article` is not `Admin::Article`, and an
+    /// unresolved `LIMIT` is not a gap file's top-level `LIMIT`.
     fn constant_cause(&self, d: &Diagnostic) -> Option<&String> {
         let DiagnosticKind::Unsupported { construct, detail, .. } = &d.kind else {
             return None;
@@ -357,14 +358,10 @@ impl<'a> AttributionCtx<'a> {
         if construct.as_str() != "constant" || d.severity == Severity::Info {
             return None;
         }
-        let written = detail.trim_start_matches("::");
-        let segments: Vec<crate::ident::Symbol> = written.split("::").map(crate::ident::Symbol::from).collect();
-        let resolved = self
-            .resolver
-            .as_ref()
-            .and_then(|resolver| resolver.namespace(d.span, &segments))
-            .map(|id| id.0.as_str().trim_start_matches("::").to_string());
-        let path = self.gap_namespaces.get(resolved.as_deref().unwrap_or(written))?;
+        let segments: Vec<crate::ident::Symbol> =
+            detail.trim_start_matches("::").split("::").map(crate::ident::Symbol::from).collect();
+        let resolved = self.resolver.as_ref()?.declaration_name(d.span, &segments)?;
+        let path = self.gap_namespaces.get(resolved.trim_start_matches("::"))?;
         self.gap_by_path.get(*path)
     }
 

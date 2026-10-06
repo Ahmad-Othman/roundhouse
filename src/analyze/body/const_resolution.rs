@@ -354,6 +354,20 @@ impl ConstResolver {
         }
     }
 
+    /// The fully qualified declaration a reference resolves to, whether a
+    /// namespace or a value.
+    pub(crate) fn declaration_name(&self, span: Span, path: &[Symbol]) -> Option<&str> {
+        match self.reference(span, path)?? {
+            ResolvedConstant::Namespace { class, .. } => Some(class.0.as_str()),
+            ResolvedConstant::Value { declaration, .. } => self
+                .files
+                .iter()
+                .flatten()
+                .find_map(|file| file.constant_classes.get(declaration))
+                .map(|name| name.0.as_str()),
+        }
+    }
+
     /// The declaration that a constant assignment defines. The IR keeps
     /// the assigned value, and Ruby writes the name just before it, so
     /// the definition is the last one in the file whose name ends at or
