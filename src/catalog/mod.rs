@@ -153,7 +153,7 @@ pub enum ReturnKind {
     SelfOrNil,
     /// Returns `Int`. Example: `Model.count`.
     Int,
-    /// Returns `Int | Nil`. Example: Kaminari's `relation.next_page`,
+    /// Returns `Int | Nil`. Example: `relation.next_page`,
     /// nil on the last page.
     IntOrNil,
     /// Returns `Bool`. Example: `Model.exists?`, `#save`,
@@ -315,12 +315,12 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::SelfType),
     },
-    // Kaminari's pagination entry point (`Model.page(n)`). Not core AR,
-    // but it shares the relation-builder shape and is called on every
-    // model class, so the AR catalog is its mechanical home (the
-    // gem catalog keys on concrete class names and can't say "every
-    // model"). The Array<Model> receiver form lives in `array_method`'s
-    // relation branch alongside `per`/`padding`/`without_count`.
+    // Pagination entry point (`Model.page(n)`). Not core AR, but it
+    // shares the relation-builder shape and is called on every model
+    // class, so the AR catalog is its mechanical home (the gem catalog
+    // keys on concrete class names and can't say "every model"). The
+    // Array<Model> receiver form lives in `array_method`'s relation
+    // branch alongside `per`/`padding`/`without_count`.
     CatalogedMethod {
         name: "page",
         receiver: ReceiverContext::Class,
@@ -328,9 +328,8 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::Builder,
         return_kind: Some(ReturnKind::RelationOfSelf),
     },
-    // will_paginate's entry point, `Model.paginate(page: n)` — kaminari's
-    // `page` under another gem's name, same builder shape, same
-    // reasoning for living here.
+    // `Model.paginate(page: n)` — `page` under another spelling, same
+    // builder shape, same reasoning for living here.
     CatalogedMethod {
         name: "paginate",
         receiver: ReceiverContext::Class,
@@ -1227,8 +1226,7 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::Builder,
         return_kind: Some(ReturnKind::RelationOfSelf),
     },
-    // will_paginate's `paginate(page:)` on a relation — same builder
-    // shape as kaminari's `page` below.
+    // `paginate` on a relation — same LIMIT/OFFSET builder as `page`.
     CatalogedMethod {
         name: "paginate",
         receiver: ReceiverContext::Relation,
@@ -1243,7 +1241,7 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::Terminal,
         return_kind: Some(ReturnKind::SelfOrNil),
     },
-    // Kaminari's pagination chain — same builder shape.
+    // Pagination chain — same builder shape.
     CatalogedMethod {
         name: "page",
         receiver: ReceiverContext::Relation,
@@ -1272,10 +1270,10 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::Builder,
         return_kind: Some(ReturnKind::RelationOfSelf),
     },
-    // Kaminari's paginator readers on a paged relation
+    // Paginator readers on a paged relation
     // (runtime/ruby/active_record/relation.rb). The page arithmetic is
-    // pure over LIMIT/OFFSET; the readers that need the total run the
-    // COUNT.
+    // LIMIT/OFFSET; the readers that need the total run COUNT without
+    // that window.
     CatalogedMethod {
         name: "limit_value",
         receiver: ReceiverContext::Relation,

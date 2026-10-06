@@ -175,7 +175,7 @@ impl Analyzer {
             // those fabricates methods the class does not have, and the
             // fabrication is not inert: an instance receiver resolves
             // `class_methods` BEFORE `instance_methods` (the parent-chain
-            // walk in `body/send.rs`), so `@search.page` reached kaminari's
+            // walk in `body/send.rs`), so `@search.page` reached the
             // class-side `page` builder instead of the `attr_accessor`.
             // That mistyped as `Array[Search]` for as long as chain starts
             // were Array-shaped — wrong, but renderable. Convergence

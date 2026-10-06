@@ -80,10 +80,11 @@ module ActiveRecord
     def reorder: (*(String | Symbol | Hash[Symbol, Symbol | Hash[Symbol, Symbol]]) parts) -> Relation
     def limit: (Integer n) -> Relation
     def offset: (Integer n) -> Relation
-    # Kaminari's pagination surface (see the .rb): `page` / `per` take
+    # LIMIT/OFFSET page arithmetic: `page` / `per` / `paginate` take
     # whatever the request handed over (a params String, an Integer or
     # nil) and read it through `to_s`.
     def page: (?(Integer | String | nil) num) -> Relation
+    def paginate: (?untyped num) -> Relation
     def per: (Integer | String | nil num) -> Relation
     def limit_value: () -> Integer?
     def offset_value: () -> Integer?

@@ -282,7 +282,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("faker", GemFate::Modeled),       // catalog/gems: Faker::*
     ("geared_pagination", GemFate::Modeled), // registry/controllers: set_page_and_extract_portion_from
     ("image_processing", GemFate::Modeled), // active_storage variants seam
-    ("kaminari", GemFate::Modeled),    // catalog: page / per / padding / without_count
+    ("kaminari", GemFate::Modeled),    // Relation#page / per / paginate
     ("mail", GemFate::Modeled),        // catalog/gems: Mail::Address; ActionMailer
     ("mocha", GemFate::Modeled),       // lower/mocha bridge
     ("nokogiri", GemFate::Modeled),    // catalog/gems: Nokogiri

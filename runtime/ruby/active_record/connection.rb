@@ -402,11 +402,15 @@ module ActiveRecord
       ActiveRecord::Relation.new(self).none
     end
 
-    # Kaminari's class-side entry point, `Model.page(n)`: the same page
-    # of a fresh Relation (Relation#page). Ruby-family-only for the
+    # Class-side `Model.page(n)` / `Model.paginate(n)`: the same page
+    # of a fresh Relation (`Relation#page`). Ruby-family-only for the
     # reason `where` above is.
     def self.page(num = nil)
       ActiveRecord::Relation.new(self).page(num)
+    end
+
+    def self.paginate(num = nil)
+      page(num)
     end
 
     # Rails-shape `first` fallback, same story as `where`/`all` above:

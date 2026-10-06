@@ -893,10 +893,10 @@ end
                 }
             }
         }
-        // `Kaminari.configure { |config| config.default_per_page = N }`
-        // — the page size `Relation#page` applies. Synthesized as
-        // `kaminari_default_per_page` on the reopen, over Kaminari's
-        // own default (25) in runtime/ruby/rails.rb.
+        // Default page size for `Relation#page`. A `Kaminari.configure`
+        // block's literal `default_per_page = N` is one input spelling;
+        // synthesized as `default_per_page` on the reopen, over the
+        // runtime default of 25 in runtime/ruby/rails.rb.
         {
             let init_dir = dir.join("config/initializers");
             let mut per_page: Option<u64> = None;
@@ -904,13 +904,13 @@ end
                 for entry in read_rb_files(vfs, &init_dir)? {
                     if let Ok(bytes) = vfs.read(&entry) {
                         let file = entry.display().to_string();
-                        per_page = extract_kaminari_default_per_page(&bytes, &file).or(per_page);
+                        per_page = extract_default_per_page(&bytes, &file).or(per_page);
                     }
                 }
             }
             if let Some(n) = per_page {
                 if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
-                    "def kaminari_default_per_page\n  {n}\nend\n"
+                    "def default_per_page\n  {n}\nend\n"
                 )) {
                     methods.append(&mut synth);
                 }
@@ -5846,15 +5846,16 @@ fn extract_vips_loader_policy(source: &[u8]) -> (bool, Vec<String>) {
 
 /// `<param>.default_per_page = N` inside a `Kaminari.configure do
 /// |<param>| … end` block (top level or under `to_prepare`), the last
-/// one winning as it does when Ruby runs the block. Read off the parse
-/// rather than the lines, so an assignment in another config block of
-/// the same file (`Rails.application.configure do |config|`) is not
-/// mistaken for Kaminari's.
+/// one winning as it does when Ruby runs the block. `Kaminari.configure`
+/// is an input spelling of the default page size, not the feature name.
+/// Read off the parse rather than the lines, so an assignment in another
+/// config block of the same file (`Rails.application.configure do
+/// |config|`) is not mistaken for this default.
 ///
 /// A value that is not a positive Integer literal (a constant, an ENV
 /// read) is recognized but not evaluated: it is a survey gap, and this
 /// file contributes no page size rather than a guessed one.
-fn extract_kaminari_default_per_page(source: &[u8], file: &str) -> Option<u64> {
+fn extract_default_per_page(source: &[u8], file: &str) -> Option<u64> {
     let src = String::from_utf8_lossy(source);
     // Cheap skip before parsing: this runs over every initializer, and
     // most never name Kaminari.
@@ -5911,7 +5912,7 @@ fn extract_kaminari_default_per_page(source: &[u8], file: &str) -> Option<u64> {
                 survey::record(&IngestError::Unsupported {
                     file: file.to_string(),
                     message: format!(
-                        "Kaminari default_per_page is not a positive Integer literal (`{}`); the emitted app does not apply it",
+                        "default_per_page is not a positive Integer literal (`{}`); the emitted app does not apply it",
                         &src[loc.start_offset()..loc.end_offset()]
                     ),
                 });
