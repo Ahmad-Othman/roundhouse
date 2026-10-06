@@ -15,22 +15,15 @@ module ActiveRecord
     # Rails' Relation#spawn — copy query state onto a fresh Relation so
     # a scope fork cannot mutate its caller's accumulators.
     def spawn: () -> Relation
-    def take_spawn_state: (
+    def take_query_lists: (
         Array[String] wheres,
         Array[String] joins,
         Array[String] orders,
         Array[String] groups,
         Array[String] havings,
-        String? select_sql,
-        bool distinct,
-        Integer? limit,
-        Integer? offset,
+        Array[String] ctes,
         Array[Symbol] includes,
-        bool skip_preloading,
-        untyped records,
-        Hash[Symbol, untyped] scope_attributes,
-        String? from_src,
-        Array[String] ctes
+        Hash[Symbol, untyped] attrs
       ) -> Relation
     def copy_string_list: (Array[String] xs) -> Array[String]
     def copy_symbol_list: (Array[Symbol] xs) -> Array[Symbol]
@@ -257,6 +250,7 @@ module ActiveRecord
     def named_bind_start?: (String ch) -> bool
     def named_bind_char?: (String ch) -> bool
     def escape_list: (Array[untyped] vals) -> String
-    def order_term: (untyped p) -> String
+    def order_term: (Hash[Symbol, untyped] | String p) -> String
+    def format_order_hash: (Hash[Symbol, untyped] h) -> String
   end
 end

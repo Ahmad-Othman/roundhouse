@@ -57,61 +57,31 @@ module ActiveRecord
     # the typer already knows); `@records` is shared until a chain
     # method clears it, matching Rails' loaded-spawn contract.
     def spawn
-      copy = Relation.new(@model)
-      copy.take_spawn_state(
-        copy_string_list(@wheres),
-        copy_string_list(@joins),
-        copy_string_list(@orders),
-        copy_string_list(@groups),
-        copy_string_list(@havings),
-        @select_sql,
-        @distinct,
-        @limit,
-        @offset,
-        copy_symbol_list(@includes),
-        @skip_preloading,
-        @records,
-        copy_scope_attributes(@scope_attributes),
-        @from,
-        copy_string_list(@ctes)
+      copy = clone
+      copy.take_query_lists(
+        @wheres,
+        @joins,
+        @orders,
+        @groups,
+        @havings,
+        @ctes,
+        @includes,
+        @scope_attributes
       )
       copy
     end
 
-    # Called only from `spawn`. Kept as a real method (not a block into
-    # the new object) so strict targets see ordinary ivar writes.
-    def take_spawn_state(
-      wheres,
-      joins,
-      orders,
-      groups,
-      havings,
-      select_sql,
-      distinct,
-      limit,
-      offset,
-      includes,
-      skip_preloading,
-      records,
-      scope_attributes,
-      from_src,
-      ctes
-    )
-      @wheres = wheres
-      @joins = joins
-      @orders = orders
-      @groups = groups
-      @havings = havings
-      @select_sql = select_sql
-      @distinct = distinct
-      @limit = limit
-      @offset = offset
-      @includes = includes
-      @skip_preloading = skip_preloading
-      @records = records
-      @scope_attributes = scope_attributes
-      @from = from_src
-      @ctes = ctes
+    # List accumulators go through copy_* so inference types the
+    # parameters. Scalars come from `clone` (shallow ivar copy).
+    def take_query_lists(wheres, joins, orders, groups, havings, ctes, includes, attrs)
+      @wheres = copy_string_list(wheres)
+      @joins = copy_string_list(joins)
+      @orders = copy_string_list(orders)
+      @groups = copy_string_list(groups)
+      @havings = copy_string_list(havings)
+      @ctes = copy_string_list(ctes)
+      @includes = copy_symbol_list(includes)
+      @scope_attributes = copy_scope_attributes(attrs)
       self
     end
 
@@ -128,9 +98,7 @@ module ActiveRecord
     end
 
     def copy_scope_attributes(attrs)
-      out = {}
-      attrs.each { |k, v| out[k] = v }
-      out
+      attrs
     end
 
     # ---- chain methods (return self) --------------------------------
@@ -1024,7 +992,8 @@ module ActiveRecord
     # the whole page as a single batch. Campfire's unread fanout /
     # push paths call this on memberships.
     def find_in_batches
-      yield loaded_records
+      records = loaded_records
+      yield records
       self
     end
 
@@ -1921,21 +1890,27 @@ module ActiveRecord
     # Hash's `to_s` (which reached SQLite as `rooms {UPDATED_AT: :DESC}`
     # and raised `unrecognized token: "{"`).
     def order_term(p)
-      if p.is_a?(Hash)
-        parts = []
-        p.each do |col, dir|
-          if dir.is_a?(Hash)
-            dir.each do |inner_col, inner_dir|
-              parts << "#{col}.#{inner_col} #{inner_dir.to_s.upcase}"
-            end
-          else
-            parts << "#{col} #{dir.to_s.upcase}"
-          end
-        end
-        parts.join(", ")
+      if p.is_a?(String)
+        p
       else
-        p.to_s
+        format_order_hash(p)
       end
+    end
+
+    # Isolated so `each` sees `Hash[Symbol, untyped]` keys as Symbol.
+    # `order_term`'s Hash|String union does not narrow, and untyped
+    # `col` interpolations blow the Bar B ceiling.
+    def format_order_hash(h)
+      parts = []
+      h.each do |col, dir|
+        if dir.is_a?(Hash)
+          inner_col = dir.keys[0]
+          parts << "#{col}.#{inner_col} #{dir[inner_col].to_s.upcase}"
+        else
+          parts << "#{col} #{dir.to_s.upcase}"
+        end
+      end
+      parts.join(", ")
     end
   end
 end
