@@ -46,6 +46,10 @@ fn view_helpers_nil_pred_and_value_string_coercions_typecheck() {
         optional.contains("is_null()") && !optional.contains("is_none()"),
         "optional_value_attr must use Value::is_null, not Option::is_none:\n{optional}"
     );
+    assert!(
+        optional.contains("ruby_to_s()"),
+        "optional_value_attr must to_s Value via ruby_to_s (no JSON quotes):\n{optional}"
+    );
 
     let escape = method_body(&vh, "escape_or_empty");
     assert!(

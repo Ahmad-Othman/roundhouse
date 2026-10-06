@@ -299,20 +299,18 @@ pub(super) fn dispatch_method_by_recv_ty(
             _ => None,
         },
         // `Untyped` recv (rust's alias for `serde_json::Value`) +
-        // `Record` (a sub-Hash through `.as_object().iter()`).
+        // `Record` (a sub-Hash through `.as_object().iter()`) +
+        // heterogeneous unions that rust-emit as Value (`String |
+        // Integer | Float | bool | nil` on `optional_value_attr`).
         // `to_s` on these is the Ruby `Object#to_s` shape — for
         // String variants the bare inner string, for everything
         // else JSON-encode. Rust's `serde_json::Value::to_string()`
         // unconditionally JSON-encodes, which breaks attribute
         // emission (`data-turbo-track="reload"` becomes
-        // `data-turbo-track="\"reload\""`). Route through the
-        // `RubyToS` trait (defined in `runtime/rust/http.rs`):
-        // compile-time dispatch picks the right impl for `str` /
-        // `String` / `serde_json::Value`, so the same emit shape
-        // works whether the recv ends up being a closure param
-        // typed `&String` (Map iter keys) or a genuine
-        // `&serde_json::Value` (Map iter values). Avoids the
-        // false-positive E0599 from a Var-only narrowing rule.
+        // `data-turbo-track="\"reload\""`, and form `value=` quotes
+        // a title). Route through the `RubyToS` trait (defined in
+        // `runtime/rust/http.rs`): compile-time dispatch picks the
+        // right impl for `str` / `String` / `serde_json::Value`.
         // `Integer#to_i` is the identity. Its common receiver is an
         // index read (`arr[i].to_i`), which types `Integer | nil` but
         // renders as the `i64` itself (see the nil peel above).
@@ -320,7 +318,7 @@ pub(super) fn dispatch_method_by_recv_ty(
             "to_i" if args.is_empty() => Some(recv_s.to_string()),
             _ => None,
         },
-        Some(Ty::Untyped) | Some(Ty::Record { .. }) => match method {
+        Some(ty) if super::super::super::ty::rust_value_shaped(ty) => match method {
             "to_s" if args.is_empty() => {
                 // `recv_s` is already wrap-aware via `emit_send_recv`
                 // at the top of this function: non-primary recvs

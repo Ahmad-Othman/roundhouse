@@ -957,8 +957,13 @@ impl Analyzer {
         // converges, type views once and then harvest/unify/retype
         // *tests* until helper chains settle. Later test rounds reuse
         // the production+view param snapshot instead of re-walking
-        // those trees. If view/test sites moved a production param, one
-        // production-only pass absorbs it.
+        // those trees. If view/test sites moved a production param,
+        // retype production until harvested returns stabilize. Nested
+        // constructors live in serializer bodies (AuthorResource.new
+        // inside ArticleResource.to_h), so each absorb pass must
+        // unify WithViews again — Production unify would drop the
+        // view sites, and skipping unify leaves nested initialize
+        // params as Var.
         let production_sig = prev_sig.clone();
         let mut production_view_params = None;
         for round in 0..FIXPOINT_CAP {
@@ -1007,18 +1012,37 @@ impl Analyzer {
             prev_sig = self.capture_inference_sig();
         }
         if !self.inference_matches(&production_sig) {
-            crate::timings::phase("typing passes (after view unify)", || {
-                self.run_typing_passes(
-                    app,
-                    &dynamic_render_ivars,
-                    &existing_view_names,
-                    &module_methods,
-                    &module_includes,
-                    &parent_link_by_name,
-                    false,
-                )
-            });
-            self.harvest_returns_to_registry(app, true);
+            let mut absorb_sig = self.capture_inference_sig();
+            for round in 0..FIXPOINT_CAP {
+                crate::timings::phase(
+                    if round == 0 {
+                        "typing passes (after view unify)".to_string()
+                    } else {
+                        format!("round {round}: absorb production")
+                    },
+                    || {
+                        self.run_typing_passes(
+                            app,
+                            &dynamic_render_ivars,
+                            &existing_view_names,
+                            &module_methods,
+                            &module_includes,
+                            &parent_link_by_name,
+                            false,
+                        )
+                    },
+                );
+                self.harvest_returns_to_registry(app, true);
+                self.unify_params_from_call_sites(app, UnifyScope::WithViews);
+                if let Some(snapshot) = production_view_params.as_mut() {
+                    snapshot.clone_from(&self.inferred_params);
+                }
+                self.overlay_test_params(app);
+                if self.inference_matches(&absorb_sig) {
+                    break;
+                }
+                absorb_sig = self.capture_inference_sig();
+            }
         }
         // Effects are a function of the converged typed trees, not of
         // the fixpoint. Collecting inside every typing round walked
