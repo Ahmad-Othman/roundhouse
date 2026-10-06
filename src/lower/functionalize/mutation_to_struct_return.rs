@@ -1098,10 +1098,14 @@ fn mutates_record(e: &Expr) -> bool {
             found = true
         }
         // `errors << v` — `<<` onto a bareword/self list accessor.
+        // `@arr << v` — same for a direct ivar (HeaderStore `@keys << key`).
+        // rewrite_expr already rebinds both; classification must match.
         ExprNode::Send { recv: Some(r), method, args, .. }
             if method.as_str() == "<<" && args.len() == 1 =>
         {
-            if let ExprNode::Send { recv: ar, method: _, args: fargs, .. } = &*r.node {
+            if matches!(&*r.node, ExprNode::Ivar { .. }) {
+                found = true;
+            } else if let ExprNode::Send { recv: ar, method: _, args: fargs, .. } = &*r.node {
                 if fargs.is_empty()
                     && ar.as_ref().is_none_or(|x| matches!(&*x.node, ExprNode::SelfRef))
                 {
@@ -1570,6 +1574,28 @@ mod tests {
         assert!(
             ex.contains("%{record | errors: record.errors ++ [\"oops\"]}"),
             "errors << → struct append:\n{ex}"
+        );
+    }
+
+    #[test]
+    fn ivar_shovel_classifies_as_record_mutation() {
+        // HeaderStore `@keys << key` — rewrite_expr rebinds, and
+        // mutates_record must agree so compute_registry / trailing
+        // `record` return fire for a body that only appends.
+        let push = send(
+            Some(syn(ExprNode::Ivar { name: sym("keys") })),
+            "<<",
+            vec![vr("key")],
+        );
+        let body = syn(ExprNode::Seq { exprs: vec![push] });
+        assert!(
+            mutates_record(&body),
+            "@keys << key must count as a record mutation"
+        );
+        let ex = render_via_elixir(vec![tx(instance_method("add_key", &[], body))]);
+        assert!(
+            ex.contains("%{record | keys: record.keys ++ [key]}"),
+            "@keys << → struct append:\n{ex}"
         );
     }
 
