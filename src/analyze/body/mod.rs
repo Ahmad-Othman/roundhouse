@@ -529,7 +529,18 @@ impl<'a> BodyTyper<'a> {
                 let value = if let [name] = path.as_slice() {
                     ctx.constants.get_own(name).or_else(|| ctx.constants.get_global(name))
                 } else { None };
-                value.is_none() && self.classes.contains_key(&id)
+                if value.is_some() {
+                    return false;
+                }
+                // Lowerers retype with a partial registry (no stdlib seed).
+                // A Const whose computed type is the written class itself is
+                // still the class object — `RecordNotFound < StandardError`
+                // must stay Module#<, not Incompatible value comparison.
+                self.classes.contains_key(&id)
+                    || matches!(
+                        expr.ty.as_ref(),
+                        Some(Ty::Class { id: ty_id, .. }) if *ty_id == id
+                    )
             }
             _ => false,
         }
@@ -2653,6 +2664,32 @@ mod tests {
         let mut ctx = Ctx::default();
         ctx.local_bindings.insert(Symbol::from(name), ty);
         ctx
+    }
+
+    #[test]
+    fn const_class_ref_keeps_class_object_without_registry_entry() {
+        // Lower retypes with a partial registry that omits stdlib. A Const
+        // whose type is the written class must still stamp CLASS_OBJECT_VALUE
+        // so `RecordNotFound < StandardError` classifies as Module#<.
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let ctx = Ctx::default();
+        let mut expr = synth(ExprNode::Const {
+            path: vec![Symbol::from("StandardError")],
+        });
+        let ty = typer.analyze_expr(&mut expr, &ctx);
+        assert_eq!(
+            ty,
+            Ty::Class {
+                id: ClassId(Symbol::from("StandardError")),
+                args: vec![],
+            }
+        );
+        assert_ne!(
+            expr.decisions & crate::expr::CLASS_OBJECT_VALUE,
+            0,
+            "Const class ref must remain a class object without a registry entry"
+        );
     }
 
     fn optional_str() -> Ty {

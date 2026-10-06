@@ -90,6 +90,11 @@ pub fn lower_test_modules_with_inner(
     // RouteHelpers entries into each test class's instance_methods so
     // bare-name dispatch resolves.
     crate::lower::view_to_library::insert_framework_stubs(&mut classes);
+    // Stdlib exceptions (`StandardError`, `ActiveRecord::RecordNotFound`, …)
+    // so retyping test bodies keeps `CLASS_OBJECT_VALUE` on those Const
+    // refs — otherwise `Child < Parent` collapses to Incompatible and
+    // TS/Kotlin/Swift framework `errors_test` throw at emit.
+    crate::analyze::register_stdlib_classes(&mut classes);
     insert_minitest_test_baseline(&mut classes);
     insert_cookie_jar_baseline(&mut classes);
 
