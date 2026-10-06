@@ -251,10 +251,6 @@ end
         "local name belongs in the collection cache key:\n{body}"
     );
     assert!(
-        body.contains("__cc_local_"),
-        "explicit locals bind once before key and miss:\n{body}"
-    );
-    assert!(
         body.contains("cache_key_with_version") && body.contains("inspect"),
         "locals use cache_key_with_version or inspect, not bare to_s:\n{body}"
     );

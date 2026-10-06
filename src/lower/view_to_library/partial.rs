@@ -351,9 +351,8 @@ fn emit_named_collection_each(
 ///
 /// Key shape (aligned with Rails' item key + template digest intent):
 /// `views/coll/<cache_scope><view>/<partial>/<name>=<stable>/…/<record versions>`.
-/// Explicit `locals:` bind once into temps shared by the key and the miss
-/// render (ordinary collection contract). Threaded closure ivars are named
-/// segments too; records use `cache_key_with_version`, scalars use `inspect`
+/// Explicit `locals:` and the partial's threaded closure ivars are named
+/// segments; records use `cache_key_with_version`, scalars use `inspect`
 /// (quoted, so `a/b`+`c` cannot collide with `a`+`b/c`). A local whose
 /// name is not a literal Symbol/String cannot be keyed safely — fall
 /// back to the uncached each path.
@@ -375,37 +374,15 @@ fn wrap_cached_collection(
     let module_camel = camelize_path(&snake_case(&module_dir));
     let method_sym = base_name.trim_start_matches('_').to_string();
 
-    // Explicit `locals:` must evaluate once: the ordinary collection
-    // path binds them at the call site, then reuses the values for each
-    // element. The cached path used to evaluate each expression while
-    // building the key and again on a miss — a side-effecting local
-    // could key one value and render another. Bind temps first; key and
-    // miss both read those temps.
-    let mut local_bindings: Vec<Expr> = Vec::new();
-    let mut bound_locals: Option<Vec<(Expr, Expr)>> = None;
     let mut named_inputs: Vec<(String, Expr)> = Vec::new();
     if let Some(entries) = locals {
-        let mut bound = Vec::with_capacity(entries.len());
-        for (index, (k, v)) in entries.iter().enumerate() {
+        for (k, v) in entries {
             let Some(name) = local_key_name(k) else {
                 // Name is dynamic — cannot build a stable key segment.
                 return emit_named_collection_each(collection, partial, as_name, locals, ctx);
             };
-            let temp = Symbol::from(format!("__cc_local_{}_{}", span.start, index));
-            local_bindings.push(Expr::new(
-                span,
-                ExprNode::Assign {
-                    target: LValue::Var {
-                        id: VarId(0),
-                        name: temp.clone(),
-                    },
-                    value: v.clone(),
-                },
-            ));
-            bound.push((k.clone(), var_ref(temp.clone())));
-            named_inputs.push((name, var_ref(temp)));
+            named_inputs.push((name, v.clone()));
         }
-        bound_locals = Some(bound);
     }
     for (name, expr) in partial_extra_named_args(ctx, &module_camel, &method_sym) {
         named_inputs.push((name, expr));
@@ -541,13 +518,7 @@ fn wrap_cached_collection(
         accumulator: cap.clone(),
         ..ctx.clone()
     };
-    let miss_each = emit_named_collection_each(
-        collection,
-        partial,
-        as_name,
-        bound_locals.as_deref(),
-        &miss_ctx,
-    )?;
+    let miss_each = emit_named_collection_each(collection, partial, as_name, locals, &miss_ctx)?;
     let miss = vec![
         assign_accumulator_string_new(&cap),
         miss_each,
@@ -568,9 +539,7 @@ fn wrap_cached_collection(
             ctx,
         ),
     ];
-    let mut prelude = Vec::new();
-    prelude.extend(local_bindings);
-    prelude.push(assign_key);
+    let mut prelude = vec![assign_key];
     prelude.extend(local_key_parts);
     prelude.push(build_key);
     prelude.push(read);

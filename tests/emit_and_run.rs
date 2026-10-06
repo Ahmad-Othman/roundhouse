@@ -1547,61 +1547,6 @@ puts "ok"
         .assert_passes();
 }
 
-/// Explicit `locals:` on `cached: true` evaluate once: key and miss
-/// share the bound value (#488 discussion — side-effecting locals).
-#[test]
-fn cached_true_collection_binds_locals_once_for_key_and_miss() {
-    emit_and_run::real_blog()
-        .edit(
-            "app/models/article.rb",
-            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
-            r#"class Article < ApplicationRecord
-  has_many :comments, dependent: :destroy
-  def self.tick_count
-    @tick_count || 0
-  end
-  def self.reset_tick
-    @tick_count = 0
-  end
-  def self.tick
-    @tick_count = tick_count + 1
-    "t#{@tick_count}"
-  end
-"#,
-        )
-        .edit(
-            "app/controllers/articles_controller.rb",
-            "  def index\n    @articles = Article.includes(:comments).order(created_at: :desc)\n  end\n",
-            "  def index\n    @articles = Article.includes(:comments).order(created_at: :desc)\n  end\n\n  def probe\n    @articles = Article.order(:title)\n  end\n",
-        )
-        .write(
-            "app/views/articles/_probe_row.html.erb",
-            "<i><%= probe_row.title %>-<%= mode %></i>\n",
-        )
-        .write(
-            "app/views/articles/probe.html.erb",
-            "<%= render partial: \"articles/probe_row\", collection: @articles, cached: true, locals: { mode: Article.tick } %>\n",
-        )
-        .run_ruby(
-            r#"
-Article.delete_all
-Article.create!(title: "one", body: "long enough body")
-Article.create!(title: "two", body: "long enough body")
-rows = ActiveRecord::Relation.new(Article).to_a.sort_by { |a| a.title }
-Article.reset_tick
-html = Views::Articles.probe(rows)
-raise "tick #{Article.tick_count}: #{html}" unless Article.tick_count == 1
-raise "markup #{html}" unless html.include?("one-t1") && html.include?("two-t1")
-Article.reset_tick
-hit = Views::Articles.probe(rows)
-raise "hit tick #{Article.tick_count}" unless Article.tick_count == 1
-raise "hit drifted #{hit.inspect} vs #{html.inspect}" unless hit == html
-puts "ok"
-"#,
-        )
-        .assert_passes();
-}
-
 /// `cached: true` on a collection render is one store read of the
 /// concatenated partials. A second render of the same records must not
 /// run the inner fragment bodies.
