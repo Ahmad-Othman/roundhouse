@@ -398,6 +398,35 @@ end
         .assert_passes();
 }
 
+/// rack-test's `Rack::Test::UploadedFile` built from a StringIO, as
+/// campfire's undecodable-image test builds one from half a WebP
+/// (basecamp/once-campfire#311). It is the `ActionDispatch::Http::UploadedFile`
+/// a controller's params read takes. Undefined, it was a constant error
+/// on CRuby and, on Spinel, a refusal that kept the whole test file
+/// from compiling.
+#[test]
+fn rack_test_uploaded_file_from_a_stringio_runs() {
+    emit_and_run::real_blog()
+        .write(
+            "test/models/article_upload_test.rb",
+            r#"require "test_helper"
+
+class ArticleUploadTest < ActiveSupport::TestCase
+  test "a StringIO upload is the file params carry" do
+    upload = Rack::Test::UploadedFile.new(StringIO.new("RIFF half"), "image/webp", original_filename: "broken.webp")
+    assert_equal "broken.webp", upload.original_filename
+    assert_equal "image/webp", upload.content_type
+    assert_equal "RIFF half", upload.read
+    assert_equal 9, upload.size
+    assert upload.is_a?(ActionDispatch::Http::UploadedFile)
+  end
+end
+"#,
+        )
+        .run_test("test/models/article_upload_test.rb")
+        .assert_passes();
+}
+
 /// Named binds in `where` and `having` — `:size` used twice and an Array
 /// bound into `IN (:labels)` — in the shape of campfire's direct-room
 /// lookup (basecamp/once-campfire#310). Unbound, the placeholders reached

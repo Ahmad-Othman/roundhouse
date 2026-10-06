@@ -691,6 +691,23 @@ module ActionDispatch
   end
 end
 
+# rack-test's `Rack::Test::UploadedFile`, in the form that hands it a
+# StringIO — campfire's undecodable-image test builds one from half a
+# WebP. Rack turns it into an `ActionDispatch::Http::UploadedFile` on
+# the way into params, so here it IS one: the controller's
+# `from_params` takes it as the file it would see in production.
+# rack-test requires `original_filename` for a StringIO; the path form
+# (copying a file on disk into a tempfile) is not modeled.
+module Rack
+  module Test
+    class UploadedFile < ActionDispatch::Http::UploadedFile
+      def initialize(io, content_type = "text/plain", binary = false, original_filename:)
+        super(io.read, original_filename, content_type)
+      end
+    end
+  end
+end
+
 # In-process request dispatch — equivalent of Rails's
 # ActionDispatch::IntegrationTest. Test classes that need to exercise
 # controller actions extend this module to get get/post/patch/delete.
