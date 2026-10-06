@@ -1562,13 +1562,12 @@ fn elixir_format_constant(name: &str, value: &Expr) -> String {
 
 /// Each class already emits its own `defmodule V2.<Name>` (see
 /// `emit_library_class`), so this hook's job for Elixir is just to
-/// place module-level constants INSIDE their module. `transpile_entry`
+/// place module-level constants INSIDE their modules. `transpile_entry`
 /// emits constants (via `format_constant`) as lines ahead of the class
 /// bodies, but Elixir has no file-level constants and module attributes
-/// don't cross module boundaries — so move any leading constant lines
-/// into the first `defmodule`. (Current const-bearing files are single-
-/// module — `json_builder`, `action_controller/base`; a multi-module
-/// file with constants would need owner-aware routing, revisit then.)
+/// don't cross module boundaries — so inject any leading constant lines
+/// into **every** `defmodule` in the file (HeaderStore / Base /
+/// ActionController share FORGERY_SLOT and STATUS_CODES).
 /// The `namespace` arg is unused: V2-prefixing + naming happen in
 /// `emit_library_class`.
 fn elixir_wrap_namespace(_namespace: &str, body: &str) -> String {
@@ -1586,15 +1585,20 @@ fn elixir_wrap_namespace(_namespace: &str, body: &str) -> String {
         return body.to_string();
     }
     let mut out = String::new();
-    out.push_str(lines[first_mod]); // `defmodule V2.X do`
-    out.push('\n');
-    for c in &consts {
-        out.push_str(c);
-        out.push('\n');
-    }
-    for l in &lines[first_mod + 1..] {
+    // Drop the leading constant block — re-injected per module below.
+    for (i, l) in lines.iter().enumerate().skip(first_mod) {
         out.push_str(l);
         out.push('\n');
+        if l.trim_start().starts_with("defmodule ") {
+            // Peek: only inject once, right after the opening line.
+            // Nested `defmodule` inside a body would also match — the
+            // action_controller emit is flat sibling modules only.
+            for c in &consts {
+                out.push_str(c);
+                out.push('\n');
+            }
+            let _ = i;
+        }
     }
     out
 }
