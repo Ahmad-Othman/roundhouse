@@ -34,11 +34,11 @@ require_relative "boot"
 module Main
   # Dispatch one request to a response descriptor — the single source
   # of routing / controller / flash / redirect logic. Returns the
-  # 8-tuple `[status, body, content_type, location, set_cookies,
-  # extra_headers, secure_cookies, samesite_cookies]` (the first six
-  # are the exact argument shape `CgiIo.write_response` consumes; the
-  # rest are the explicit `secure:` / `same_site:` maps `run_rack`
-  # needs so it does not drop those flags). Two thin wrappers sit on top:
+  # 9-tuple `[status, body, content_type, location, set_cookies,
+  # extra_headers, secure_cookies, samesite_cookies, httponly_cookies]`
+  # (the first six are the exact argument shape `CgiIo.write_response`
+  # consumes; the rest are the explicit cookie-flag maps `run_rack`
+  # needs). Two thin wrappers sit on top:
   # `run` (CGI byte stream — tests + one-shot script mode) and
   # `run_rack` (a Rack tuple — the Puma serving path), so neither the
   # CGI string nor the Rack hash is the canonical form and the dispatch
@@ -121,7 +121,7 @@ module Main
     matched = ActionDispatch::Router.match(request[:method], request_path,
                            route_table)
     if matched.nil?
-      return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}]
+      return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
     end
     # A `(.:format)` EXTENSION the router stripped off the path
     # (`/rooms/3/refresh.turbo_stream`). The `.json` sniff above runs
@@ -220,7 +220,7 @@ module Main
     begin
       controller.process_action(matched.action)
     rescue ActiveRecord::RecordNotFound
-      return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}]
+      return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
     end
 
     # Dispatch on status, not on @location nil-ness: redirect_to
@@ -250,10 +250,12 @@ module Main
     jar = controller.cookies
     secure_cookies = {}
     samesite_cookies = {}
+    httponly_cookies = {}
     jar.pending.each do |k, v|
       out_cookies[k] = v
       secure_cookies[k] = true if jar.flag_secure?(k)
-      ss = jar.flag_samesite(k)
+      httponly_cookies[k] = jar.flag_httponly?(k)
+      ss = jar.flag_samesite(k).to_s
       samesite_cookies[k] = ss if ss.length > 0
     end
     # Session persistence: re-encode whatever the action (or a lazy
@@ -281,7 +283,7 @@ module Main
     if is_redirect
       [controller.status,
        %(<a href="#{controller.location}">Redirecting</a>),
-       "text/html; charset=utf-8", controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies]
+       "text/html; charset=utf-8", controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies]
     else
       # The controller body IS the full page: the Ruby emit path's
       # `apply_layout_lowering` wraps each html action render in
@@ -302,13 +304,13 @@ module Main
          controller.request_format == :turbo_stream ||
          controller.content_type != "text/html; charset=utf-8"
         [controller.status, controller.body,
-         controller.content_type, controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies]
+         controller.content_type, controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies]
       elsif controller.request_format == :rss
         [controller.status, controller.body,
-         "application/rss+xml; charset=utf-8", controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies]
+         "application/rss+xml; charset=utf-8", controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies]
       else
         [controller.status, controller.body,
-         "text/html; charset=utf-8", controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies]
+         "text/html; charset=utf-8", controller.location, out_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies]
       end
     end
   end
@@ -337,7 +339,7 @@ module Main
   # entry per cookie) and reuses `CgiIo.url_encode` so values match the
   # CGI path exactly.
   def self.run_rack(env)
-    status, body, content_type, location, set_cookies, extra_headers, secure_cookies, samesite_cookies =
+    status, body, content_type, location, set_cookies, extra_headers, secure_cookies, samesite_cookies, httponly_cookies =
       dispatch_core(env, env["rack.input"] || StringIO.new(""))
     headers = { "content-type" => content_type }
     headers["location"] = location unless location.nil?
@@ -352,7 +354,11 @@ module Main
       else
         ss = (samesite_cookies && samesite_cookies[name]).to_s
         ss = "Lax" if ss.empty?
-        line = "#{name}=#{CgiIo.url_encode(val.to_s)}; Path=/; HttpOnly; SameSite=#{ss}"
+        line = "#{name}=#{CgiIo.url_encode(val.to_s)}; Path=/"
+        # Default HttpOnly. Session/flash cookies are not in the map.
+        # An explicit httponly: false records false and is omitted.
+        line = line + "; HttpOnly" unless httponly_cookies && httponly_cookies.key?(name) && !httponly_cookies[name]
+        line = line + "; SameSite=#{ss}"
         line = line + "; Secure" if https || (secure_cookies && secure_cookies[name]) || ss == "None"
         line
       end
