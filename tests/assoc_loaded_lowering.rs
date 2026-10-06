@@ -169,3 +169,60 @@ end
         "expected collapse onto rich_text_body reader:\n{src}"
     );
 }
+
+#[test]
+fn association_target_skips_reader_on_unrelated_model() {
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "messages", force: :cascade do |t|
+    t.string "body"
+  end
+  create_table "rooms", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "boosts", force: :cascade do |t|
+    t.integer "message_id"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+  has_many :boosts
+end
+"#,
+        ),
+        (
+            "app/models/boost.rb",
+            r#"class Boost < ApplicationRecord
+  belongs_to :message
+end
+"#,
+        ),
+        (
+            "app/models/room.rb",
+            r#"class Room < ApplicationRecord
+  def wrong_target
+    # `:boosts` is Message's has_many — must not collapse onto Room.
+    association(:boosts).target
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = ruby::emit_lowered_models(&app);
+    let src = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("room.rb"))
+        .map(|f| f.content.as_str())
+        .unwrap_or("");
+    assert!(
+        src.contains("association(:boosts)"),
+        "association(:boosts).target on Room must stay (boosts is Message-only):\n{src}"
+    );
+}

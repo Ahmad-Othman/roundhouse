@@ -47,24 +47,26 @@ fn has_many_by_model(app: &App) -> HashMap<ClassId, HashSet<Symbol>> {
     out
 }
 
-/// Association / rich-text reader names `association(:x).target` may
-/// collapse onto. Unknown symbols stay as dynamic `association` calls.
-fn association_reader_names(app: &App) -> HashSet<Symbol> {
-    let mut out = HashSet::new();
+/// Per-model association / rich-text reader names `association(:x).target`
+/// may collapse onto. Keyed by owner so `room.association(:boosts).target`
+/// is not rewritten when only `Message` declares `:boosts`.
+fn association_readers_by_model(app: &App) -> HashMap<ClassId, HashSet<Symbol>> {
+    let mut out: HashMap<ClassId, HashSet<Symbol>> = HashMap::new();
     for model in &app.models {
+        let entry = out.entry(model.name.clone()).or_default();
         for (_, assoc) in model.spanned_associations() {
-            out.insert(assoc.name().clone());
+            entry.insert(assoc.name().clone());
         }
         for (_, attr) in crate::lower::rich_text::rich_text_attrs(model) {
-            out.insert(Symbol::from(format!("rich_text_{}", attr.as_str())));
+            entry.insert(Symbol::from(format!("rich_text_{}", attr.as_str())));
         }
     }
     out
 }
 
 /// ClassId of an expression that names a model instance (or a union
-/// containing one). Used to scope `loaded?` rewrites to the receiver's
-/// model. Returns `None` when the type is missing or not a class.
+/// containing one). Used to scope `loaded?` / `.target` rewrites to the
+/// receiver's model. Returns `None` when the type is missing or not a class.
 fn class_id_of(expr: &Expr) -> Option<ClassId> {
     match expr.ty.as_ref()? {
         Ty::Class { id, .. } => Some(id.clone()),
@@ -76,30 +78,63 @@ fn class_id_of(expr: &Expr) -> Option<ClassId> {
     }
 }
 
+/// Resolve which model owns the association hop: typed receiver first,
+/// then the enclosing class for implicit-self, then a unique-name
+/// fallback when the receiver is untyped and no enclosing class is known.
+fn resolve_owner_model(
+    recv: Option<&Expr>,
+    enclosing: Option<&ClassId>,
+    by_model: &HashMap<ClassId, HashSet<Symbol>>,
+    name: &Symbol,
+) -> Option<ClassId> {
+    if let Some(base) = recv {
+        if let Some(id) = class_id_of(base) {
+            return Some(id);
+        }
+    } else if let Some(id) = enclosing {
+        return Some(id.clone());
+    }
+    // Untyped explicit receiver (or no enclosing class): rewrite only
+    // when exactly one model declares this name.
+    let mut matches = by_model
+        .iter()
+        .filter(|(_, names)| names.contains(name))
+        .map(|(id, _)| id);
+    let first = matches.next().cloned();
+    if matches.next().is_some() {
+        None
+    } else {
+        first
+    }
+}
+
 /// Rewrite every `recv.assoc.loaded?` whose `assoc` is a known has_many
 /// **on the receiver's model** into `recv.assoc_loaded?`, and every
 /// `association(:name).target` into a bare `name` reader when `name`
-/// is a known association/rich-text reader. Implicit-self forms get a
-/// `self.` hop (same collapse `has_json` uses).
+/// is a known association/rich-text reader **on the receiver's model**.
+/// Implicit-self forms get a `self.` hop (same collapse `has_json` uses).
 pub fn apply_assoc_loaded_lowering(app: &mut App) -> Vec<Diagnostic> {
     let by_model = has_many_by_model(app);
-    let readers = association_reader_names(app);
-    super::for_each_hook_body(app, &mut |e| rewrite(e, &by_model, &readers));
+    let readers = association_readers_by_model(app);
+    super::for_each_owned_hook_body(app, &mut |owner, e| {
+        rewrite(e, owner, &by_model, &readers);
+    });
     for view in &mut app.views {
-        rewrite(&mut view.body, &by_model, &readers);
+        rewrite(&mut view.body, None, &by_model, &readers);
     }
-    super::for_each_test_body(app, &mut |e| rewrite(e, &by_model, &readers));
+    super::for_each_test_body(app, &mut |e| rewrite(e, None, &by_model, &readers));
     Vec::new()
 }
 
 fn rewrite(
     expr: &mut Expr,
+    enclosing: Option<&ClassId>,
     by_model: &HashMap<ClassId, HashSet<Symbol>>,
-    readers: &HashSet<Symbol>,
+    readers: &HashMap<ClassId, HashSet<Symbol>>,
 ) {
     expr.node
-        .for_each_child_mut(&mut |c| rewrite(c, by_model, readers));
-    if rewrite_association_target(expr, readers) {
+        .for_each_child_mut(&mut |c| rewrite(c, enclosing, by_model, readers));
+    if rewrite_association_target(expr, enclosing, readers) {
         return;
     }
     let ExprNode::Send {
@@ -129,24 +164,7 @@ fn rewrite(
     // Scope by the association receiver's model (`message` in
     // `message.boosts.loaded?`), not a global name set — a has_one or
     // plain method of the same name on another class must stay.
-    // Untyped receivers fall back to the unique-name check (rewrite
-    // only when exactly one model declares this has_many).
-    let owner_model = match owner.as_ref().and_then(|b| class_id_of(b)) {
-        Some(id) => Some(id),
-        None => {
-            let mut matches = by_model
-                .iter()
-                .filter(|(_, names)| names.contains(assoc))
-                .map(|(id, _)| id);
-            let first = matches.next().cloned();
-            if matches.next().is_some() {
-                None
-            } else {
-                first
-            }
-        }
-    };
-    let Some(owner_model) = owner_model else {
+    let Some(owner_model) = resolve_owner_model(owner.as_ref(), enclosing, by_model, assoc) else {
         return;
     };
     let Some(names) = by_model.get(&owner_model) else {
@@ -186,7 +204,13 @@ fn rewrite(
 
 /// `association(:rich_text_body).target` → `rich_text_body` (or
 /// `self.rich_text_body` when the association call was implicit-self).
-fn rewrite_association_target(expr: &mut Expr, readers: &HashSet<Symbol>) -> bool {
+/// Scoped to the association call's receiver model so a name declared
+/// only on an unrelated model does not rewrite onto this receiver.
+fn rewrite_association_target(
+    expr: &mut Expr,
+    enclosing: Option<&ClassId>,
+    readers: &HashMap<ClassId, HashSet<Symbol>>,
+) -> bool {
     let ExprNode::Send {
         recv: Some(inner),
         method,
@@ -214,11 +238,24 @@ fn rewrite_association_target(expr: &mut Expr, readers: &HashSet<Symbol>) -> boo
     let Some(name) = sym_lit(&assoc_args[0]) else {
         return false;
     };
-    if !readers.contains(&name) {
+    let Some(owner_model) = resolve_owner_model(owner.as_ref(), enclosing, readers, &name) else {
+        return false;
+    };
+    let Some(names) = readers.get(&owner_model) else {
+        return false;
+    };
+    if !names.contains(&name) {
         return false;
     }
     let new_recv = match owner {
-        None => Some(Expr::new(inner.span, ExprNode::SelfRef)),
+        None => {
+            let mut s = Expr::new(inner.span, ExprNode::SelfRef);
+            s.ty = Some(Ty::Class {
+                id: owner_model,
+                args: vec![],
+            });
+            Some(s)
+        }
         Some(base) => Some(base.clone()),
     };
     // Preserve the analyzed type so a safe-nav chain on `.target`

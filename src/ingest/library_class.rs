@@ -299,9 +299,14 @@ pub(super) fn library_class_and_struct_base(
     // for collection render, `each`/`any?`/`+`/`first`/`last`/…).
     // Same shape Spinel's refusal message asks the program for; done
     // here so every target sees one typed class, not a spinel-only
-    // emit special case.
+    // emit special case. Size-based `super(n, fill)` and other
+    // Array#initialize forms the wrapper cannot represent keep the
+    // Array parent (honest dynamic path) rather than a partial wrap.
     let (parent, methods) = if parent.as_ref().is_some_and(is_array_parent) {
-        (None, wrap_array_subclass(&owner, methods))
+        match try_wrap_array_subclass(&owner, methods) {
+            Ok(wrapped) => (None, wrapped),
+            Err(kept) => (parent, kept),
+        }
     } else {
         (parent, methods)
     };
@@ -705,20 +710,42 @@ fn is_array_parent(parent: &ClassId) -> bool {
 
 /// Rewrite `class X < Array` into an Object that holds `@elements`.
 ///
+/// Returns `Err(methods)` when `initialize` uses an Array construction
+/// the wrapper cannot represent (`super(3, :fill)` size+default) — the
+/// caller keeps the Array parent so dispatch stays honest.
+///
 /// `super(records)` in `initialize` becomes `@elements = records`.
 /// Synthesized forwards cover the Array surface the corpus actually
-/// calls on a page (collection render, `page_around`'s `+`, sidebar
-/// `any?`, bot paging `first`/`last`, search `count`). User methods
-/// of the same name win — the synthesizer skips names already present.
-fn wrap_array_subclass(owner: &ClassId, mut methods: Vec<MethodDef>) -> Vec<MethodDef> {
-    // Only `initialize`'s `super` maps onto `@elements = …`. A `super`
-    // in `first` / `each` / … is Array's method, not construction — leave
-    // those alone (they become the synthesized forwards below).
+/// calls on a page. A user override that is only bare/`super(…)` for a
+/// synthesized name is dropped so the forward wins — otherwise
+/// `def first; super; end` would keep `super` after the Array parent
+/// is cleared and raise at runtime.
+fn try_wrap_array_subclass(
+    owner: &ClassId,
+    mut methods: Vec<MethodDef>,
+) -> Result<Vec<MethodDef>, Vec<MethodDef>> {
+    if !initialize_super_is_wrappable(&methods) {
+        return Err(methods);
+    }
     for method in &mut methods {
         if method.name.as_str() == "initialize" {
             rewrite_array_super_to_elements(&mut method.body, &method.params);
         }
     }
+    let synth_names: HashSet<String> = [
+        "to_a", "to_ary", "each", "+", "any?", "empty?", "size", "length", "count", "first",
+        "last", "drop", "all?",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    // Pure-`super` overrides of synthesized names would leave a dead
+    // `super` after the Array parent is cleared. Drop them so synth wins.
+    methods.retain(|m| {
+        !(m.receiver == MethodReceiver::Instance
+            && synth_names.contains(m.name.as_str())
+            && is_pure_super_body(&m.body))
+    });
     let existing: HashSet<String> = methods
         .iter()
         .filter(|m| m.receiver == MethodReceiver::Instance)
@@ -727,17 +754,48 @@ fn wrap_array_subclass(owner: &ClassId, mut methods: Vec<MethodDef>) -> Vec<Meth
     let mut synthesized = synth_array_wrapper_methods(owner);
     synthesized.retain(|m| !existing.contains(m.name.as_str()));
     synthesized.append(&mut methods);
-    synthesized
+    Ok(synthesized)
 }
 
-/// `super(records)` / `super(records, …)` → `@elements = records`.
+/// True when every `Super` in `initialize` is a form the wrapper can
+/// express: bare `super`, `super()`, or `super(collection)` (one arg).
+/// `super(size, fill)` and longer arg lists are Array's size-based
+/// constructor — leave the class as a real Array subclass.
+fn initialize_super_is_wrappable(methods: &[MethodDef]) -> bool {
+    let Some(init) = methods
+        .iter()
+        .find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == "initialize")
+    else {
+        return true;
+    };
+    let mut ok = true;
+    let mut visit = |e: &Expr| {
+        if let ExprNode::Super { args: Some(args) } = &*e.node {
+            if args.len() >= 2 {
+                ok = false;
+            }
+        }
+    };
+    fn walk(expr: &Expr, visit: &mut dyn FnMut(&Expr)) {
+        visit(expr);
+        expr.node.for_each_child(&mut |c| walk(c, visit));
+    }
+    walk(&init.body, &mut visit);
+    ok
+}
+
+fn is_pure_super_body(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::Super { .. } => true,
+        ExprNode::Seq { exprs } if exprs.len() == 1 => is_pure_super_body(&exprs[0]),
+        _ => false,
+    }
+}
+
+/// `super(records)` → `@elements = records`.
 /// Bare `super` (args `None`) forwards `initialize`'s first positional
-/// — Ruby's zsuper — so `def initialize(records, …); super; end` keeps
-/// the page non-empty. Explicit `super()` (empty arg list) is the
-/// no-arg form → `@elements = []`. Deeper args past the first are
-/// dropped: Array#initialize takes one collection (or a size), and
-/// every corpus subclass only forwards the records. A bare `super`
-/// with no positional to forward is left alone (visible gap).
+/// — Ruby's zsuper. Explicit `super()` → `@elements = []`. Multi-arg
+/// forms are rejected upstream by `initialize_super_is_wrappable`.
 fn rewrite_array_super_to_elements(expr: &mut Expr, params: &[Param]) {
     expr.node
         .for_each_child_mut(&mut |c| rewrite_array_super_to_elements(c, params));
@@ -763,15 +821,22 @@ fn rewrite_array_super_to_elements(expr: &mut Expr, params: &[Param]) {
         )
     };
     let replacement = match &*expr.node {
-        ExprNode::Super { args: Some(args) } if !args.is_empty() => {
+        // Single-arg collection form (corpus: `super(records)`).
+        ExprNode::Super { args: Some(args) } if args.len() == 1 => {
             Some(assign(args[0].clone(), expr.span))
         }
         // Explicit `super()` — no args on purpose.
-        ExprNode::Super { args: Some(_) } => Some(assign(empty(expr.span), expr.span)),
+        ExprNode::Super { args: Some(args) } if args.is_empty() => {
+            Some(assign(empty(expr.span), expr.span))
+        }
         // Bare `super` — forward initialize's first positional.
         ExprNode::Super { args: None } => {
             let first = params.iter().find(|p| {
-                !p.keyword && !p.rest && !p.from_keyword && p.name.as_str() != "self"
+                !p.keyword
+                    && !p.rest
+                    && !p.from_keyword
+                    && !p.name.as_str().is_empty()
+                    && p.name.as_str() != "self"
             });
             match first {
                 Some(p) => Some(assign(
@@ -784,7 +849,6 @@ fn rewrite_array_super_to_elements(expr: &mut Expr, params: &[Param]) {
                     ),
                     expr.span,
                 )),
-                // No positional to forward — leave `super` visible.
                 None => None,
             }
         }

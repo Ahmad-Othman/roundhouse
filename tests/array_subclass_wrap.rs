@@ -161,17 +161,63 @@ end
         src.contains("@elements = records"),
         "bare super in initialize must forward first positional:\n{src}"
     );
-    // `first`'s bare super must NOT become an @elements assignment —
-    // the synthesized `first` forward owns that name, or the user
-    // method stays and still says `super` (either is fine; an
-    // `@elements =` inside `def first` is not).
-    let first_body = src
-        .split("def first")
-        .nth(1)
-        .and_then(|s| s.split("\ndef ").next())
-        .unwrap_or("");
+    // Pure-`super` `first` is dropped so the synthesized forward wins —
+    // keeping `def first; super; end` after clearing the Array parent
+    // would raise at runtime.
     assert!(
-        !first_body.contains("@elements ="),
-        "super outside initialize must not rewrite to @elements:\n{first_body}"
+        src.contains("@elements.first"),
+        "pure-super first override must yield synthesized @elements.first:\n{src}"
+    );
+    let has_dead_super_first = src.split("def first").skip(1).any(|chunk| {
+        let body = chunk.split("def ").next().unwrap_or("");
+        body.contains("super") && !body.contains("@elements")
+    });
+    assert!(
+        !has_dead_super_first,
+        "pure-super first must not survive as dead super:\n{src}"
+    );
+}
+
+#[test]
+fn size_fill_super_keeps_array_parent() {
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "messages", force: :cascade do |t|
+    t.string "body"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+end
+"#,
+        ),
+        (
+            "app/models/message/pagination.rb",
+            r#"module Message::Pagination
+  class Page < Array
+    def initialize
+      super(3, :item)
+    end
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let page = app
+        .library_classes
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "Message::Pagination::Page")
+        .expect("Page library class");
+    assert!(
+        page.parent.as_ref().is_some_and(|p| p.0.as_str() == "Array"),
+        "size+fill super must keep Array parent, got {:?}",
+        page.parent
     );
 }
