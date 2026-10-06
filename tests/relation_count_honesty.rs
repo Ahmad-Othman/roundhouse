@@ -25,6 +25,11 @@ const METHODS: &str = r#"
   def self.distinct_row_count
     Article.distinct.count
   end
+
+  def self.grouped_then_scalar_count
+    rel = Article.group(:title)
+    rel.count
+  end
 "#;
 
 fn overlay() -> emit_and_run::Overlay {
@@ -85,6 +90,21 @@ all = Article.count
 raise "distinct titles=#{{titles}} rows=#{{rows}} all=#{{all}}" unless titles == 2 && rows == 3 && all == 3
 raise "titles not integer" unless titles.is_a?(Integer)
 puts "distinct projection passed"
+"#,
+        seed = seed_articles()
+    );
+    overlay().run_ruby(&script).assert_passes();
+}
+
+#[test]
+fn scalar_count_on_a_grouped_relation_counts_groups() {
+    let script = format!(
+        r#"
+{seed}
+got = Article.grouped_then_scalar_count
+raise "grouped scalar: #{{got.inspect}}" unless got == 2
+raise "hash" if got.is_a?(Hash)
+puts "grouped scalar count passed"
 "#,
         seed = seed_articles()
     );
