@@ -318,11 +318,13 @@ fn recv_is_array(r: &Expr) -> bool {
             if matches!(instance_prop_ty(name.as_str()), Some(crate::ty::Ty::Array { .. })))
 }
 
-/// Elem type of an Array-typed receiver (ivar/local field table or
+/// Elem type of an Array-typed receiver (ivar field table or
 /// expression ty), peeling a nullable outer `Array[T]?`.
 fn array_elem_ty(r: &Expr) -> Option<crate::ty::Ty> {
+    // Property types apply only to `@ivar` — a local `Var` that
+    // shadows must keep `r.ty` (nullable elem vs non-nullable prop).
     let from_prop = match &*r.node {
-        ExprNode::Ivar { name } | ExprNode::Var { name, .. } => instance_prop_ty(name.as_str()),
+        ExprNode::Ivar { name } => instance_prop_ty(name.as_str()),
         _ => None,
     };
     let array_ty = from_prop.as_ref().or(r.ty.as_ref());
@@ -1037,13 +1039,21 @@ fn emit_literal(lit: &Literal) -> String {
 }
 
 /// Rewrite Ruby/PCRE `\0` (NUL) escapes to Java `\u0000` before string
-/// escaping. Leaves other backslash sequences alone.
+/// escaping. Tracks backslash parity so a literal `\\0` (escaped
+/// backslash then `0`) is left alone.
 fn normalize_java_regex_nul(pattern: &str) -> String {
     let mut out = String::with_capacity(pattern.len());
     let mut chars = pattern.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\\' {
             match chars.peek() {
+                Some('\\') => {
+                    // Escaped backslash — keep both; do not treat a
+                    // following `0` as a NUL escape.
+                    chars.next();
+                    out.push('\\');
+                    out.push('\\');
+                }
                 Some('0') => {
                     chars.next();
                     out.push_str("\\u0000");
@@ -1887,7 +1897,11 @@ fn emit_send(
             // Kotlin's are a Set/Collection, so materialize a MutableList.
             "keys" if recv_is_hash(r) => return format!("{rs}.keys.toMutableList()"),
             "values" if recv_is_hash(r) => return format!("{rs}.values.toMutableList()"),
-            // No-ops in Kotlin — drop, keep the receiver.
+            // `freeze`/`to_a` are no-ops. `dup` on a Hash must shallow-
+            // copy: `attrs = opts.to_h.dup; attrs.delete(:method)` must
+            // leave `opts[:method]` readable (form_with). Identity dup
+            // aliases the MutableMap and the delete erases the fetch.
+            "dup" if recv_is_hash(r) => return format!("{rs}.toMutableMap()"),
             "freeze" | "dup" | "to_a" => return rs,
             // `to_h` is a no-op on a Hash; on a user type (e.g. `Session`,
             // `Flash`) it's a real `toH()` method — fall through to the call.

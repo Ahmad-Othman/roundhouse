@@ -39,8 +39,13 @@ thread_local! {
     static DECLARED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     /// For locals first assigned `nil`, the nullable C# type taken from a
     /// later non-nil assignment — so `var x = null` (illegal in C#) becomes
-    /// `T? x = null`.
+    /// `T? x = null`. Also filled for the first typed assign with a `?`
+    /// suffix (nil-first path); hoist must not treat that alone as proof
+    /// of a nil write — see `SAW_NIL`.
     static NIL_TYPES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// Locals that are actually assigned a `nil` literal somewhere in the
+    /// method. Hoisted primitives stay non-nullable unless listed here.
+    static SAW_NIL: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     /// For locals first assigned an empty `{}`/`[]`, the C# container type
     /// inferred from later `map[k]=v` / `list << x` — so the empty literal
     /// gets a precise `new List<T>()` instead of `object?`.
@@ -338,8 +343,12 @@ fn recv_is_array(r: &Expr) -> bool {
 
 /// Elem type of an Array-typed receiver, peeling a nullable outer `Array[T]?`.
 fn array_elem_ty(r: &Expr) -> Option<crate::ty::Ty> {
+    // Instance-property types apply only to `@ivar` reads. A local
+    // `Var` that shadows a same-named property must use `r.ty` so a
+    // nullable-string array param is not coerced as if it were the
+    // non-nullable property.
     let from_prop = match &*r.node {
-        ExprNode::Ivar { name } | ExprNode::Var { name, .. } => instance_prop_ty(name.as_str()),
+        ExprNode::Ivar { name } => instance_prop_ty(name.as_str()),
         _ => None,
     };
     let array_ty = from_prop.as_ref().or(r.ty.as_ref());
@@ -548,10 +557,12 @@ pub(super) fn set_returns_unit(b: bool) {
 pub(super) fn begin_method(body: &Expr) {
     let mut counts: HashMap<String, usize> = HashMap::new();
     let mut nil_types: HashMap<String, String> = HashMap::new();
-    count_assigns(body, &mut counts, &mut nil_types);
+    let mut saw_nil: HashSet<String> = HashSet::new();
+    count_assigns(body, &mut counts, &mut nil_types, &mut saw_nil);
     DECLARED.with(|d| d.borrow_mut().clear());
     LOOP_ID.with(|c| *c.borrow_mut() = 0);
     NIL_TYPES.with(|t| *t.borrow_mut() = nil_types);
+    SAW_NIL.with(|s| *s.borrow_mut() = saw_nil);
 
     let mut container_types: HashMap<String, String> = HashMap::new();
     scan_container_types(body, &mut container_types);
@@ -571,12 +582,16 @@ pub(super) fn begin_method(body: &Expr) {
                 // Prefer the nullable nil-first type (a `result` assigned
                 // `null` then `Article` should hoist as `Article?`, not
                 // `object?`), so the eventual `return result` type-checks.
-                // Do NOT widen primitives: `found = false` is `bool`, and
-                // `count_assigns` tags every first assign with `?` for the
-                // nil-first path — applying that here makes `if (found)`
-                // fail CS0266 (`bool?` → `bool`).
+                // Do NOT widen primitives merely because count_assigns
+                // tagged the first typed assign with `?` — that made
+                // `if (found)` fail CS0266 (`bool?` → `bool`). Keep the
+                // plain primitive unless the body actually assigns nil.
                 let ty = match ty.as_str() {
-                    "bool" | "long" | "int" | "double" | "string" => ty.clone(),
+                    "bool" | "long" | "int" | "double" | "string"
+                        if !SAW_NIL.with(|s| s.borrow().contains(n)) =>
+                    {
+                        ty.clone()
+                    }
                     _ => NIL_TYPES
                         .with(|t| t.borrow().get(n).cloned())
                         .unwrap_or_else(|| ty.clone()),
@@ -730,6 +745,7 @@ fn count_assigns(
     e: &Expr,
     counts: &mut HashMap<String, usize>,
     nil_types: &mut HashMap<String, String>,
+    saw_nil: &mut HashSet<String>,
 ) {
     if let ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } = &*e.node {
         *counts.entry(camel(name.as_str())).or_insert(0) += 2;
@@ -737,6 +753,11 @@ fn count_assigns(
     if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*e.node {
         let cn = camel(name.as_str());
         *counts.entry(cn.clone()).or_insert(0) += 1;
+        if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil })
+            || matches!(value.ty.as_ref(), Some(crate::ty::Ty::Nil))
+        {
+            saw_nil.insert(cn.clone());
+        }
         if !nil_types.contains_key(&cn) {
             if let Some(ty) = value.ty.as_ref() {
                 if !matches!(ty, crate::ty::Ty::Nil) {
@@ -750,7 +771,7 @@ fn count_assigns(
         }
     }
     for child in children(e) {
-        count_assigns(child, counts, nil_types);
+        count_assigns(child, counts, nil_types, saw_nil);
     }
 }
 
@@ -1524,6 +1545,11 @@ fn emit_send(
             }
             "keys" if recv_is_hash(r) => return format!("{rs}.Keys.ToList()"),
             "values" if recv_is_hash(r) => return format!("{rs}.Values.ToList()"),
+            // Hash#dup must copy: see kotlin form_with (attrs.delete
+            // must not mutate the caller's opts).
+            "dup" if recv_is_hash(r) => {
+                return format!("new Dictionary<string, object?>({rs})");
+            }
             "freeze" | "dup" | "to_a" => return rs,
             "to_h" if recv_is_hash(r) => return rs,
             _ => {}

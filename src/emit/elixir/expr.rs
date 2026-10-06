@@ -852,6 +852,13 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                 return s;
             }
         }
+        // Mutable SCREAMING_SNAKE constants (`FORGERY_SLOT[0] = …`) —
+        // module attributes are compile-time only, so index assign/
+        // read go through the process dictionary with the attribute
+        // as the unset default.
+        if let Some(s) = emit_const_slot_send(r, method, args) {
+            return s;
+        }
     }
 
     // Ruby stdlib module calls (`Base64`, `JSON`) → their Elixir
@@ -2062,6 +2069,35 @@ fn emit_ivar_state_send(name: &str, method: &str, args: &[Expr]) -> Option<Strin
             Some(format!("Map.get({get}, {}, {})", emit_expr(&args[0]), emit_expr(&args[1])))
         }
         ("fetch", 1) => Some(format!("Map.fetch!({get}, {})", emit_expr(&args[0]))),
+        _ => None,
+    }
+}
+
+/// Mutable declared module constants used as array slots
+/// (`FORGERY_SLOT[0] = value`). Module attributes cannot be reassigned
+/// at runtime — mirror the ivar path through `Process` with the
+/// attribute as the default so reads see writes.
+fn emit_const_slot_send(recv: &Expr, method: &str, args: &[Expr]) -> Option<String> {
+    let ExprNode::Const { path } = &*recv.node else {
+        return None;
+    };
+    if path.len() != 1 || !is_screaming_snake(path[0].as_str()) {
+        return None;
+    }
+    let name = path[0].as_str();
+    if !DECLARED_CONSTANTS.with(|c| c.borrow().contains(name)) {
+        return None;
+    }
+    let attr = format!("@{}", name.to_lowercase());
+    let key = format!(":rh_const_{}", name.to_lowercase());
+    let get = format!("Process.get({key}, {attr})");
+    match (method, args.len()) {
+        ("[]=", 2) => Some(format!(
+            "Process.put({key}, List.replace_at({get}, {}, {}))",
+            emit_expr(&args[0]),
+            emit_expr(&args[1])
+        )),
+        ("[]", 1) => Some(format!("Enum.at({get}, {})", emit_expr(&args[0]))),
         _ => None,
     }
 }

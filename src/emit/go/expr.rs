@@ -163,10 +163,14 @@ impl EmitCtx {
     /// Value-position IIFE body (`func() T { … }()`). Cleared of
     /// `void_method` so string/ternary tails emit `return "…"`, even
     /// when the enclosing Ruby method is `() -> void` (e.g. `send_data`
-    /// assigning `disp = cond ? "inline" : "attachment"`).
+    /// assigning `disp = cond ? "inline" : "attachment"`). Also clears
+    /// `return_ty` so branch returns are not coerced to the outer
+    /// method's type (a string IIFE inside an `Int`-returning method
+    /// must not emit `return int64("…")`).
     pub fn value_iife(&self) -> Self {
         let mut child = self.enter_scope();
         child.void_method = false;
+        child.return_ty = None;
         child
     }
 }

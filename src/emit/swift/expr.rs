@@ -671,11 +671,13 @@ fn instance_prop_ty(name: &str) -> Option<crate::ty::Ty> {
     INSTANCE_PROP_TYPES.with(|m| m.borrow().get(&camel(name)).cloned())
 }
 
-/// Elem type of an Array-typed receiver (ivar/local field table or
+/// Elem type of an Array-typed receiver (ivar field table or
 /// expression ty), peeling a nullable outer `Array[T]?`.
 fn array_elem_ty(r: &Expr) -> Option<crate::ty::Ty> {
+    // Property types apply only to `@ivar` — a local `Var` that
+    // shadows must keep `r.ty` (nullable elem vs non-nullable prop).
     let from_prop = match &*r.node {
-        ExprNode::Ivar { name } | ExprNode::Var { name, .. } => instance_prop_ty(name.as_str()),
+        ExprNode::Ivar { name } => instance_prop_ty(name.as_str()),
         _ => None,
     };
     let array_ty = from_prop.as_ref().or(r.ty.as_ref());

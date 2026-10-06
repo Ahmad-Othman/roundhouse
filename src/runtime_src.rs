@@ -616,14 +616,6 @@ pub fn parse_library_with_rbs(
         for m in &lc.methods {
             crate::analyze::extract_ivar_assignments(&m.body, &mut flow_ivars);
         }
-        // RBS `@ivar: T` wins over body-inferred `Array[Var]` /
-        // `Hash<Var, Var>` from empty literals. Same contract as the
-        // getter override below — declared type, not initializer shape.
-        if let Some(declared) = rbs_ivars_by_class.get(&lc.name) {
-            for (name, ty) in declared {
-                flow_ivars.insert(name.clone(), ty.clone());
-            }
-        }
         // Override flow-inferred ivar types with RBS-declared
         // attr_accessor getter return types. `@params = {}` infers
         // `Hash<Var, Var>` from the body; the RBS getter says
@@ -638,6 +630,16 @@ pub fn parse_library_with_rbs(
                         flow_ivars.insert(m_name.clone(), (**ret).clone());
                     }
                 }
+            }
+        }
+        // Explicit RBS `@ivar: T` wins last — including over a
+        // zero-arg computed method of the same name (e.g. `@items:
+        // Array[String]` must not be replaced by `def items; …; end`
+        // returning Integer). Same contract as the seed that made
+        // HeaderStore `@keys`/`@vals` Array[String].
+        if let Some(declared) = rbs_ivars_by_class.get(&lc.name) {
+            for (name, ty) in declared {
+                flow_ivars.insert(name.clone(), ty.clone());
             }
         }
         if !flow_ivars.is_empty() {
