@@ -1,17 +1,9 @@
 //! `has_one …, autosave: true` stashes through the writer and persists
-//! the child after the owner saves. Abstract overlays cover the Rails
-//! declaration spellings this slice claims — not a Markdown-/Writebook-
-//! named product path.
+//! the child after the owner saves.
 //!
-//! Honest gaps (not claimed here):
-//! - `build_<assoc>` / `create_<assoc>` call-site rewrite does not assign
-//!   into the association cache, so autosave after bare `build_` alone
-//!   is unsupported; assign through `<assoc>=` (or assign the build
-//!   result) instead.
-//! - Rails' default `autosave: nil` (implicit autosave of new records)
-//!   is not modeled — only explicit `autosave: true`.
-//! - `inverse_of`, `touch`, `validate`, `required`, `strict_loading`
-//!   remain unmodeled association kwargs.
+//! Unclaimed: bare `build_`/`create_` without assigning into the cache;
+//! implicit `autosave: nil`; `inverse_of` / `touch` / `validate` /
+//! `required` / `strict_loading`.
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;

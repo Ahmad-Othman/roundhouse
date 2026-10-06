@@ -2,13 +2,9 @@
 //! column (text/string/json), decoded at the public accessor boundary
 //! through [`JsonColumn`](crate) the same way a schema `t.json` column is.
 //!
-//! Claimed spellings (Rails guides / AR API):
-//! - `serialize :prefs, coder: JSON`
-//! - `serialize :prefs, JSON` (legacy positional coder)
-//! - `serialize :prefs, coder: ::JSON`
-//!
-//! Bare `serialize :prefs` (YAML), custom coders, `type:` / `yaml:` /
-//! `comparable:`, and Array/Hash positional classes stay unclaimed.
+//! Claimed spellings: `coder: JSON`, positional `JSON`, and toplevel
+//! `::JSON` (Const path `["", "JSON"]`). Bare YAML `serialize :prefs`,
+//! custom coders, and Array/Hash positional classes stay unclaimed.
 
 use std::collections::HashSet;
 
@@ -75,8 +71,14 @@ fn is_json_const(expr: &crate::expr::Expr) -> bool {
     let ExprNode::Const { path } = &*expr.node else {
         return false;
     };
-    matches!(path.as_slice(), [name] if name.as_str() == "JSON")
-        || matches!(path.as_slice(), [root, name] if root.as_str() == "Object" && name.as_str() == "JSON")
+    // `JSON` → ["JSON"]; `::JSON` → ["", "JSON"] (Prism absolute Const).
+    matches!(
+        path.as_slice(),
+        [name] if name.as_str() == "JSON"
+    ) || matches!(
+        path.as_slice(),
+        [root, name] if root.as_str().is_empty() && name.as_str() == "JSON"
+    )
 }
 
 fn sym_lit(expr: &crate::expr::Expr) -> Option<Symbol> {

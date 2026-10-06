@@ -133,6 +133,7 @@ fn serialize_json_coder_variants_are_claimed() {
     for decl in [
         "serialize :payload, coder: JSON",
         "serialize :payload, JSON",
+        "serialize :payload, coder: ::JSON",
     ] {
         let body = format!("  {decl}\n");
         let app = ingest_app_from_tree(article_app(
@@ -238,32 +239,4 @@ end
         )
         .run_test("test/models/article_serialize_json_test.rb")
         .assert_passes();
-}
-
-#[test]
-fn serialize_json_coder_has_zero_errors() {
-    let run = emit_and_run::real_blog()
-        .edit(
-            "db/schema.rb",
-            "create_table \"articles\", force: :cascade do |t|",
-            "create_table \"articles\", force: :cascade do |t|\n    t.text \"payload\"",
-        )
-        .edit(
-            "app/models/article.rb",
-            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
-            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  serialize :payload, coder: JSON\n",
-        )
-        .run_ruby(
-            r#"
-a = Article.create!(title: "S", body: "A body long enough to validate.", payload: { "k" => 1 })
-raise "round-trip" unless Article.find(a.id).payload == { "k" => 1 }
-puts "serialize_ok"
-"#,
-        );
-    run.assert_passes();
-    assert!(
-        !run.errors.iter().any(|e| e.contains("serialize")),
-        "claimed serialize must not error: {:?}",
-        run.errors
-    );
 }

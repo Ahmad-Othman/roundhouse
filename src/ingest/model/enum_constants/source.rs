@@ -1,9 +1,7 @@
 //! Prism declaration collection and lexical traversal. Use-context syntax is
 //! classified separately; only policy interprets the resulting typed facts.
 
-use super::super::super::util::{
-    constant_id_str, flatten_statements, string_value, symbol_or_string_value,
-};
+use super::super::super::util::{constant_id_str, flatten_statements, symbol_or_string_value};
 use super::super::super::{expr, library_class, prism};
 use super::{
     EnumConstant, EnumConstants, ScopedName, SourceFact, SurfaceUse, ValueContext, context,

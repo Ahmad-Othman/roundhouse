@@ -1,14 +1,8 @@
 //! Unscoped `has_one` participates in Relation `preload` / `includes`
-//! batching through the load-once cache. Abstract overlays cover the
-//! Relation API spellings and declaration options this slice claims.
+//! batching through the load-once cache.
 //!
-//! Honest gaps (not claimed here):
-//! - Scoped `has_one :x, -> { where(...) }` stays on the lazy reader;
-//!   the batch loader does not apply the scope (same rule as has_many).
-//! - Polymorphic `has_one …, as:` is not in the preload batch yet
-//!   (lazy reader + type predicate still work).
-//! - `eager_load(:x)` is recognized for synthesizing batch loaders
-//!   (`app_mentions_includes`) but is not separately asserted here.
+//! Unclaimed: scoped `has_one` batch scope application; polymorphic
+//! `as:` preload batch; separate `eager_load` emit_and_run pin.
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;

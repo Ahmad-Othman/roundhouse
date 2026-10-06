@@ -469,20 +469,11 @@ pub(super) fn ingest_model_body_items(
                     })
                     .collect());
             }
-            // `cattr_*` / `mattr_*` — class-attribute expansion library
-            // ingest already applies. Models that carry class attrs
-            // (Writebook `ActionText::Markdown.mattr_accessor :renderer`)
-            // must synthesize the singleton reader/writer or `to_html`
-            // and inventory resolve as unresolved `renderer`.
-            //
-            // Plain `attr_*` stays Unknown here on purpose: concern
-            // `included` blocks share this walker, and
-            // `concern_accessors::{is_candidate,is_supported}` plus
-            // visibility's `included_has_accessor` gate all match the
-            // raw `attr_accessor` Send — expanding those into Method
-            // items made `included_has_accessor` false (so `private;`
-            // inside `included` hard-failed ingest) and dropped
-            // concern virtual accessors from the splice.
+            // `cattr_*` / `mattr_*` — same class-attr expansion library
+            // ingest applies. Plain `attr_*` stays Unknown: concern
+            // `included` blocks share this walker, and expanding those
+            // into Method items breaks `included_has_accessor` /
+            // visibility gating for `private;` inside `included`.
             if matches!(
                 name.as_str(),
                 "cattr_reader"

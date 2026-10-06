@@ -308,8 +308,7 @@ fn concern_percent_i_types_constant_ingests() {
     }
 }
 
-/// Concern-module constant `types: Leafable::TYPES` — Writebook's spelling
-/// as a general Rails pattern, not a product fork.
+/// Concern-module constant `types: Entryable::TYPES`.
 #[test]
 fn concern_constant_types_ingests() {
     let app = ingest_app_from_tree(tree(&[
@@ -624,10 +623,3 @@ puts "delegated_type foreign_key foreign_type primary_key passed"
         .assert_passes();
 }
 
-#[test]
-fn probe_pct_i_constant_alone() {
-    let app = entry_app("  TYPES = %i[Message Comment]\n  delegated_type :entryable, types: TYPES\n");
-    let inst = instance_names(&app, "Entry");
-    eprintln!("INST={inst:?}");
-    assert!(inst.iter().any(|n| n == "message?"), "{inst:?}");
-}
