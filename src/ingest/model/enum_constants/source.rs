@@ -176,7 +176,11 @@ impl EnumConstants {
                             }
                         })
                         .or_insert(value);
-                    if node.as_class_node().is_some() {
+                    // Classes and modules both own lexical constant
+                    // lookup — concern `TYPES` inside `included do`
+                    // resolves through the module entry the same way a
+                    // model class resolves `STATUS` for `enum`.
+                    if node.as_class_node().is_some() || node.as_module_node().is_some() {
                         self.constants.nesting.insert(
                             (self.file.to_string(), node.location().start_offset()),
                             std::iter::once(name.clone())

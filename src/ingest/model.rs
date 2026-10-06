@@ -34,7 +34,7 @@ use super::{IngestError, IngestResult};
 pub type TablePrefixes = std::collections::HashMap<String, String>;
 
 mod enum_constants;
-pub(super) use enum_constants::EnumConstants;
+pub(in crate::ingest) use enum_constants::EnumConstants;
 
 /// Scan one file for `module <Ns>; def self.table_name_prefix; "<p>"; end`.
 /// Deliberately narrow: only a module-level `self.` def whose body is a
@@ -802,7 +802,12 @@ pub(super) fn expand_class_body_dsl(
     leading_comments: &[Comment],
     resolve_constant: &impl Fn(&Node<'_>) -> Option<Vec<(String, Literal)>>,
 ) -> IngestResult<Option<ClassBodyExpansion>> {
-    match super::delegated_type::expand_delegated_type_decl(call, file, leading_comments)? {
+    match super::delegated_type::expand_delegated_type_decl(
+        call,
+        file,
+        leading_comments,
+        resolve_constant,
+    )? {
         Some(items) => return Ok(Some(ClassBodyExpansion::DelegatedType(items))),
         None => {}
     }

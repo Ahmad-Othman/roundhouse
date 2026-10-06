@@ -71,7 +71,9 @@ enum SourceFact {
 #[derive(Default)]
 pub(in crate::ingest) struct EnumConstants {
     values: std::collections::HashMap<String, EnumConstant>,
-    pub(super) nesting: std::collections::HashMap<(String, usize), Vec<String>>,
+    /// Lexical owners at each class/module open, keyed by (file, start).
+    /// Concern `included do` resolution reads the same table models use.
+    pub(in crate::ingest) nesting: std::collections::HashMap<(String, usize), Vec<String>>,
     /// Superclass identities are lookup barriers, never additional enum inputs.
     parents: std::collections::HashMap<String, Vec<ScopedName>>,
     facts: Vec<SourceFact>,
@@ -178,7 +180,7 @@ impl EnumConstants {
         true
     }
 
-    pub(super) fn resolve(
+    pub(in crate::ingest) fn resolve(
         &self,
         node: &Node<'_>,
         owners: &[String],
