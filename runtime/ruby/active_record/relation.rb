@@ -1890,10 +1890,10 @@ module ActiveRecord
     # Hash's `to_s` (which reached SQLite as `rooms {UPDATED_AT: :DESC}`
     # and raised `unrecognized token: "{"`).
     def order_term(p)
-      if p.is_a?(String)
-        p
-      else
+      if p.is_a?(Hash)
         format_order_hash(p)
+      else
+        p.to_s
       end
     end
 

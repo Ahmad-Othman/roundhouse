@@ -536,6 +536,8 @@ class BaseTest < Minitest::Test
     rel = ActiveRecord::Relation.new(Item)
     assert_equal "rooms.updated_at DESC", rel.order_term({ rooms: { updated_at: :desc } })
     assert_equal "updated_at DESC", rel.order_term({ updated_at: :desc })
+    assert_equal "updated_at", rel.order_term(:updated_at)
+    assert_equal "id DESC", rel.order_term("id DESC")
   end
 
   def test_spawn_copies_state_without_sharing_accumulators
