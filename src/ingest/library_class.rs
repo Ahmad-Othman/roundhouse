@@ -1845,22 +1845,51 @@ fn walk_decl_body_with_visibility<'pr>(
             if force_class_receiver || module_function_active || extend_self_active {
                 m.receiver = MethodReceiver::Class;
             }
-            // Last definition wins: a real `def` replaces a synthesized
-            // `attr_reader`/`attr_accessor` half of the same name (and
-            // replaces an earlier `def`). Without this, ingesting
-            // `attr_accessor :x` then `def x; … end` kept both and emit
-            // often retained the bare ivar reader — the memo body never
-            // ran and analyze reported `ivar_unresolved` on `@x`.
+            // A real `def` replaces a synthesized attr_* half of the
+            // same name (Ruby last-definition-wins for
+            // `attr_accessor :x` then `def x; … end`). An earlier real
+            // `def` is kept as duplicate evidence — `initialize` hooks
+            // and visibility tests rely on both surviving ingest. Match
+            // `push_user_methods`: only unsigned bare-ivar attr halves.
             if let Some(idx) = out
                 .methods
                 .iter()
                 .position(|e| e.name == m.name && e.receiver == m.receiver)
             {
-                out.methods[idx] = m;
-                // Replacing a synthesized attr half with a real `def`
-                // still counts as a direct def for `module_function :name`.
-                if !direct_def_positions.iter().any(|p| *p == idx) {
-                    direct_def_positions.push(idx);
+                let existing = &out.methods[idx];
+                let existing_is_attr_half = existing.signature.is_none()
+                    && match existing.kind {
+                        crate::dialect::AccessorKind::AttributeReader => {
+                            matches!(
+                                &*existing.body.node,
+                                ExprNode::Ivar { name } if name == &existing.name
+                            )
+                        }
+                        crate::dialect::AccessorKind::AttributeWriter => {
+                            let base = existing
+                                .name
+                                .as_str()
+                                .strip_suffix('=')
+                                .unwrap_or(existing.name.as_str());
+                            matches!(
+                                &*existing.body.node,
+                                ExprNode::Assign {
+                                    target: LValue::Ivar { name },
+                                    ..
+                                } if name.as_str() == base
+                            )
+                        }
+                        crate::dialect::AccessorKind::Method => false,
+                    };
+                if existing_is_attr_half {
+                    out.methods[idx] = m;
+                    if !direct_def_positions.iter().any(|p| *p == idx) {
+                        direct_def_positions.push(idx);
+                    }
+                } else {
+                    // Duplicate real `def` — keep both.
+                    direct_def_positions.push(out.methods.len());
+                    out.methods.push(m);
                 }
             } else {
                 direct_def_positions.push(out.methods.len());
