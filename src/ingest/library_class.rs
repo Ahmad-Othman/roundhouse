@@ -3099,15 +3099,8 @@ fn unknown_is_model_macro(item: &crate::dialect::ModelBodyItem) -> bool {
     CONCERN_MODEL_MACROS.contains(&method.as_str())
 }
 
-/// An `enum` captured from a concern `included do`. Named fields so a
-/// new option cannot vanish the way `default:` did when this was a
-/// `(column, mapping)` pair.
-#[derive(Clone, Debug)]
-pub struct ConcernEnumDecl {
-    pub column: Symbol,
-    pub mapping: Vec<(String, crate::expr::Literal)>,
-    pub default: Option<crate::expr::Literal>,
-}
+/// Re-export: table payload lives next to [`super::model::EnumExpansion`].
+pub use super::model::ConcernEnumDecl;
 
 /// Second return value: `enum` columns declared inside an `included
 /// do`, keyed by the concern module. They belong to every includer
@@ -3186,34 +3179,18 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
                 // User::Role. Expanded here for the same reason the
                 // model walk expands it: one statement, many items.
                 if let Some(call) = inner.as_call_node() {
-                    match super::delegated_type::expand_delegated_type_decl(&call, file, &[]) {
-                        Ok(Some(expanded)) => {
+                    match super::model::expand_class_body_dsl(&call, file, &[], &|_| None) {
+                        Ok(Some(super::model::ClassBodyExpansion::DelegatedType(expanded))) => {
                             items.extend(expanded);
                             continue;
                         }
-                        Ok(None) => {}
-                        Err(err) => {
-                            super::survey::record(&err);
-                            unclaimed = true;
-                            continue;
-                        }
-                    }
-                    match super::model::expand_enum_decl(
-                        &call, file, &[], &|_| None,
-                    ) {
-                        Ok(Some(expanded)) => {
-                            let super::model::EnumExpansion {
-                                column,
-                                mapping,
-                                default,
-                                items: enum_items,
-                            } = expanded;
+                        Ok(Some(super::model::ClassBodyExpansion::Enum(expanded))) => {
                             enums.push(ConcernEnumDecl {
-                                column,
-                                mapping,
-                                default,
+                                column: expanded.column,
+                                mapping: expanded.mapping,
+                                default: expanded.default,
                             });
-                            items.extend(enum_items);
+                            items.extend(expanded.items);
                             continue;
                         }
                         Ok(None) => {}

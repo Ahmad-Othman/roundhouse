@@ -464,10 +464,18 @@ fn bare_send(method: &str) -> Expr {
 }
 
 fn instance_method(name: String, body: Expr) -> ModelBodyItem {
+    synth_method(name, MethodReceiver::Instance, body)
+}
+
+fn class_method(name: String, body: Expr) -> ModelBodyItem {
+    synth_method(name, MethodReceiver::Class, body)
+}
+
+fn synth_method(name: String, receiver: MethodReceiver, body: Expr) -> ModelBodyItem {
     ModelBodyItem::Method {
         method: MethodDef {
             name: Symbol::from(name),
-            receiver: MethodReceiver::Instance,
+            receiver,
             visibility: MethodVisibility::Public,
             params: Vec::new(),
             unsupported_formals: None,
@@ -482,18 +490,6 @@ fn instance_method(name: String, body: Expr) -> ModelBodyItem {
             is_async: false,
             mutates_self: false,
         },
-        leading_comments: Vec::new(),
-        leading_blank_line: false,
-    }
-}
-
-fn class_method(name: String, body: Expr) -> ModelBodyItem {
-    let ModelBodyItem::Method { mut method, .. } = instance_method(name, body) else {
-        unreachable!()
-    };
-    method.receiver = MethodReceiver::Class;
-    ModelBodyItem::Method {
-        method,
         leading_comments: Vec::new(),
         leading_blank_line: false,
     }

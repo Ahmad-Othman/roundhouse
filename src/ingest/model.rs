@@ -222,8 +222,8 @@ pub(super) fn ingest_model_with_enum_constants(
             // scope + predicate + bang writer per label, so it expands
             // in the walk loop for the same reason `class << self` does.
             if let Some(call) = stmt.as_call_node() {
-                match super::delegated_type::expand_delegated_type_decl(&call, file, &leading) {
-                    Ok(Some(expanded)) => {
+                match expand_class_body_dsl(&call, file, &leading, &resolve_constant) {
+                    Ok(Some(ClassBodyExpansion::DelegatedType(expanded))) => {
                         let mut blank = leading_blank;
                         for mut item in expanded {
                             item.set_leading_blank_line(std::mem::take(&mut blank));
@@ -232,16 +232,7 @@ pub(super) fn ingest_model_with_enum_constants(
                         prev_end = Some(stmt.location().end_offset());
                         continue;
                     }
-                    Ok(None) => {}
-                    Err(err) if super::survey::is_active() => {
-                        super::survey::record(&err);
-                        prev_end = Some(stmt.location().end_offset());
-                        continue;
-                    }
-                    Err(err) => return Err(err),
-                }
-                match expand_enum_decl(&call, file, &leading, &resolve_constant) {
-                    Ok(Some(expanded)) => {
+                    Ok(Some(ClassBodyExpansion::Enum(expanded))) => {
                         if let Some(d) = expanded.default {
                             enum_defaults.insert(expanded.column.clone(), d);
                         }
@@ -785,6 +776,40 @@ pub(super) struct EnumExpansion {
     /// The stored value `default:` names.
     pub default: Option<Literal>,
     pub items: Vec<ModelBodyItem>,
+}
+
+/// Table payload of [`EnumExpansion`] without the generated items.
+/// Captured from a concern `included do` so the splice can fold the
+/// mapping into each includer's `enums` / `enum_defaults`.
+#[derive(Clone, Debug)]
+pub struct ConcernEnumDecl {
+    pub column: Symbol,
+    pub mapping: Vec<(String, Literal)>,
+    pub default: Option<Literal>,
+}
+
+/// One class-body DSL expansion — `delegated_type` then `enum`. Both
+/// ingest walks call [`expand_class_body_dsl`] instead of growing a
+/// third parallel `match`.
+pub(super) enum ClassBodyExpansion {
+    DelegatedType(Vec<ModelBodyItem>),
+    Enum(EnumExpansion),
+}
+
+pub(super) fn expand_class_body_dsl(
+    call: &ruby_prism::CallNode<'_>,
+    file: &str,
+    leading_comments: &[Comment],
+    resolve_constant: &impl Fn(&Node<'_>) -> Option<Vec<(String, Literal)>>,
+) -> IngestResult<Option<ClassBodyExpansion>> {
+    match super::delegated_type::expand_delegated_type_decl(call, file, leading_comments)? {
+        Some(items) => return Ok(Some(ClassBodyExpansion::DelegatedType(items))),
+        None => {}
+    }
+    match expand_enum_decl(call, file, leading_comments, resolve_constant)? {
+        Some(exp) => Ok(Some(ClassBodyExpansion::Enum(exp))),
+        None => Ok(None),
+    }
 }
 
 /// The same syntax contract serves expansion and post-ingest validation.
