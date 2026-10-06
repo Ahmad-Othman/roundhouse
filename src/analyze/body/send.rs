@@ -2520,7 +2520,7 @@ pub(super) fn hash_method(
         // (`symbolize_keys`, `with_indifferent_access`, ...) and
         // `to_query`/`to_param` are typed above; `to_xml` renders a
         // document.
-        "to_xml" | "to_sentence" => Ty::Str,
+        "to_xml" => Ty::Str,
         // `first` without a count is the first `[key, value]` pair (nil
         // when empty); with a count, an Array of pairs.
         "first" => {
@@ -2673,17 +2673,9 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         | "squish" | "remove" | "indent" | "strip_heredoc"
         | "html_safe" | "to_query" | "to_param" => Ty::Str,
         "constantize" | "safe_constantize" => unknown(),
-        // ActiveSupport `String#to_date` / `to_time` / `to_datetime` /
-        // `in_time_zone` parse a date string. Date and DateTime fold into `Time` (see
-        // `time_method`), so all three answer it.
-        "to_date" | "to_time" | "to_datetime" | "in_time_zone" => Ty::Time,
-        // ActiveSupport `String#to_d` (BigDecimal). A decimal is
-        // modelled as `Float` throughout (decimal columns read as
-        // Float), so the conversion answers the same.
-        "to_d" => Ty::Float,
-        // `Object#to_json` / `Object#as_json` (ActiveSupport): a String
-        // serializes to a JSON String and is its own JSON-primitive form.
-        "to_json" | "as_json" => Ty::Str,
+        // JSON encoding is provided by the Ruby runtime; the other
+        // ActiveSupport conversions need their own shared implementations.
+        "to_json" => Ty::Str,
         // ActiveSupport boolean predicates (Object#blank? is universal
         // and lives there; String#starts_with? / ends_with? are
         // ActiveSupport's underscore-style aliases of start_with? /
