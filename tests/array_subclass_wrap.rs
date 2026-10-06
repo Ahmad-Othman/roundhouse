@@ -221,3 +221,93 @@ end
         page.parent
     );
 }
+
+#[test]
+fn integer_size_super_keeps_array_parent() {
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "messages", force: :cascade do |t|
+    t.string "body"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+end
+"#,
+        ),
+        (
+            "app/models/message/pagination.rb",
+            r#"module Message::Pagination
+  class Page < Array
+    def initialize
+      super(3)
+    end
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let page = app
+        .library_classes
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "Message::Pagination::Page")
+        .expect("Page library class");
+    assert!(
+        page.parent.as_ref().is_some_and(|p| p.0.as_str() == "Array"),
+        "super(3) size form must keep Array parent, got {:?}",
+        page.parent
+    );
+}
+
+#[test]
+fn empty_array_subclass_seeds_elements() {
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "messages", force: :cascade do |t|
+    t.string "body"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+end
+"#,
+        ),
+        (
+            "app/models/message/pagination.rb",
+            r#"module Message::Pagination
+  class Page < Array
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = ruby::emit_library(&app);
+    let src = files
+        .iter()
+        .find(|f| f.content.contains("class Page") && f.content.contains("@elements"))
+        .map(|f| f.content.as_str())
+        .unwrap_or("");
+    assert!(
+        src.contains("@elements = []") || src.contains("@elements=[]"),
+        "empty Array subclass must seed @elements = []:\n{src}"
+    );
+    assert!(
+        src.contains("block_given?"),
+        "each/all? must branch on block_given?:\n{src}"
+    );
+}
+

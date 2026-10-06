@@ -78,13 +78,16 @@ fn class_id_of(expr: &Expr) -> Option<ClassId> {
     }
 }
 
-/// Resolve which model owns the association hop: typed receiver first,
-/// then the enclosing **model** for implicit-self (concern modules are
-/// not model keys — fall through), then a unique-name fallback when the
-/// receiver is untyped and no model enclosing class is known.
+/// Resolve which model owns the association hop.
+///
+/// Typed explicit receiver wins. Untyped explicit receiver falls back
+/// to a unique-name match (the rewrite keeps that receiver; it does
+/// not stamp SelfRef). Implicit-self uses the enclosing model, or a
+/// concern module's sole model includer — never a unique-name guess.
 fn resolve_owner_model(
     recv: Option<&Expr>,
     enclosing: Option<&ClassId>,
+    sole_includer: &HashMap<ClassId, ClassId>,
     by_model: &HashMap<ClassId, HashSet<Symbol>>,
     name: &Symbol,
 ) -> Option<ClassId> {
@@ -92,17 +95,20 @@ fn resolve_owner_model(
         if let Some(id) = class_id_of(base) {
             return Some(id);
         }
+        return unique_model_for_name(by_model, name);
     }
-    // Implicit-self / untyped: prefer the enclosing model when this
-    // walk's owner is a real model. Concern modules (`Message::Searchable`)
-    // are not keys in `by_model` — fall through so Campfire's
-    // `association(:rich_text_body).target` inside the concern still
-    // resolves via the unique-name path onto `Message`.
-    if let Some(id) = enclosing {
-        if by_model.contains_key(id) {
-            return Some(id.clone());
-        }
+    let enclosing = enclosing?;
+    if by_model.contains_key(enclosing) {
+        return Some(enclosing.clone());
     }
+    let includer = sole_includer.get(enclosing)?;
+    by_model.contains_key(includer).then(|| includer.clone())
+}
+
+fn unique_model_for_name(
+    by_model: &HashMap<ClassId, HashSet<Symbol>>,
+    name: &Symbol,
+) -> Option<ClassId> {
     let mut matches = by_model
         .iter()
         .filter(|(_, names)| names.contains(name))
@@ -123,25 +129,29 @@ fn resolve_owner_model(
 pub fn apply_assoc_loaded_lowering(app: &mut App) -> Vec<Diagnostic> {
     let by_model = has_many_by_model(app);
     let readers = association_readers_by_model(app);
+    let sole_includer = app.sole_includer_of_modules();
     super::for_each_owned_hook_body(app, &mut |owner, e| {
-        rewrite(e, owner, &by_model, &readers);
+        rewrite(e, owner, &sole_includer, &by_model, &readers);
     });
     for view in &mut app.views {
-        rewrite(&mut view.body, None, &by_model, &readers);
+        rewrite(&mut view.body, None, &sole_includer, &by_model, &readers);
     }
-    super::for_each_test_body(app, &mut |e| rewrite(e, None, &by_model, &readers));
+    super::for_each_test_body(app, &mut |e| {
+        rewrite(e, None, &sole_includer, &by_model, &readers);
+    });
     Vec::new()
 }
 
 fn rewrite(
     expr: &mut Expr,
     enclosing: Option<&ClassId>,
+    sole_includer: &HashMap<ClassId, ClassId>,
     by_model: &HashMap<ClassId, HashSet<Symbol>>,
     readers: &HashMap<ClassId, HashSet<Symbol>>,
 ) {
     expr.node
-        .for_each_child_mut(&mut |c| rewrite(c, enclosing, by_model, readers));
-    if rewrite_association_target(expr, enclosing, readers) {
+        .for_each_child_mut(&mut |c| rewrite(c, enclosing, sole_includer, by_model, readers));
+    if rewrite_association_target(expr, enclosing, sole_includer, readers) {
         return;
     }
     let ExprNode::Send {
@@ -171,7 +181,9 @@ fn rewrite(
     // Scope by the association receiver's model (`message` in
     // `message.boosts.loaded?`), not a global name set — a has_one or
     // plain method of the same name on another class must stay.
-    let Some(owner_model) = resolve_owner_model(owner.as_ref(), enclosing, by_model, assoc) else {
+    let Some(owner_model) =
+        resolve_owner_model(owner.as_ref(), enclosing, sole_includer, by_model, assoc)
+    else {
         return;
     };
     let Some(names) = by_model.get(&owner_model) else {
@@ -216,6 +228,7 @@ fn rewrite(
 fn rewrite_association_target(
     expr: &mut Expr,
     enclosing: Option<&ClassId>,
+    sole_includer: &HashMap<ClassId, ClassId>,
     readers: &HashMap<ClassId, HashSet<Symbol>>,
 ) -> bool {
     let ExprNode::Send {
@@ -245,7 +258,9 @@ fn rewrite_association_target(
     let Some(name) = sym_lit(&assoc_args[0]) else {
         return false;
     };
-    let Some(owner_model) = resolve_owner_model(owner.as_ref(), enclosing, readers, &name) else {
+    let Some(owner_model) =
+        resolve_owner_model(owner.as_ref(), enclosing, sole_includer, readers, &name)
+    else {
         return false;
     };
     let Some(names) = readers.get(&owner_model) else {

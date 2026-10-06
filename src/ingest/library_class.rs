@@ -740,11 +740,30 @@ fn try_wrap_array_subclass(
     .map(str::to_string)
     .collect();
     // Pure-`super` overrides of synthesized names would leave a dead
-    // `super` after the Array parent is cleared. Drop them so synth wins.
+    // `super` after the Array parent is cleared. Drop only 0-arg
+    // `first`/`last` (the synth surface); `def first(n); super(n); end`
+    // stays — the wrapper cannot represent Array#first(n).
     methods.retain(|m| {
-        !(m.receiver == MethodReceiver::Instance
-            && synth_names.contains(m.name.as_str())
-            && is_pure_super_body(&m.body))
+        if m.receiver != MethodReceiver::Instance || !synth_names.contains(m.name.as_str()) {
+            return true;
+        }
+        if !is_pure_super_body(&m.body) {
+            return true;
+        }
+        let positional = m
+            .params
+            .iter()
+            .filter(|p| {
+                !p.keyword
+                    && !p.rest
+                    && !p.from_keyword
+                    && !p.name.as_str().is_empty()
+                    && p.name.as_str() != "self"
+            })
+            .count();
+        // Drop 0-arg pure-super (`def first; super; end`) so synth wins.
+        // Keep `def first(n); super(n); end` — synth is 0-arg.
+        positional != 0
     });
     let existing: HashSet<String> = methods
         .iter()
@@ -753,14 +772,20 @@ fn try_wrap_array_subclass(
         .collect();
     let mut synthesized = synth_array_wrapper_methods(owner);
     synthesized.retain(|m| !existing.contains(m.name.as_str()));
+    // Empty Array subclass (`class Page < Array; end`) has no
+    // initializer — seed `@elements = []` so forwards do not call
+    // through nil.
+    if !existing.contains("initialize") {
+        synthesized.push(synth_empty_array_initialize(owner));
+    }
     synthesized.append(&mut methods);
     Ok(synthesized)
 }
 
 /// True when every `Super` in `initialize` is a form the wrapper can
-/// express: bare `super`, `super()`, or `super(collection)` (one arg).
-/// `super(size, fill)` and longer arg lists are Array's size-based
-/// constructor — leave the class as a real Array subclass.
+/// express: bare `super`, `super()`, or `super(collection)` (one
+/// non-integer arg). `super(3)` / `super(3, :fill)` are Array's
+/// size-based constructor — leave the class as a real Array subclass.
 fn initialize_super_is_wrappable(methods: &[MethodDef]) -> bool {
     let Some(init) = methods
         .iter()
@@ -773,6 +798,9 @@ fn initialize_super_is_wrappable(methods: &[MethodDef]) -> bool {
         if let ExprNode::Super { args: Some(args) } = &*e.node {
             if args.len() >= 2 {
                 ok = false;
+            } else if args.len() == 1 && is_integer_lit(&args[0]) {
+                // `super(3)` is Array's size constructor, not a collection.
+                ok = false;
             }
         }
     };
@@ -782,6 +810,15 @@ fn initialize_super_is_wrappable(methods: &[MethodDef]) -> bool {
     }
     walk(&init.body, &mut visit);
     ok
+}
+
+fn is_integer_lit(expr: &Expr) -> bool {
+    matches!(
+        &*expr.node,
+        ExprNode::Lit {
+            value: Literal::Int { .. }
+        }
+    )
 }
 
 fn is_pure_super_body(expr: &Expr) -> bool {
@@ -904,48 +941,64 @@ fn synth_array_wrapper_methods(owner: &ClassId) -> Vec<MethodDef> {
     // `@elements.each { |x| yield x }; self` — same yield-through
     // shape Relation uses for Enumerable terminals; keeps the page
     // as the `each` return value (Array#each contract).
-    let each_body = Expr::new(
-        Span::synthetic(),
-        ExprNode::Seq {
-            exprs: vec![
-                Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Send {
-                        recv: Some(ivar()),
-                        method: Symbol::from("each"),
-                        args: vec![],
-                        block: Some(block_of(
-                            "x",
-                            Expr::new(
-                                Span::synthetic(),
-                                ExprNode::Yield {
-                                    args: vec![local("x")],
-                                },
-                            ),
-                        )),
-                        parenthesized: false,
-                    },
-                ),
-                Expr::new(Span::synthetic(), ExprNode::SelfRef),
-            ],
-        },
-    );
     let all_body = Expr::new(
         Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(ivar()),
-            method: Symbol::from("all?"),
-            args: vec![],
-            block: Some(block_of(
-                "x",
-                Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Yield {
-                        args: vec![local("x")],
-                    },
-                ),
-            )),
-            parenthesized: false,
+        ExprNode::If {
+            cond: call(None, "block_given?", vec![]),
+            then_branch: Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(ivar()),
+                    method: Symbol::from("all?"),
+                    args: vec![],
+                    block: Some(block_of(
+                        "x",
+                        Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Yield {
+                                args: vec![local("x")],
+                            },
+                        ),
+                    )),
+                    parenthesized: false,
+                },
+            ),
+            else_branch: call(Some(ivar()), "all?", vec![]),
+        },
+    );
+    // Yield through when a block is given; otherwise return the
+    // Enumerator `@elements.each` produces (Array#each contract).
+    let each_body = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: call(None, "block_given?", vec![]),
+            then_branch: Expr::new(
+                Span::synthetic(),
+                ExprNode::Seq {
+                    exprs: vec![
+                        Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Send {
+                                recv: Some(ivar()),
+                                method: Symbol::from("each"),
+                                args: vec![],
+                                block: Some(block_of(
+                                    "x",
+                                    Expr::new(
+                                        Span::synthetic(),
+                                        ExprNode::Yield {
+                                            args: vec![local("x")],
+                                        },
+                                    ),
+                                )),
+                                parenthesized: false,
+                            },
+                        ),
+                        Expr::new(Span::synthetic(), ExprNode::SelfRef),
+                    ],
+                },
+            ),
+            else_branch: call(Some(ivar()), "each", vec![]),
         },
     );
     vec![
@@ -963,6 +1016,40 @@ fn synth_array_wrapper_methods(owner: &ClassId) -> Vec<MethodDef> {
         forward1("drop", "n"),
         method("all?", vec![], all_body, true),
     ]
+}
+
+fn synth_empty_array_initialize(owner: &ClassId) -> MethodDef {
+    MethodDef {
+        name_span: Span::synthetic(),
+        name: Symbol::from("initialize"),
+        receiver: MethodReceiver::Instance,
+        visibility: crate::dialect::MethodVisibility::Private,
+        params: vec![],
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        body: Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Ivar {
+                    name: Symbol::from("elements"),
+                },
+                value: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Array {
+                        elements: vec![],
+                        style: crate::expr::ArrayStyle::default(),
+                    },
+                ),
+            },
+        ),
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: crate::dialect::AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    }
 }
 
 fn self_class() -> Expr {
