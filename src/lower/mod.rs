@@ -327,6 +327,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("attr_or_assign", &[]),
     ("group_count", &[]),
     ("errors_full_messages", &[]),
+    ("each_with_index", &[]),
     ("blank", &[]),
     ("time_current", &[]),
     ("as_json_super", &[]),
@@ -351,11 +352,6 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // neither of which any other pass produces or consumes, so no
     // ordering constraints.
     ("global_id_locate", &[]),
-    // `recv.each.with_index(n?) { }` → `each_with_index` (+ offset bind).
-    // Keys on an Enumerator chain no other pass produces or consumes,
-    // so no ordering constraints. Unblocks Spinel AOT on Writebook
-    // Positionable#move_to_position (keyword call closing over index).
-    ("each_with_index", &[]),
     ("assoc_pluck", &[]),
     ("try_guard", &[]),
     // `record.read_attribute(:x)` → `record[:x]`; a rename of a name no other pass produces or consumes.
@@ -763,7 +759,10 @@ pub fn apply_post_analyze_lowerings(
     ran!("attr_or_assign");
     ran!("group_count");
     ran!("errors_full_messages");
-    diags.extend(blank::apply_blank_lowering(app));
+    ran!("each_with_index");
+    diags.extend(crate::timings::phase("post-analyze: blank", || {
+        blank::apply_blank_lowering(app)
+    }));
     ran!("blank");
     time_current::apply_time_current_lowering(app);
     ran!("time_current");
@@ -775,14 +774,14 @@ pub fn apply_post_analyze_lowerings(
     ran!("parameterize");
     diags.extend(class_body_new::apply_class_body_new_lowering(app));
     ran!("class_body_new");
-    mocha::apply_mocha_lowering(app);
+    crate::timings::phase("post-analyze: mocha", || {
+        mocha::apply_mocha_lowering(app);
+    });
     ran!("mocha");
     webmock::apply_webmock_lowering(app);
     ran!("webmock");
     global_id_locate::apply_global_id_locate_lowering(app);
     ran!("global_id_locate");
-    each_with_index::apply_each_with_index_lowering(app);
-    ran!("each_with_index");
     assoc_pluck::apply_assoc_pluck_lowering(app);
     ran!("assoc_pluck");
     try_guard::apply_try_guard_lowering(app);
@@ -849,7 +848,9 @@ pub fn apply_post_analyze_lowerings(
     ran!("symbolize_keys");
     enum_mapping_keys::apply_enum_mapping_keys(app);
     ran!("enum_mapping_keys");
-    diags.extend(kwsplat::apply_kwsplat_expansion(app));
+    diags.extend(crate::timings::phase("post-analyze: kwsplat", || {
+        kwsplat::apply_kwsplat_expansion(app)
+    }));
     ran!("kwsplat");
     rails_cache::apply_rails_cache_lowering(app);
     ran!("rails_cache");
@@ -923,7 +924,9 @@ pub fn apply_post_analyze_lowerings(
     ran!("mailer_class_side");
     diags.extend(job_class_side::apply_job_class_side(app));
     ran!("job_class_side");
-    diags.extend(send_dispatch::apply_send_static_dispatch(app, registry));
+    diags.extend(crate::timings::phase("post-analyze: send_dispatch", || {
+        send_dispatch::apply_send_static_dispatch(app, registry)
+    }));
     ran!("send_static_dispatch");
     // AFTER send_dispatch — see POST_ANALYZE_PASS_ORDER (the `duration`
     // entry's runs_after). An all-duration-unit name set dispatches
@@ -947,7 +950,9 @@ pub fn apply_post_analyze_lowerings(
     ran!("form_wrapper_owners");
     broadcast_calls::apply_broadcast_calls_lowering(app);
     ran!("broadcast_calls");
-    diags.extend(relation_residue::apply_relation_residue_ledger(app, registry));
+    diags.extend(crate::timings::phase("post-analyze: relation_residue", || {
+        relation_residue::apply_relation_residue_ledger(app, registry)
+    }));
     ran!("relation_residue");
     #[cfg(debug_assertions)]
     debug_assert_eq!(

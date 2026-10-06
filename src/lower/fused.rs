@@ -77,6 +77,7 @@ fn rewrite_hook_node(
     if !skip_full_messages {
         super::errors_full_messages::rewrite_node(e);
     }
+    super::each_with_index::rewrite_node(e);
 }
 
 fn rewrite_view_node(
@@ -114,6 +115,7 @@ fn rewrite_view_node(
     if !skip_full_messages {
         super::errors_full_messages::rewrite_node(e);
     }
+    super::each_with_index::rewrite_node(e);
 }
 
 fn rewrite_test_node(e: &mut Expr, skip_full_messages: bool) {

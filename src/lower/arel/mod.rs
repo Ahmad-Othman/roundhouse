@@ -47,18 +47,21 @@ pub fn rewrite_arel_in_expr(
     schema: &Schema,
     registry: &HashMap<ClassId, ClassInfo>,
 ) {
-    rewrite_arel_in_expr_with_assocs(expr, schema, registry, &[]);
+    let _ = rewrite_arel_in_expr_with_assocs(expr, schema, registry, &[]);
 }
 
 /// As `rewrite_arel_in_expr`, but with the app's association graph so
 /// `includes(:assoc)` chains lower to eager-load preloads (issue #27).
 /// The 3-arg wrapper passes an empty graph → legacy drop-includes.
+///
+/// Returns whether any node was rewritten so callers can skip a
+/// follow-up type pass on an unchanged body.
 pub fn rewrite_arel_in_expr_with_assocs(
     expr: &mut Expr,
     schema: &Schema,
     registry: &HashMap<ClassId, ClassInfo>,
     assocs: &[crate::lower::model_associations::AssociationEdge],
-) {
+) -> bool {
     // Names (ivars/locals) the body later refines with relation-chain
     // methods (`@moderations.where(...)` after `@moderations =
     // Moderation.all...`). Materializing the assigned chain here would
@@ -66,7 +69,7 @@ pub fn rewrite_arel_in_expr_with_assocs(
     // runtime Relation path.
     let mut refined = std::collections::HashSet::new();
     collect_relation_refined_names(expr, &mut refined);
-    rewrite_arel_inner(expr, schema, registry, assocs, &refined);
+    let mut changed = rewrite_arel_inner(expr, schema, registry, assocs, &refined);
     // Both call sites hand us a METHOD BODY, and a body that is a
     // single statement is not a `Seq` — so the hoist post-pass inside
     // `rewrite_arel_inner`, which walks a Seq's statement list, had no
@@ -91,8 +94,10 @@ pub fn rewrite_arel_in_expr_with_assocs(
             );
             hoisted.push(std::mem::replace(expr, placeholder));
             *expr = Expr::new(span, ExprNode::Seq { exprs: hoisted });
+            changed = true;
         }
     }
+    changed
 }
 
 const RELATION_REFINERS: &[&str] = &[
@@ -185,7 +190,7 @@ fn rewrite_arel_inner(
     registry: &HashMap<ClassId, ClassInfo>,
     assocs: &[crate::lower::model_associations::AssociationEdge],
     refined: &std::collections::HashSet<crate::ident::Symbol>,
-) {
+) -> bool {
     if let ExprNode::Assign { target, .. } = expr.node.as_ref() {
         let name = match target {
             crate::expr::LValue::Ivar { name } => Some(name),
@@ -193,7 +198,7 @@ fn rewrite_arel_inner(
             _ => None,
         };
         if name.is_some_and(|n| refined.contains(n)) {
-            return;
+            return false;
         }
     }
     if let ExprNode::Send { .. } = expr.node.as_ref() {
@@ -207,7 +212,7 @@ fn rewrite_arel_inner(
             // keep their own, tighter spans.
             replacement.inherit_span(expr.span);
             *expr = replacement;
-            return;
+            return true;
         }
     }
     // Inline sibling of the refined-names guard above: this Send is a
@@ -234,14 +239,15 @@ fn rewrite_arel_inner(
         let ExprNode::Send { recv: Some(recv), args, .. } = &mut *expr.node else {
             unreachable!("matched Send with recv above");
         };
-        rewrite_arel_spine_args(recv, schema, registry, assocs, refined);
+        let mut changed = rewrite_arel_spine_args(recv, schema, registry, assocs, refined);
         for a in args {
-            rewrite_arel_inner(a, schema, registry, assocs, refined);
+            changed |= rewrite_arel_inner(a, schema, registry, assocs, refined);
         }
-        return;
+        return changed;
     }
+    let mut changed = false;
     walk_subexprs_mut(expr, &mut |e| {
-        rewrite_arel_inner(e, schema, registry, assocs, refined)
+        changed |= rewrite_arel_inner(e, schema, registry, assocs, refined)
     });
     // Post-pass: when an Arel rewrite landed a multi-stmt hydrate Seq
     // in a *value* position — directly as an Assign value
@@ -254,8 +260,9 @@ fn rewrite_arel_inner(
     // inline multi-stmt value (`x = (a; b; c)`), so normalize
     // structurally.
     if let ExprNode::Seq { exprs } = &mut *expr.node {
-        hoist_value_seqs_in_stmts(exprs);
+        changed |= hoist_value_seqs_in_stmts(exprs);
     }
+    changed
 }
 
 /// Rewrite value positions inside a chain-receiver spine WITHOUT
@@ -272,24 +279,27 @@ fn rewrite_arel_spine_args(
     registry: &HashMap<ClassId, ClassInfo>,
     assocs: &[crate::lower::model_associations::AssociationEdge],
     refined: &std::collections::HashSet<crate::ident::Symbol>,
-) {
+) -> bool {
+    let mut changed = false;
     if let ExprNode::Send { recv, args, block, .. } = &mut *expr.node {
         if let Some(r) = recv {
-            rewrite_arel_spine_args(r, schema, registry, assocs, refined);
+            changed |= rewrite_arel_spine_args(r, schema, registry, assocs, refined);
         }
         for a in args {
-            rewrite_arel_inner(a, schema, registry, assocs, refined);
+            changed |= rewrite_arel_inner(a, schema, registry, assocs, refined);
         }
         if let Some(b) = block {
-            rewrite_arel_inner(b, schema, registry, assocs, refined);
+            changed |= rewrite_arel_inner(b, schema, registry, assocs, refined);
         }
     }
+    changed
 }
 
 /// For each statement in a Seq's stmt list, hoist any multi-stmt Seq an
 /// Arel rewrite landed in one of its value positions (see
 /// [`hoist_value_seqs`]), inserting the hoisted stmts ahead of it.
-fn hoist_value_seqs_in_stmts(stmts: &mut Vec<Expr>) {
+fn hoist_value_seqs_in_stmts(stmts: &mut Vec<Expr>) -> bool {
+    let mut changed = false;
     let mut i = 0;
     while i < stmts.len() {
         let mut hoisted = Vec::new();
@@ -298,12 +308,14 @@ fn hoist_value_seqs_in_stmts(stmts: &mut Vec<Expr>) {
             i += 1;
             continue;
         }
+        changed = true;
         let added = hoisted.len();
         for (j, stmt) in hoisted.into_iter().enumerate() {
             stmts.insert(i + j, stmt);
         }
         i += added + 1;
     }
+    changed
 }
 
 /// Recurse through the *value* positions of `e` (call recv/args, assign

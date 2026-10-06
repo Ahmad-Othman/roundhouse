@@ -529,10 +529,11 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             }
             let refined_across_methods = refined_result_methods.contains(&method.name);
             if let Some(schema) = schema {
-                if !refined_across_methods {
-                    crate::lower::arel::rewrite_arel_in_expr_with_assocs(
+                if !refined_across_methods
+                    && crate::lower::arel::rewrite_arel_in_expr_with_assocs(
                         &mut method.body, schema, &classes, assocs,
-                    );
+                    )
+                {
                     crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
                 }
             }
