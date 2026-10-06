@@ -59,10 +59,16 @@ fn circular_config_load_emits_configuration_not_gradual_churn() {
         .map(|f| f.content)
         .collect::<Vec<_>>()
         .join("\n");
-    // `config` / `load!` must settle on Configuration (possibly nullable),
-    // not remain stuck as a thrashing Configuration|untyped harvest.
+    // RBS collapses `T | untyped` to bare `untyped`, so checking for the
+    // substring "Configuration | untyped" never fails. Pin the settled
+    // signatures themselves — without stabilize, `config` ends as
+    // `-> untyped` while the class name still matches a naive search.
     assert!(
-        rbs.contains("Configuration") && !rbs.contains("Configuration | untyped"),
-        "expected a settled Configuration return, got:\n{rbs}"
+        rbs.contains("def self.config: () -> Probe::Configuration"),
+        "expected Probe.config to settle on Probe::Configuration, got:\n{rbs}"
+    );
+    assert!(
+        rbs.contains("def self.load!: () -> Probe::Configuration"),
+        "expected Configuration.load! to settle on Probe::Configuration, got:\n{rbs}"
     );
 }
