@@ -170,30 +170,35 @@ end
     assert!(body.contains("public_send"), "{body}");
 }
 
-/// `@record.send(:literal)` keeps `send` so a private method on the
-/// ivar still succeeds. Collapsing it to `@record.secret` would not.
-/// Call-chain receivers (`positioning_parent.send(:leaves)`) still
-/// collapse — see `tests/model_macro_expansion.rs`.
+/// `@record.send(:literal)` and bare `helper.send(:literal)` keep
+/// `send` so a private method on that object still succeeds. A bare
+/// `helper` is a receiverless Send, not a Var. Same-expansion helpers
+/// (`positioning_parent.send(:leaves)`) still collapse — see
+/// `tests/model_macro_expansion.rs`.
 #[test]
 fn send_on_explicit_receiver_is_not_collapsed() {
-    let concern = r#"module Labeled
+    for body_src in ["@article.send(field)", "helper.send(field)"] {
+        let concern = format!(
+            r#"module Labeled
   extend ActiveSupport::Concern
   class_methods do
     def labeled(field)
       define_method :label_of do
-        @article.send(field)
+        {body_src}
       end
     end
   end
 end
-"#;
-    let app =
-        ingest_app_from_tree(tiny_overlay(concern, "Labeled", "labeled :title")).expect("ingest");
-    let body = roundhouse::emit::ruby::emit_expr(&instance(&app, "label_of").body);
-    assert!(
-        body.contains("send(") && !body.contains("public_send"),
-        "{body}"
-    );
+"#
+        );
+        let app = ingest_app_from_tree(tiny_overlay(&concern, "Labeled", "labeled :title"))
+            .expect("ingest");
+        let body = roundhouse::emit::ruby::emit_expr(&instance(&app, "label_of").body);
+        assert!(
+            body.contains("send(") && !body.contains("public_send"),
+            "{body_src} => {body}"
+        );
+    }
 }
 
 /// Nested `send(:send, :literal)` collapses all the way to the name.

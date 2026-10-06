@@ -593,7 +593,7 @@ fn expand_define_methods(
         }
         if method.as_str() == "define_method" {
             let [name] = args.as_slice() else { return None };
-            let name = substitute(name.clone(), &bindings)?;
+            let name = substitute(name.clone(), &bindings, &HashSet::new())?;
             let name = interned_name(&name)?;
             // Ruby accepts arbitrary interned names in define_method,
             // but an emitted `def` must be syntactically valid.
@@ -616,7 +616,7 @@ fn expand_define_methods(
                 return None;
             }
             let mut generated = def.clone();
-            generated.name = name;
+            generated.name = name.clone();
             generated.name_span = args[0].span;
             generated.receiver = MethodReceiver::Instance;
             generated.visibility = if matches!(
@@ -630,7 +630,14 @@ fn expand_define_methods(
             generated.params.clear();
             generated.block_param = None;
             generated.signature = None;
-            generated.body = substitute(body.clone(), &bindings)?;
+            // Same-expansion helpers (already defined in this macro, plus
+            // this name) may appear as `positioning_parent.send(:leaves)`.
+            // Only those call-chain roots collapse; bare `helper.send`
+            // stays reflective.
+            let mut helpers: HashSet<Symbol> =
+                methods.iter().map(|m| m.name.clone()).collect();
+            helpers.insert(name);
+            generated.body = substitute(body.clone(), &bindings, &helpers)?;
             methods.push(generated);
         } else {
             let visibility = match method.as_str() {
@@ -645,8 +652,9 @@ fn expand_define_methods(
             {
                 return None;
             }
+            let helpers = HashSet::new();
             for arg in args {
-                let name = substitute(arg.clone(), &bindings)?;
+                let name = substitute(arg.clone(), &bindings, &helpers)?;
                 let name = interned_name(&name)?;
                 methods.iter_mut().find(|m| m.name == name)?.visibility = visibility;
             }
@@ -733,7 +741,14 @@ fn supported_source_statement(
 /// The supported body grammar has no local writes/bindings or nested
 /// scopes. Never substitute by name through an arbitrary closure: ingest
 /// has not assigned distinct VarIds to shadowed bindings yet.
-fn substitute(mut expr: Expr, bindings: &HashMap<Symbol, Expr>) -> Option<Expr> {
+///
+/// `helpers` are method names defined by this same macro expansion —
+/// the only call-chain receivers safe to collapse through `send`.
+fn substitute(
+    mut expr: Expr,
+    bindings: &HashMap<Symbol, Expr>,
+    helpers: &HashSet<Symbol>,
+) -> Option<Expr> {
     match &mut *expr.node {
         ExprNode::Var { name, .. } => return bindings.get(name).cloned(),
         // Moving a constant reference into the includer changes its
@@ -742,7 +757,7 @@ fn substitute(mut expr: Expr, bindings: &HashMap<Symbol, Expr>) -> Option<Expr> 
         ExprNode::Send { block: None, .. } | ExprNode::Seq { .. } => {
             let mut valid = true;
             expr.node.for_each_child_mut(&mut |child| {
-                if let Some(replaced) = substitute(child.clone(), bindings) {
+                if let Some(replaced) = substitute(child.clone(), bindings, helpers) {
                     *child = replaced;
                 } else {
                     valid = false;
@@ -751,7 +766,7 @@ fn substitute(mut expr: Expr, bindings: &HashMap<Symbol, Expr>) -> Option<Expr> 
             if !valid {
                 return None;
             }
-            if !collapse_literal_send(&mut expr) {
+            if !collapse_literal_send(&mut expr, helpers) {
                 return None;
             }
         }
@@ -808,17 +823,37 @@ fn string_binding_read_as_value(expr: &Expr, bindings: &HashMap<Symbol, Expr>) -
     }
 }
 
+/// True when `recv` is rooted at a receiverless call to a method this
+/// same macro expansion defined (`positioning_parent.send(…)`).
+fn send_recv_is_expansion_helper(recv: &Expr, helpers: &HashSet<Symbol>) -> bool {
+    match &*recv.node {
+        ExprNode::Send {
+            recv: None,
+            method,
+            ..
+        } => helpers.contains(method),
+        ExprNode::Send {
+            recv: Some(inner), ..
+        } if !matches!(&*inner.node, ExprNode::SelfRef) => {
+            send_recv_is_expansion_helper(inner, helpers)
+        }
+        _ => false,
+    }
+}
+
 /// `send(:title)` / `send("title")` / `__send__` with a literal first
 /// argument is a renamed call. Collapse after substitution so a bound
 /// `send(field)` becomes `title`, not `send(:title)`. A leftover
 /// computed name declines the whole expansion.
 ///
-/// Call-chain receivers collapse too (`positioning_parent.send(:leaves)`
-/// → `positioning_parent.leaves`). Ivar and local receivers stay
-/// reflective: `@helper.send(:secret)` must remain `send` so a private
-/// method still succeeds. `public_send` is not this method — collapsing
-/// it would let a private helper succeed.
-fn collapse_literal_send(expr: &mut Expr) -> bool {
+/// Safe receivers: none / `self` (becomes a receiverless call, which
+/// can still invoke a private method on self), and call chains rooted
+/// at a same-expansion helper (`positioning_parent.send(:leaves)` →
+/// `positioning_parent.leaves`). Every other explicit receiver —
+/// including bare `helper.send(:secret)` (a receiverless Send, not a
+/// Var) and `@helper.send` — stays reflective. `public_send` is not
+/// this method.
+fn collapse_literal_send(expr: &mut Expr, helpers: &HashSet<Symbol>) -> bool {
     loop {
         let ExprNode::Send {
             recv,
@@ -830,14 +865,15 @@ fn collapse_literal_send(expr: &mut Expr) -> bool {
         else {
             return true;
         };
-        if recv.as_ref().is_some_and(|r| {
-            matches!(&*r.node, ExprNode::Ivar { .. } | ExprNode::Var { .. })
-        }) {
-            return true;
-        }
         if !matches!(method.as_str(), "send" | "__send__") {
             return true;
         }
+        let recv = match recv {
+            None => None,
+            Some(r) if matches!(&*r.node, ExprNode::SelfRef) => None,
+            Some(r) if send_recv_is_expansion_helper(r, helpers) => Some(r.clone()),
+            Some(_) => return true,
+        };
         if args.is_empty() {
             return false;
         }
@@ -848,10 +884,6 @@ fn collapse_literal_send(expr: &mut Expr) -> bool {
             return false;
         }
         let rest = args[1..].to_vec();
-        let recv = match recv {
-            Some(r) if matches!(&*r.node, ExprNode::SelfRef) => None,
-            other => other.clone(),
-        };
         *expr.node = ExprNode::Send {
             recv,
             method: name,
