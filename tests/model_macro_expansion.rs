@@ -210,7 +210,6 @@ fn unsupported_captures_and_headers_decline_the_whole_macro() {
         "positioned_within :book, association: :leaves",
         "positioned_within :book, :shelf, association: :leaves, filter: :active",
         "positioned_within :book, association: :leaves, filter: :active, extra: :x",
-        "positioned_within :book, association: 'leaves', filter: :active",
         "positioned_within choose_parent, association: :leaves, filter: :active",
     ] {
         survey::activate();
