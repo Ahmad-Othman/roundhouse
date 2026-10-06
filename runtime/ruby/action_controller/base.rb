@@ -85,33 +85,41 @@ module ActionController
       s = s.gsub(REDIRECT_LINE_BREAK_PATTERN, REDIRECT_LINE_BREAKS)
     end
     s = s.tr("\\", "/")
-    # Recursive strip helpers — not `while keep && …`. Elixir cannot
-    # lower a flag-conditioned while (BoolOp cond + no counter), and
-    # while_to_recursion requires exactly one top-level while per
-    # method. Two sequential strips would also fail that gate.
+    # Index-walk strip helpers (one counter while each). Not
+    # `while keep && …` (Elixir BoolOp) and not two whiles in this
+    # method (while_to_recursion allows one top-level while per method).
     s = strip_leading_controls(s)
     s = strip_trailing_controls(s)
     s
   end
 
   def self.strip_leading_controls(s)
-    return s if s.length == 0
-    c = s[0, 1].to_s
-    if c == " " || header_control?(c)
-      strip_leading_controls(s[1, s.length].to_s)
-    else
-      s
+    # Index walk — not per-char recursion (stack-safe on long pads).
+    # Canonical counter `while` so Elixir while_to_recursion applies:
+    # early return when a kept char is found; trailing `i += 1` step.
+    n = s.length
+    i = 0
+    while i < n
+      c = s[i, 1].to_s
+      if !(c == " " || header_control?(c))
+        return s[i, n - i].to_s
+      end
+      i += 1
     end
+    ""
   end
 
   def self.strip_trailing_controls(s)
-    return s if s.length == 0
-    c = s[s.length - 1, 1].to_s
-    if c == " " || header_control?(c)
-      strip_trailing_controls(s[0, s.length - 1].to_s)
-    else
-      s
+    n = s.length
+    i = n
+    while i > 0
+      c = s[i - 1, 1].to_s
+      if !(c == " " || header_control?(c))
+        return s[0, i].to_s
+      end
+      i -= 1
     end
+    ""
   end
 
   # Host of an absolute URL (`http://h/path`), or "" when the value is

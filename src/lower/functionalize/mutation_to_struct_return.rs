@@ -1592,10 +1592,32 @@ mod tests {
             mutates_record(&body),
             "@keys << key must count as a record mutation"
         );
-        let ex = render_via_elixir(vec![tx(instance_method("add_key", &[], body))]);
+        let ex = render_via_elixir(vec![tx(instance_method("add_key", &["key"], body))]);
         assert!(
             ex.contains("%{record | keys: record.keys ++ [key]}"),
             "@keys << → struct append:\n{ex}"
+        );
+    }
+
+    #[test]
+    fn local_shovel_does_not_classify_as_record_mutation() {
+        // Unsupported `<<` shape (bare local) — classifier leaves it
+        // alone; emitter keeps the dynamic send rather than a struct
+        // update.
+        let push = send(Some(vr("arr")), "<<", vec![vr("key")]);
+        let body = syn(ExprNode::Seq { exprs: vec![push] });
+        assert!(
+            !mutates_record(&body),
+            "local arr << key must not count as a record mutation"
+        );
+        let ex = render_via_elixir(vec![tx(instance_method("push_local", &["arr", "key"], body))]);
+        assert!(
+            !ex.contains("%{record |"),
+            "unsupported << must not become a struct update:\n{ex}"
+        );
+        assert!(
+            ex.contains("<<") || ex.contains("arr"),
+            "dynamic << path preserved:\n{ex}"
         );
     }
 
