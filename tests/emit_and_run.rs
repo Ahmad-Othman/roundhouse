@@ -5741,7 +5741,7 @@ puts "header values passed"
 fn query_value_app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
-        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\n  protect_from_forgery with: :exception\nend\n")
         .write("db/schema.rb", r#"ActiveRecord::Schema.define do
   create_table "widgets", force: :cascade do |t|
     t.string "name"
@@ -5799,12 +5799,14 @@ end
 fn query_value_assertions() -> &'static str {
     r#"
 require_relative "app/controllers/widgets_controller"
+ActionController::Base.allow_forgery_protection = false
 Widget.create!(name: "beta")
 Widget.create!(name: "alpha")
 Widget.create!(name: "gamma")
 
 def run(action, params)
   controller = WidgetsController.new
+  controller.request_method = "GET"
   controller.params = params
   controller.process_action(action)
   controller.body
@@ -5884,6 +5886,7 @@ fn request_steered_head_and_headers_stay_one_line() {
     query_value_app()
         .run_ruby(r#"
 require_relative "app/controllers/widgets_controller"
+ActionController::Base.allow_forgery_protection = false
 controller = WidgetsController.new
 controller.params = { "back" => "/next\r\nSet-Cookie: pwned=1" }
 controller.process_action(:headed)
@@ -5910,8 +5913,10 @@ fn redirect_to_rejects_an_unvalidated_host() {
     query_value_app()
         .run_ruby(r#"
 require_relative "app/controllers/widgets_controller"
+ActionController::Base.allow_forgery_protection = false
 controller = WidgetsController.new
 controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.request_method = "GET"
 controller.params = { "back" => "http://evil.example/" }
 begin
   controller.process_action(:bounce)
@@ -5921,21 +5926,25 @@ end
 
 controller = WidgetsController.new
 controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.request_method = "GET"
 controller.params = { "back" => "/home" }
 controller.process_action(:bounce)
 raise "relative redirect lost: #{controller.location.inspect}" unless controller.location == "/home"
 
 controller = WidgetsController.new
 controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.request_method = "GET"
 controller.params = { "back" => "http://app.example/ok" }
 controller.process_action(:bounce)
 raise "same-host absolute refused: #{controller.location.inspect}" unless controller.location == "http://app.example/ok"
 
 controller = WidgetsController.new
 controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "evil.example")
+controller.request_method = "GET"
 controller.session[:return_to_after_authenticating] = controller.request.url
 controller.params = { "back" => controller.session[:return_to_after_authenticating] }
 controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.request_method = "GET"
 begin
   controller.process_action(:bounce)
   raise "spoofed request.url honored: #{controller.location.inspect}"
@@ -5954,6 +5963,9 @@ require_relative "app/controllers/widgets_controller"
 ActionController::Base.allow_forgery_protection = true
 controller = WidgetsController.new
 ActionController::Current.controller = controller
+req = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example", "REQUEST_METHOD" => "POST")
+controller.request = req
+ActionController::Current.request = req
 controller.request_method = "POST"
 controller.params = {}
 controller.process_action(:touch)
@@ -5961,6 +5973,9 @@ raise "empty CSRF ran: #{controller.status}" unless controller.status == 422
 
 controller = WidgetsController.new
 ActionController::Current.controller = controller
+req = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example", "REQUEST_METHOD" => "POST")
+controller.request = req
+ActionController::Current.request = req
 controller.request_method = "POST"
 controller.session[:_csrf_token] = "tok"
 controller.params = { "authenticity_token" => "tok" }

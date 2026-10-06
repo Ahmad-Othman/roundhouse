@@ -108,11 +108,13 @@ fn skip_forgery_protection_removes_the_check() {
 }
 
 #[test]
-fn rails_implicit_default_is_applied() {
+fn rails_implicit_default_is_not_applied() {
     // Rails puts `verify_authenticity_token` at the head of every chain
-    // rooted at ActionController::Base (`default_protect_from_forgery`).
-    // The method lives on shared Base (fail-closed). Tests still set
-    // `allow_forgery_protection = false`.
+    // rooted at ActionController::Base. Still gated off: bare
+    // `protect_from_forgery` is `:null_session` and must not become 422.
+    // Shared Base now defines the method for apps that write
+    // `with: :exception`. Pinned so turning the default on is a
+    // decision with a test to update.
     let files = emit(vec![
         (
             "app/controllers/application_controller.rb",
@@ -125,7 +127,7 @@ fn rails_implicit_default_is_applied() {
         ("config/routes.rb", "Rails.application.routes.draw do\n  resources :rooms, only: [:create]\nend\n"),
     ]);
     let rooms = get(&files, "rooms_controller.rb");
-    assert!(rooms.contains("verify_authenticity_token"), "{rooms}");
+    assert!(!rooms.contains("verify_authenticity_token"), "{rooms}");
 }
 
 #[test]

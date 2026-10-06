@@ -1601,10 +1601,13 @@ fn build_filter_preamble(
     // bot_key?` sees who signed in); the default then yields to it.
     // ActionController::API does not include the module.
     //
-    // ON: `verify_authenticity_token` lives on shared Base (fail-closed
-    // unless tests set `allow_forgery_protection = false`). An app that
-    // WRITES the macro still wins (campfire's `unless: bot_key?`).
-    const IMPLICIT_DEFAULT: bool = true;
+    // OFF: a bare `protect_from_forgery` is `:null_session` (lobsters)
+    // and is not modeled as 422. Implicit `:exception` would turn those
+    // requests into failures. Apps that write `with: :exception`
+    // (campfire) get the filter; `verify_authenticity_token` now lives
+    // on shared Base. Residual vs Rails: an app that relies on the
+    // implicit default is still CSRF-open until it writes the macro.
+    const IMPLICIT_DEFAULT: bool = false;
     let root_parent = chain.first().copied().unwrap_or(controller).parent.as_ref();
     let redeclared = chain.iter().copied().chain(std::iter::once(controller)).any(|c| {
         c.filters().any(|f| {
