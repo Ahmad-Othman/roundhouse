@@ -23,9 +23,9 @@ use super::expr::ingest_ruby_program;
 use super::fixture::ingest_fixture_file;
 use super::jbuilder::ingest_jbuilder;
 use super::library_class::{
-    ClassKind, ConcernClassMethodSpans, classify_class_file, ingest_concern_class_method_spans,
-    ingest_concern_filters, ingest_concern_model_items, ingest_helper_method_names,
-    ingest_library_classes, ingest_rails_application_singleton_methods,
+    ClassKind, ConcernClassMethodSpans, ConcernEnumDecl, classify_class_file,
+    ingest_concern_class_method_spans, ingest_concern_filters, ingest_concern_model_items,
+    ingest_helper_method_names, ingest_library_classes, ingest_rails_application_singleton_methods,
 };
 use super::model::ingest_model_with_enum_constants;
 use super::routes::ingest_routes_with_draws;
@@ -241,14 +241,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // the module. Local rather than a field on `App`: they exist only
     // until the splice folds them into each including model's own
     // `enums` table, and nothing downstream reads them by module.
-    let mut concern_enums: Vec<(
-        crate::ident::ClassId,
-        Vec<(
-            crate::ident::Symbol,
-            Vec<(String, crate::expr::Literal)>,
-            Option<crate::expr::Literal>,
-        )>,
-    )> = Vec::new();
+    let mut concern_enums: Vec<(crate::ident::ClassId, Vec<ConcernEnumDecl>)> = Vec::new();
 
     // The app's inflections come first: everything after this that
     // turns `:leaves` into a class name or `Leaf` into a table name
@@ -3372,14 +3365,7 @@ fn filter_from_send(
 /// whole before any label can be mapped.
 fn fold_concern_enums_into_models(
     app: &mut App,
-    concern_enums: &[(
-        crate::ident::ClassId,
-        Vec<(
-            crate::ident::Symbol,
-            Vec<(String, crate::expr::Literal)>,
-            Option<crate::expr::Literal>,
-        )>,
-    )],
+    concern_enums: &[(crate::ident::ClassId, Vec<ConcernEnumDecl>)],
 ) {
     if concern_enums.is_empty() {
         return;
@@ -3390,10 +3376,16 @@ fn fold_concern_enums_into_models(
             if !includes.contains(module) {
                 continue;
             }
-            for (column, mapping, default) in decls {
-                model.enums.entry(column.clone()).or_insert_with(|| mapping.clone());
-                if let Some(d) = default {
-                    model.enum_defaults.entry(column.clone()).or_insert_with(|| d.clone());
+            for decl in decls {
+                model
+                    .enums
+                    .entry(decl.column.clone())
+                    .or_insert_with(|| decl.mapping.clone());
+                if let Some(d) = &decl.default {
+                    model
+                        .enum_defaults
+                        .entry(decl.column.clone())
+                        .or_insert_with(|| d.clone());
                 }
             }
         }
