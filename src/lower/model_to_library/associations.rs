@@ -351,8 +351,14 @@ pub(super) fn push_association_methods(
                     scope.as_ref(),
                 ));
                 methods.push(synth_has_one_preload_setter(owner, name, target));
+                // Writer + after_save only when `autosave: true`. A cache-only
+                // writer on plain `has_one` would accept `owner.child = …`
+                // then drop the child on save (silent data loss vs Rails /
+                // vs prior NoMethodError). Implicit `autosave: nil` stays
+                // unclaimed.
                 let writer_name = Symbol::from(format!("{}=", name.as_str()));
-                if !model_defines_instance_method(model, &writer_name)
+                if *autosave
+                    && !model_defines_instance_method(model, &writer_name)
                     && !methods
                         .iter()
                         .any(|m| m.name == writer_name && m.receiver == MethodReceiver::Instance)

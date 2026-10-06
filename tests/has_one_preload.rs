@@ -37,8 +37,6 @@ raise "count" unless rows.size == 3
 raise "alpha" unless rows[0].profile.bio == "a-bio"
 raise "beta should be nil" unless rows[1].profile.nil?
 raise "gamma" unless rows[2].profile.bio == "c-bio"
-rows[1].profile = Profile.new(bio: "assigned")
-raise "writer after preload" unless rows[1].profile.bio == "assigned"
 puts "has_one preload passed"
 "#,
         )

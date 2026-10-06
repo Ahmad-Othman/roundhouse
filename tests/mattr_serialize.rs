@@ -172,6 +172,31 @@ fn serialize_yaml_default_stays_unclaimed() {
 }
 
 #[test]
+fn serialize_json_shadowed_by_local_const_stays_unclaimed() {
+    let app = ingest_app_from_tree(article_app(
+        "  JSON = Object\n  serialize :payload, coder: JSON\n",
+        "    t.text :payload\n",
+    ))
+    .expect("ingest");
+    let article = app.models.iter().find(|m| m.name.0.as_str() == "Article").unwrap();
+    assert!(
+        roundhouse::lower::serialize::serialize_decls(&article.body).is_empty(),
+        "bare JSON shadowed by a model constant must not claim JsonColumn"
+    );
+    // Absolute ::JSON still names the stdlib coder.
+    let app = ingest_app_from_tree(article_app(
+        "  JSON = Object\n  serialize :payload, coder: ::JSON\n",
+        "    t.text :payload\n",
+    ))
+    .expect("ingest");
+    let article = app.models.iter().find(|m| m.name.0.as_str() == "Article").unwrap();
+    assert_eq!(
+        roundhouse::lower::serialize::serialize_decls(&article.body).len(),
+        1
+    );
+}
+
+#[test]
 fn class_body_mattr_and_cattr_defaults_run() {
     emit_and_run::real_blog()
         .edit(

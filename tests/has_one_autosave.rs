@@ -1,5 +1,6 @@
 //! `has_one …, autosave: true` stashes through the writer and persists
-//! the child after the owner saves.
+//! the child after the owner saves. Plain `has_one` gets no writer
+//! (fail closed — cache-only assignment would silently drop children).
 //!
 //! Unclaimed: bare `build_`/`create_` without assigning into the cache;
 //! implicit `autosave: nil`; `inverse_of` / `touch` / `validate` /
