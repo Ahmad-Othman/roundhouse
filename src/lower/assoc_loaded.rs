@@ -64,26 +64,13 @@ fn association_readers_by_model(app: &App) -> HashMap<ClassId, HashSet<Symbol>> 
     out
 }
 
-/// ClassId of an expression that names a model instance (or a union
-/// containing one). Used to scope `loaded?` / `.target` rewrites to the
-/// receiver's model. Returns `None` when the type is missing or not a class.
-fn class_id_of(expr: &Expr) -> Option<ClassId> {
-    match expr.ty.as_ref()? {
-        Ty::Class { id, .. } => Some(id.clone()),
-        Ty::Union { variants } => variants.iter().find_map(|v| match v {
-            Ty::Class { id, .. } => Some(id.clone()),
-            _ => None,
-        }),
-        _ => None,
-    }
-}
-
 /// Resolve which model owns the association hop.
 ///
-/// Typed explicit receiver wins. Untyped explicit receiver falls back
-/// to a unique-name match (the rewrite keeps that receiver; it does
-/// not stamp SelfRef). Implicit-self uses the enclosing model, or a
-/// concern module's sole model includer — never a unique-name guess.
+/// Typed explicit receiver wins — including a union, but only when every
+/// class alternative declares `name`. Untyped explicit receivers are left
+/// alone (unrewritten `.loaded?` / `.target` must stay visible). Implicit
+/// self uses the enclosing model, or a concern module's sole model
+/// includer — never a unique-name guess.
 fn resolve_owner_model(
     recv: Option<&Expr>,
     enclosing: Option<&ClassId>,
@@ -92,10 +79,7 @@ fn resolve_owner_model(
     name: &Symbol,
 ) -> Option<ClassId> {
     if let Some(base) = recv {
-        if let Some(id) = class_id_of(base) {
-            return Some(id);
-        }
-        return unique_model_for_name(by_model, name);
+        return owner_from_typed_recv(base, by_model, name);
     }
     let enclosing = enclosing?;
     if by_model.contains_key(enclosing) {
@@ -105,19 +89,32 @@ fn resolve_owner_model(
     by_model.contains_key(includer).then(|| includer.clone())
 }
 
-fn unique_model_for_name(
+/// ClassId of a typed explicit receiver. Mixed-owner unions rewrite only
+/// when every class alternative declares `name`; a missing type or a
+/// non-class type returns `None` (no unique-name fallback).
+fn owner_from_typed_recv(
+    expr: &Expr,
     by_model: &HashMap<ClassId, HashSet<Symbol>>,
     name: &Symbol,
 ) -> Option<ClassId> {
-    let mut matches = by_model
-        .iter()
-        .filter(|(_, names)| names.contains(name))
-        .map(|(id, _)| id);
-    let first = matches.next().cloned();
-    if matches.next().is_some() {
-        None
-    } else {
-        first
+    match expr.ty.as_ref()? {
+        Ty::Class { id, .. } => Some(id.clone()),
+        Ty::Union { variants } => {
+            let ids: Vec<ClassId> = variants
+                .iter()
+                .filter_map(|v| match v {
+                    Ty::Class { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect();
+            if ids.is_empty() {
+                return None;
+            }
+            ids.iter()
+                .all(|id| by_model.get(id).is_some_and(|names| names.contains(name)))
+                .then(|| ids[0].clone())
+        }
+        _ => None,
     }
 }
 

@@ -18,7 +18,7 @@
 
 use crate::app::App;
 use crate::diagnostic::Diagnostic;
-use crate::dialect::{Association, ModelBodyItem};
+use crate::dialect::{Association, MethodDef, MethodReceiver, ModelBodyItem};
 use crate::expr::{Expr, ExprNode};
 use crate::ty::Ty;
 
@@ -31,11 +31,7 @@ pub fn apply_default_self_recv(app: &mut App) -> Vec<Diagnostic> {
         for item in &mut model.body {
             match item {
                 ModelBodyItem::Method { method, .. } => {
-                    for p in &mut method.params {
-                        if let Some(default) = &mut p.default {
-                            rewrite(default, &self_ty);
-                        }
-                    }
+                    rewrite_method_defaults(method, &self_ty);
                 }
                 ModelBodyItem::Scope { scope, .. } => {
                     for p in &mut scope.params {
@@ -49,11 +45,7 @@ pub fn apply_default_self_recv(app: &mut App) -> Vec<Diagnostic> {
                     ..
                 } => {
                     for m in extension.iter_mut() {
-                        for p in &mut m.params {
-                            if let Some(default) = &mut p.default {
-                                rewrite(default, &self_ty);
-                            }
-                        }
+                        rewrite_method_defaults(m, &self_ty);
                     }
                 }
                 _ => {}
@@ -70,14 +62,25 @@ pub fn apply_default_self_recv(app: &mut App) -> Vec<Diagnostic> {
             args: vec![],
         };
         for method in &mut lc.methods {
-            for p in &mut method.params {
-                if let Some(default) = &mut p.default {
-                    rewrite(default, &self_ty);
-                }
-            }
+            rewrite_method_defaults(method, &self_ty);
         }
     }
     Vec::new()
+}
+
+/// Skip class-side methods: the inserted `SelfRef` is stamped as an
+/// instance `Ty::Class`, and typed emitters (Kotlin) then take the
+/// instance dispatch path. Until IR can represent class-object `self`,
+/// leave class-method defaults unchanged.
+fn rewrite_method_defaults(method: &mut MethodDef, self_ty: &Ty) {
+    if method.receiver == MethodReceiver::Class {
+        return;
+    }
+    for p in &mut method.params {
+        if let Some(default) = &mut p.default {
+            rewrite(default, self_ty);
+        }
+    }
 }
 
 fn rewrite(expr: &mut Expr, self_ty: &Ty) {

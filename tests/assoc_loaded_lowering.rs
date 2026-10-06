@@ -282,3 +282,124 @@ end
         "association(:boosts).target on Room must stay (boosts is Message-only):\n{src}"
     );
 }
+
+#[test]
+fn assoc_loaded_skips_untyped_explicit_receiver() {
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "messages", force: :cascade do |t|
+    t.string "body"
+  end
+  create_table "rooms", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "boosts", force: :cascade do |t|
+    t.integer "message_id"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+  has_many :boosts
+end
+"#,
+        ),
+        (
+            "app/models/boost.rb",
+            r#"class Boost < ApplicationRecord
+  belongs_to :message
+end
+"#,
+        ),
+        (
+            "app/models/room.rb",
+            r#"class Room < ApplicationRecord
+  def check(owner)
+    owner.boosts.loaded?
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = ruby::emit_lowered_models(&app);
+    let src = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("room.rb"))
+        .map(|f| f.content.as_str())
+        .unwrap_or("");
+    assert!(
+        src.contains(".loaded?"),
+        "untyped owner.boosts.loaded? must stay (no unique-name guess):\n{src}"
+    );
+    assert!(
+        !src.contains("boosts_loaded?"),
+        "must not flatten onto boosts_loaded? for an untyped receiver:\n{src}"
+    );
+}
+
+#[test]
+fn assoc_loaded_skips_mixed_owner_union() {
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "messages", force: :cascade do |t|
+    t.string "body"
+  end
+  create_table "rooms", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "boosts", force: :cascade do |t|
+    t.integer "message_id"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+  has_many :boosts
+end
+"#,
+        ),
+        (
+            "app/models/boost.rb",
+            r#"class Boost < ApplicationRecord
+  belongs_to :message
+end
+"#,
+        ),
+        (
+            "app/models/room.rb",
+            r#"class Room < ApplicationRecord
+  def check(flag)
+    owner = flag ? Message.first : Room.first
+    owner.boosts.loaded?
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = ruby::emit_lowered_models(&app);
+    let src = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("room.rb"))
+        .map(|f| f.content.as_str())
+        .unwrap_or("");
+    assert!(
+        src.contains(".loaded?"),
+        "Message|Room union must keep .loaded? (only Message has boosts):\n{src}"
+    );
+    assert!(
+        !src.contains("boosts_loaded?"),
+        "must not flatten mixed-owner union onto boosts_loaded?:\n{src}"
+    );
+}
