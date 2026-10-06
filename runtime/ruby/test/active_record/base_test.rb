@@ -490,6 +490,44 @@ class BaseTest < Minitest::Test
     assert_equal 1, rel.count
   end
 
+  def test_group_count_hash_counts_rows_per_group
+    4.times { |i| it = Item.new; it.title = "T#{i % 2}"; it.save() }
+    got = ActiveRecord::Relation.new(Item).group("title").group_count
+    assert_equal 2, got["T0"]
+    assert_equal 2, got["T1"]
+    assert_equal 2, got.length
+  end
+
+  def test_group_count_hash_drops_groups_that_fail_having
+    3.times { |i| it = Item.new; it.title = "T#{i % 2}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item).group("title").having("COUNT(*) > 1")
+    got = rel.group_count
+    assert_equal 2, got["T0"]
+    refute got.key?("T1")
+    assert_equal 1, got.length
+    assert_equal 1, rel.count
+  end
+
+  def test_group_count_distinct_counts_distinct_ids_per_group
+    2.times { |i| it = Item.new; it.title = "T#{i}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item)
+      .joins("INNER JOIN items AS copies ON copies.title = items.title")
+      .group("items.title")
+    assert_equal 2, rel.group_count["T0"]
+    distinct = ActiveRecord::Relation.new(Item)
+      .joins("INNER JOIN items AS copies ON copies.title = items.title")
+      .group("items.title")
+      .distinct
+    assert_equal 1, distinct.group_count["T0"]
+  end
+
+  def test_scalar_count_on_grouped_relation_counts_groups
+    4.times { |i| it = Item.new; it.title = "T#{i % 2}"; it.save() }
+    rel = ActiveRecord::Relation.new(Item).group("title")
+    assert_equal 2, rel.count
+    assert_kind_of Integer, rel.count
+  end
+
   def test_relation_each_does_not_rehydrate_and_returns_self
     it = Item.new; it.title = "A"; it.save()
     rel = ActiveRecord::Relation.new(Item)

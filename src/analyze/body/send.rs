@@ -111,14 +111,15 @@ impl<'a> BodyTyper<'a> {
     /// `.keys` on the result then read as a dispatch failure against a
     /// feature the pipeline fully supports (issue #75).
     ///
-    /// The shape test mirrors `lower::group_count::rewrite` exactly —
-    /// zero-arg, block-less `count` whose receiver is a `group(...)`
-    /// send — so the type this reports and the method the lowering
-    /// actually emits cannot disagree. Widening one without the other
-    /// is the failure mode to avoid: `sum`/`average`/`minimum`/
-    /// `maximum` switch to a grouped Hash in Rails too, but no
-    /// `group_sum` lowering or runtime method exists, so typing them
-    /// here would trade a false error for a false PASS.
+    /// The shape test mirrors `lower::group_count::rewrite` — zero-arg,
+    /// block-less `count` whose receiver chain contains `group(...)`,
+    /// walking the same refiners (`having`, `distinct`, `select`, …) —
+    /// so the type this reports and the method the lowering actually
+    /// emits cannot disagree. Widening one without the other is the
+    /// failure mode to avoid: `sum`/`average`/`minimum`/`maximum`
+    /// switch to a grouped Hash in Rails too, but no `group_sum`
+    /// lowering or runtime method exists, so typing them here would
+    /// trade a false error for a false PASS.
     ///
     /// The key type is the grouped COLUMN's, read off the schema the
     /// same way `column_projection` does — `group(:feed_id).count.keys`
@@ -137,12 +138,7 @@ impl<'a> BodyTyper<'a> {
         if method.as_str() != "count" || !args.is_empty() || block.is_some() {
             return None;
         }
-        let ExprNode::Send { method: gm, args: group_args, .. } = &*recv?.node else {
-            return None;
-        };
-        if gm.as_str() != "group" {
-            return None;
-        }
+        let group_args = Self::group_args_in_count_chain(recv?)?;
         // The receiver of `count` is the `group(...)` result, so its
         // type names the model whose schema owns the grouped column.
         // Both relation representations reach here: an inline
@@ -158,6 +154,47 @@ impl<'a> BodyTyper<'a> {
         };
         let key = self.grouped_key_ty(model, group_args).unwrap_or(Ty::Untyped);
         Some(Ty::Hash { key: Box::new(key), value: Box::new(Ty::Int) })
+    }
+
+    /// Names must match `lower::group_count::COUNT_CHAIN_REFINERS`.
+    const COUNT_CHAIN_REFINERS: &'static [&'static str] = &[
+        "having",
+        "distinct",
+        "select",
+        "where",
+        "not",
+        "joins",
+        "left_outer_joins",
+        "left_joins",
+        "order",
+        "reorder",
+        "rewhere",
+        "where!",
+        "order!",
+        "limit",
+        "offset",
+        "from",
+        "includes",
+        "preload",
+        "eager_load",
+        "merge",
+        "references",
+    ];
+
+    fn group_args_in_count_chain(expr: &Expr) -> Option<&[Expr]> {
+        let mut cur = expr;
+        loop {
+            let ExprNode::Send { recv, method, args, block: None, .. } = &*cur.node else {
+                return None;
+            };
+            if method.as_str() == "group" {
+                return Some(args);
+            }
+            if !Self::COUNT_CHAIN_REFINERS.contains(&method.as_str()) {
+                return None;
+            }
+            cur = recv.as_ref()?;
+        }
     }
 
     /// The column type a single-symbol `group(:col)` groups by, when the
