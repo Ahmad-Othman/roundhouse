@@ -4668,6 +4668,34 @@ end
         .assert_passes();
 }
 
+/// `raise ActionController::RoutingError` in an action answers 404, as
+/// Rails' `ActionDispatch::ExceptionWrapper` maps it to `:not_found`. A
+/// Rails app raises it for a page number out of bounds. Rails' second
+/// constructor argument, `failures`, is optional. The raise is in
+/// `index`, which has no `before_action`, so a `RecordNotFound` from
+/// `set_article` cannot answer the 404 in its place.
+#[test]
+fn an_action_that_raises_routing_error_answers_404() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "  def index\n",
+            "  def index\n    raise ActionController::RoutingError.new(\"page out of bounds\") if params[:page] == \"0\"\n    raise ActionController::RoutingError.new(\"No route matches\", []) if params[:page] == \"-1\"\n",
+        )
+        .run_ruby(
+            r#"def get(path, query)
+  status, = Main.run_rack("REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => query, "rack.input" => StringIO.new(""))
+  status
+end
+{ "page=0" => 404, "page=-1" => 404, "page=1" => 200, "" => 200 }.each do |query, want|
+  got = get("/articles", query)
+  raise "GET /articles?#{query} answered #{got}, want #{want}" unless got == want
+end
+"#,
+        )
+        .assert_passes();
+}
+
 #[path = "emit_and_run/concern_accessors.rs"]
 mod concern_accessors;
 

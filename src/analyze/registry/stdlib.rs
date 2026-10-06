@@ -485,6 +485,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("ActionController::ParameterMissing", Some(("param", Ty::Str))),
         ("ActionController::UnpermittedParameters", None),
         ("ActionController::UnknownFormat", None),
+        ("ActionController::RoutingError", Some(("failures", Ty::Array { elem: Box::new(Ty::Str) }))),
     ] {
         let mut methods = exception_surface.to_vec();
         methods.extend(extra);

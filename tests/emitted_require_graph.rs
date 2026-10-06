@@ -228,6 +228,104 @@ end
     }
 }
 
+/// `check` resolves the exception classes of
+/// `runtime/ruby/action_controller/parameter_missing.rb` and
+/// `runtime/ruby/action_view/missing_template.rb` for every target, but
+/// only the ruby family and spinel ship those files. Each other target
+/// reports every reference as an error, so the transpile fails instead
+/// of emitting a class that does not exist.
+#[test]
+fn ruby_family_runtime_constants_are_ledgered_on_other_targets() {
+    let tree = [
+        ("config/routes.rb", "Rails.application.routes.draw do\n  resources :probes, only: %i[index show]\nend\n"),
+        ("app/controllers/probes_controller.rb", r#"class ProbesController < ActionController::Base
+  def index
+    raise ActionController::RoutingError.new("page out of bounds", []) if params[:page] == "0"
+    raise ActionController::UnknownFormat.new("no format") if params[:page] == "1"
+    raise ActionController::ParameterMissing.new("page") if params[:page] == "2"
+    head :ok
+  end
+
+  def show
+    begin
+      head :ok
+    rescue ActionController::UnpermittedParameters, ActionView::MissingTemplate
+      head :not_found
+    end
+  end
+end
+"#),
+    ].into_iter().map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec())).collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let mut analysis = roundhouse::session::analyze_and_lower(&mut app);
+    analysis.extend(roundhouse::analyze::diagnose(&app));
+    assert!(!analysis.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error), "{analysis:?}");
+    for target in [
+        BuildTarget::Ruby, BuildTarget::Jruby, BuildTarget::Spinel,
+        BuildTarget::Go, BuildTarget::Rust, BuildTarget::Typescript,
+        BuildTarget::TypescriptWorker, BuildTarget::Python, BuildTarget::Elixir,
+        BuildTarget::Crystal, BuildTarget::Kotlin, BuildTarget::Swift, BuildTarget::CSharp,
+    ] {
+        let (files, diags) = roundhouse::emit::diagnostics::scope(|| {
+            target_files(&app, Path::new("."), target)
+        });
+        files.expect("target files");
+        let gaps: Vec<_> = diags.iter().filter(|d| matches!(
+            &d.kind,
+            roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+                if construct.as_str() == "bundled_constant"
+        )).collect();
+        if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+            assert!(gaps.is_empty(), "{target:?}: {gaps:?}");
+            continue;
+        }
+        assert_eq!(gaps.len(), 5, "{target:?}: {gaps:?}");
+        let t = target.as_str();
+        for name in [
+            "ActionController::RoutingError", "ActionController::UnknownFormat",
+            "ActionController::ParameterMissing", "ActionController::UnpermittedParameters",
+            "ActionView::MissingTemplate",
+        ] {
+            let text = format!("bundled_constant not supported ({t}): {name} is not available as a class/module value on {t}");
+            let gap = gaps.iter().find(|d| d.message == text).expect(&text);
+            assert_eq!(gap.severity, roundhouse::diagnostic::Severity::Error);
+            assert!(!gap.span.is_synthetic(), "{gap:?}");
+        }
+    }
+}
+
+/// An app that defines one of these classes itself ships the class, so
+/// the reference is not an error on any target.
+#[test]
+fn an_app_defined_ruby_family_runtime_constant_is_not_ledgered() {
+    let tree = [
+        ("config/routes.rb", "Rails.application.routes.draw do\n  resources :probes, only: %i[index]\nend\n"),
+        ("app/models/action_controller/unknown_format.rb", "module ActionController\n  class UnknownFormat < StandardError\n  end\nend\n"),
+        ("app/controllers/probes_controller.rb", r#"class ProbesController < ActionController::Base
+  def index
+    raise ActionController::UnknownFormat.new("no format") if params[:page] == "1"
+    head :ok
+  end
+end
+"#),
+    ].into_iter().map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec())).collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let mut analysis = roundhouse::session::analyze_and_lower(&mut app);
+    analysis.extend(roundhouse::analyze::diagnose(&app));
+    assert!(!analysis.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error), "{analysis:?}");
+    for target in [BuildTarget::Typescript, BuildTarget::Rust] {
+        let (files, diags) = roundhouse::emit::diagnostics::scope(|| {
+            target_files(&app, Path::new("."), target)
+        });
+        files.expect("target files");
+        assert!(!diags.iter().any(|d| matches!(
+            &d.kind,
+            roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+                if construct.as_str() == "bundled_constant"
+        )), "{target:?}: {diags:?}");
+    }
+}
+
 #[test]
 fn bundled_constant_gate_follows_aliases_but_not_app_defined_classes() {
     for app_defines_class in [false, true] {

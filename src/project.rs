@@ -1140,12 +1140,15 @@ pub fn target_files(
         }
         None => app,
     };
+    // Before the refusals below: a refusal returns early, and a
+    // reference that it hides would leave the transpile with fewer
+    // errors than the app has.
+    report_unsupported_bundled_constants(app, target);
     reject_unsupported_pattern_matches(app, target)?;
     reject_unsupported_data_factories(app, target)?;
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
-    report_unsupported_bundled_constants(app, target);
     report_sqlite_index_predicates(app, target);
     report_native_ruby_syntax(app, target);
     // Full forwarding currently has a native Ruby contract only. A
@@ -3756,9 +3759,11 @@ fn report_keyword_params(app: &App, target: &str) {
     }
 }
 
-/// These class objects are supplied by Ruby/Spinel's bundled libraries,
-/// not by the transpiled runtimes. Recognizing them during inference
-/// must not turn a missing target implementation into a clean emit.
+/// Most of these class objects are supplied by Ruby/Spinel's bundled
+/// libraries, not by the transpiled runtimes. The others are exception
+/// classes that only the ruby-family runtime defines. Recognizing them
+/// during inference must not turn a missing target implementation into
+/// a clean emit.
 fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Spinel | BuildTarget::Roda) {
         return;
@@ -3766,14 +3771,24 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     fn visit(expr: &crate::expr::Expr, app: &App, target: &str) {
         if matches!(&*expr.node, crate::expr::ExprNode::Const { .. }) {
             if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
-                if matches!(id.0.as_str(),
+                let name = id.0.as_str();
+                let bundled = matches!(name,
                     "URI::HTTP" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
                     | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
                     | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
-                    | "Struct" | "Mutex")
-                    // Nokogiri does not supply HTML5 on JRuby. The
-                    // other bundled values remain available there.
-                    && (target != "jruby" || id.0.as_str() == "Rails::HTML5::SafeListSanitizer")
+                    | "Struct" | "Mutex");
+                // `runtime/ruby/action_controller/parameter_missing.rb`
+                // and `runtime/ruby/action_view/missing_template.rb`
+                // define these. Only the ruby family and spinel ship
+                // the two files.
+                let ruby_family_runtime = matches!(name,
+                    "ActionController::ParameterMissing" | "ActionController::UnpermittedParameters"
+                    | "ActionController::UnknownFormat" | "ActionController::RoutingError"
+                    | "ActionView::MissingTemplate");
+                // Nokogiri does not supply HTML5 on JRuby. The
+                // other bundled values remain available there.
+                if ((bundled && (target != "jruby" || name == "Rails::HTML5::SafeListSanitizer"))
+                    || (ruby_family_runtime && target != "jruby"))
                     && !app.library_classes.iter().any(|class| class.name == *id)
                     && !app.models.iter().any(|model| model.name == *id)
                     && !app.controllers.iter().any(|controller| controller.name == *id)
@@ -3784,7 +3799,7 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                         expr.span,
                         target,
                         "bundled_constant",
-                        format!("{} is not available as a bundled class/module value on {target}", id.0.as_str()),
+                        format!("{name} is not available as a class/module value on {target}"),
                     );
                 }
             }
