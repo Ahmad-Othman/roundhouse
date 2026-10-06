@@ -330,25 +330,26 @@ pub(super) fn string_interp_fmt_and_args(parts: &[InterpPart]) -> (String, Vec<S
                 // annotation imprecisely marks an actually-`&String`
                 // closure param as Untyped.
                 let arg = emit_expr(expr);
-                // Fire on rust_value_shaped (Untyped / Record /
-                // heterogeneous unions that emit as Value) and on
-                // missing-Ty Sends whose recv is itself Value-shaped
-                // — the body-typer doesn't always propagate the
-                // result Ty through nested `value[key]` index Sends,
-                // but emit-side inspection of the recv catches the
-                // same pattern. The trait dispatch picks the right
-                // impl at compile time, so a false positive on a
-                // `&str` expression still compiles (the impl for
-                // `str` returns `self.to_string()`).
-                let needs_ruby_to_s = expr
-                    .ty
-                    .as_ref()
-                    .is_some_and(super::super::ty::rust_value_shaped)
-                    || expr_recv_is_value(expr);
-                if needs_ruby_to_s {
-                    args.push(format!("({arg}).ruby_to_s()"));
-                } else {
-                    args.push(arg);
+                // Fire on Untyped / Record (method-style; those files
+                // import `RubyToS`) and on other rust_value_shaped
+                // types via UFCS so ActionController compiles without
+                // the trait in scope. Missing-Ty Sends whose recv is
+                // itself Untyped/Record still get method-style — the
+                // body-typer doesn't always propagate the result Ty
+                // through nested `value[key]` index Sends.
+                match expr.ty.as_ref() {
+                    Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Record { .. }) => {
+                        args.push(format!("({arg}).ruby_to_s()"));
+                    }
+                    Some(ty) if super::super::ty::rust_value_shaped(ty) => {
+                        args.push(format!(
+                            "<serde_json::Value as crate::http::RubyToS>::ruby_to_s(&({arg}))"
+                        ));
+                    }
+                    _ if expr_recv_is_value(expr) => {
+                        args.push(format!("({arg}).ruby_to_s()"));
+                    }
+                    _ => args.push(arg),
                 }
             }
         }
@@ -357,11 +358,14 @@ pub(super) fn string_interp_fmt_and_args(parts: &[InterpPart]) -> (String, Vec<S
 }
 
 /// Returns `true` when `expr` is an index/send into a recv whose
-/// body-typer Ty rust-emits as `serde_json::Value` — i.e. the result
-/// is `&Value` at runtime even though the typing pass didn't
-/// propagate the inner result Ty. Currently only catches `recv[key]`
-/// and `recv.method()` shapes; deeper chains land here recursively
-/// through the index recv.
+/// body-typer Ty is `Untyped`/`Record` — i.e. the result is `&Value`
+/// at runtime even though the typing pass didn't propagate the
+/// inner result Ty. Currently only catches `recv[key]` and
+/// `recv.method()` shapes; deeper chains land here recursively
+/// through the index recv. Unions / ParamValue are handled via
+/// `rust_value_shaped` on `expr.ty` itself (UFCS), not this recv
+/// walk — walking them here would wrap Hash/Session `.get()` Option
+/// returns that rust-emit as `Option<T>`.
 fn expr_recv_is_value(expr: &Expr) -> bool {
     use crate::expr::ExprNode;
     let recv_opt: Option<&Expr> = match &*expr.node {
@@ -369,7 +373,10 @@ fn expr_recv_is_value(expr: &Expr) -> bool {
         _ => None,
     };
     let Some(recv) = recv_opt else { return false };
-    recv.ty.as_ref().is_some_and(super::super::ty::rust_value_shaped)
+    matches!(
+        recv.ty.as_ref(),
+        Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Record { .. })
+    )
 }
 
 /// Primitive literal → Rust literal. `nil` → `None` so Option-typed

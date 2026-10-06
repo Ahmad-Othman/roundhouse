@@ -299,9 +299,7 @@ pub(super) fn dispatch_method_by_recv_ty(
             _ => None,
         },
         // `Untyped` recv (rust's alias for `serde_json::Value`) +
-        // `Record` (a sub-Hash through `.as_object().iter()`) +
-        // heterogeneous unions that rust-emit as Value (`String |
-        // Integer | Float | bool | nil` on `optional_value_attr`).
+        // `Record` (a sub-Hash through `.as_object().iter()`).
         // `to_s` on these is the Ruby `Object#to_s` shape — for
         // String variants the bare inner string, for everything
         // else JSON-encode. Rust's `serde_json::Value::to_string()`
@@ -311,6 +309,8 @@ pub(super) fn dispatch_method_by_recv_ty(
         // a title). Route through the `RubyToS` trait (defined in
         // `runtime/rust/http.rs`): compile-time dispatch picks the
         // right impl for `str` / `String` / `serde_json::Value`.
+        // Files that import the trait (json_builder, view_helpers)
+        // can use method-style `.ruby_to_s()`.
         // `Integer#to_i` is the identity. Its common receiver is an
         // index read (`arr[i].to_i`), which types `Integer | nil` but
         // renders as the `i64` itself (see the nil peel above).
@@ -318,7 +318,7 @@ pub(super) fn dispatch_method_by_recv_ty(
             "to_i" if args.is_empty() => Some(recv_s.to_string()),
             _ => None,
         },
-        Some(ty) if super::super::super::ty::rust_value_shaped(ty) => match method {
+        Some(Ty::Untyped) | Some(Ty::Record { .. }) => match method {
             "to_s" if args.is_empty() => {
                 // `recv_s` is already wrap-aware via `emit_send_recv`
                 // at the top of this function: non-primary recvs
@@ -327,6 +327,17 @@ pub(super) fn dispatch_method_by_recv_ty(
                 // `.ruby_to_s()` itself is a method call — primary.
                 Some(format!("{recv_s}.ruby_to_s()"))
             }
+            _ => None,
+        },
+        // Heterogeneous unions / ParamValue / Var that rust-emit as
+        // Value (e.g. `optional_value_attr`'s column union). Fully-
+        // qualified so files that don't `use RubyToS` still compile
+        // — a blanket `.ruby_to_s()` here broke ActionController on
+        // compare rust.
+        Some(ty) if super::super::super::ty::rust_value_shaped(ty) => match method {
+            "to_s" if args.is_empty() => Some(format!(
+                "<serde_json::Value as crate::http::RubyToS>::ruby_to_s(&({recv_s}))"
+            )),
             _ => None,
         },
         Some(Ty::Hash { .. }) => match method {

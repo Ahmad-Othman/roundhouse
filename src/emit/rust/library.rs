@@ -935,7 +935,7 @@ end
 "#,
         );
         assert!(
-            out.contains("ruby_to_s()"),
+            out.contains("ruby_to_s"),
             "Value-shaped interp must not use Display JSON quotes:\n{out}"
         );
     }
@@ -1023,6 +1023,58 @@ end
         assert!(
             !body.contains("is_none()"),
             "optional_value_attr must not emit Option::is_none on Value:\n{body}"
+        );
+    }
+
+    /// `to_s` on the column union must use fully-qualified UFCS.
+    /// Method-style `.ruby_to_s()` needs `use RubyToS` in the file;
+    /// ActionController does not import that trait, and a blanket
+    /// `.ruby_to_s()` on every Value-rendering type broke compare rust.
+    #[test]
+    fn optional_value_attr_to_s_uses_ufcs() {
+        let out = emit_view_helpers();
+        let body = method_body(&out, "optional_value_attr");
+        assert!(
+            body.contains("<serde_json::Value as crate::http::RubyToS>::ruby_to_s"),
+            "optional_value_attr to_s should be UFCS ruby_to_s:\n{body}"
+        );
+        assert!(
+            !body.contains(".ruby_to_s()"),
+            "method-style ruby_to_s needs the trait in scope:\n{body}"
+        );
+    }
+
+    /// `turbo_stream_from`'s `String | Array[untyped]` renders as Value
+    /// on rust only. Wrap scalar call-site args here, not in the shared
+    /// lowerer — that Cast wrapping broke ActionController on extras.
+    #[test]
+    fn union_param_string_arg_wraps_as_value() {
+        let ruby = r#"module VH
+  def self.turbo_stream_from(stream, channel)
+    stream.to_s + channel
+  end
+  def self.call
+    turbo_stream_from("articles", "Turbo::StreamsChannel")
+  end
+end
+"#;
+        let rbs = r#"module VH
+  def self.turbo_stream_from: (String | Array[untyped] stream, String channel) -> String
+  def self.call: () -> String
+end
+"#;
+        let classes = crate::runtime_src::parse_library_with_rbs(ruby.as_bytes(), rbs, "vh.rb")
+            .expect("snippet parses and types");
+        let out = crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
+            classes
+                .iter()
+                .map(|c| emit_library_class(c).expect("emits"))
+                .collect::<String>()
+        });
+        let body = method_body(&out, "call");
+        assert!(
+            body.contains("serde_json::Value::from") && body.contains("articles"),
+            "string arg to String|Array union must wrap Value::from:\n{body}"
         );
     }
 }

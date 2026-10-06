@@ -32,7 +32,11 @@ pub(super) fn try_recv_typed_method(
             // Ruby-semantics view) match the same branches as the
             // plain receiver case. Emit chose panic-on-miss for `[]`,
             // so the runtime value really is T.
-            let recv_ty = r.ty.as_ref().map(peel_nil);
+            let ivar_fallback = match &*r.node {
+                ExprNode::Ivar { name } if r.ty.is_none() => ivar_field_ty(name.as_str()),
+                _ => None,
+            };
+            let recv_ty = r.ty.as_ref().or(ivar_fallback.as_ref()).map(peel_nil);
             let arg_ty = args[0].ty.as_ref().map(peel_nil);
             // Range index on Str/Vec receiver — `pp[1..]`. The Range
             // node emits its endpoints unmodified (`1_i64..`), but

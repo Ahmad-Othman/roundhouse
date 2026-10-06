@@ -257,6 +257,13 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     // Ivar args with non-Copy fields need `.clone()` first because
     // `Value::from` takes by value and would move out of `&self`
     // (E0507). Integer/Float/Bool fields are Copy so skip the clone.
+    // `Untyped` / Record stay Value. Heterogeneous unions such as
+    // `turbo_stream_from`'s `String | Array[untyped]` also render as
+    // `serde_json::Value` — wrap scalar args here, rust-only. Do not
+    // lift that to the shared lowerer: other targets do not box those
+    // unions as Value, and treating them as value-shaped Casts broke
+    // ActionController emit (crystal Int32/Int64, go/kotlin/csharp
+    // index types, python `.tr` on str).
     let value_target = |ty: &Ty| -> bool {
         super::super::super::ty::rust_value_shaped(ty)
     };

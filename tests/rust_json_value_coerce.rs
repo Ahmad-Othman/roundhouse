@@ -47,7 +47,7 @@ fn view_helpers_nil_pred_and_value_string_coercions_typecheck() {
         "optional_value_attr must use Value::is_null, not Option::is_none:\n{optional}"
     );
     assert!(
-        optional.contains("ruby_to_s()"),
+        optional.contains("ruby_to_s"),
         "optional_value_attr must to_s Value via ruby_to_s (no JSON quotes):\n{optional}"
     );
 
@@ -59,8 +59,12 @@ fn view_helpers_nil_pred_and_value_string_coercions_typecheck() {
 
     let form_with = method_body(&vh, "form_with");
     assert!(
-        form_with.contains("method_override_input(") && form_with.contains(".as_str().unwrap()"),
-        "form_with must narrow Hash#fetch Value to &str for method_override_input:\n{form_with}"
+        form_with.contains("method_override_input") && form_with.contains("ruby_to_s"),
+        "form_with must stringify the Hash fetch before method_override_input:\n{form_with}"
+    );
+    assert!(
+        !form_with.contains("method_override_input(opts"),
+        "gradual opts must not cross method_override_input:\n{form_with}"
     );
 
     let articles = file(&files, "views/articles.rs");
