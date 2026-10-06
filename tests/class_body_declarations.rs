@@ -176,11 +176,9 @@ fn load_hook_class_methods_expand_without_mixing_in_instance_methods() {
     let names = instance_names(&app, "Article");
     assert!(names.contains(&"headline".to_string()), "{names:?}");
     assert!(names.contains(&"headline=".to_string()), "{names:?}");
-    assert!(
-        !names
-            .iter()
-            .any(|n| n.contains("installer") || n == "titled")
-    );
+    assert!(!names
+        .iter()
+        .any(|n| n.contains("installer") || n == "titled"));
 }
 
 #[test]
@@ -222,11 +220,9 @@ end
         ModelBodyItem::Unknown { expr, .. }
             if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "titled")
     )));
-    assert!(
-        !article
-            .methods()
-            .any(|m| m.name.as_str() == "choose" && m.receiver == MethodReceiver::Instance)
-    );
+    assert!(!article
+        .methods()
+        .any(|m| m.name.as_str() == "choose" && m.receiver == MethodReceiver::Instance));
 }
 
 #[test]
@@ -427,4 +423,46 @@ puts "substituted has_one passed"
 "#,
         )
         .assert_passes();
+}
+
+#[test]
+fn missing_required_keyword_does_not_expand() {
+    let concern = r#"module LabelMacro
+  extend ActiveSupport::Concern
+  class_methods do
+    def labeled(title:)
+      define_method title do
+        1
+      end
+    end
+  end
+end
+"#;
+    roundhouse::ingest::survey::activate();
+    let app = ingest_app_from_tree(article_with_macro(
+        "app/models/concerns/label_macro.rb",
+        concern,
+        "LabelMacro",
+        "labeled",
+    ))
+    .expect("survey ingest");
+    roundhouse::ingest::survey::drain();
+    let article = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Article")
+        .unwrap();
+    assert!(
+        article.body.iter().any(|item| matches!(
+            item,
+            ModelBodyItem::Unknown { expr, .. }
+                if matches!(&*expr.node, ExprNode::Send { method, .. } if method.as_str() == "labeled")
+        )),
+        "required keyword missing must fail closed"
+    );
+    let names = instance_names(&app, "Article");
+    assert!(
+        !names.iter().any(|n| n == "headline"),
+        "must not invent a helper: {names:?}"
+    );
 }

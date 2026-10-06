@@ -12,12 +12,13 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::util::constant_id_str;
-use crate::App;
 use crate::dialect::{MethodDef, MethodReceiver, MethodVisibility, ModelBodyItem};
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::span::SourceFile;
+use crate::App;
+
+mod class_eval;
 
 pub(crate) fn expand_model_macros(
     app: &mut App,
@@ -29,30 +30,33 @@ pub(crate) fn expand_model_macros(
     let mut params_specs =
         crate::lower::controller_to_library::params::collect_specs(&app.controllers);
     params_specs.mark_file_fields(&app.models);
-    let hook_macros: Vec<(ClassId, MethodDef)> = app
-        .load_hook_class_macros
-        .iter()
-        .flat_map(|id| {
-            app.library_classes
-                .iter()
-                .find(|c| &c.name == id)
-                .into_iter()
-                .flat_map(|c| {
-                    c.methods.iter().filter_map(|m| {
-                        (m.receiver == MethodReceiver::Class && has_definition(&m.body))
-                            .then(|| (id.clone(), m.clone()))
-                    })
-                })
-        })
-        .collect();
+    // Index once. Do not clone these defs onto every model, and do not
+    // pretend the hook mixin was `include`d — availability is an
+    // explicit load-hook origin check below.
+    let hook_macros: HashMap<Symbol, (ClassId, MethodDef)> = {
+        let mut map = HashMap::new();
+        for id in &app.load_hook_class_macros {
+            let Some(class) = app.library_classes.iter().find(|c| &c.name == id) else {
+                continue;
+            };
+            for m in &class.methods {
+                if m.receiver == MethodReceiver::Class && has_definition(&m.body) {
+                    map.entry(m.name.clone())
+                        .or_insert_with(|| (id.clone(), m.clone()));
+                }
+            }
+        }
+        map
+    };
+    let hook_origins: HashSet<ClassId> = app.load_hook_class_macros.iter().cloned().collect();
     for model_index in 0..app.models.len() {
         let model = &app.models[model_index];
-        let mut origins = app
+        let origins = app
             .concern_spliced_class_methods
             .get(&model.name)
             .cloned()
             .unwrap_or_default();
-        let mut macros: HashMap<_, _> = model
+        let macros: HashMap<_, _> = model
             .methods()
             .filter(|m| {
                 m.receiver == MethodReceiver::Class
@@ -61,29 +65,18 @@ pub(crate) fn expand_model_macros(
             })
             .map(|m| (m.name.clone(), m.clone()))
             .collect();
-        for (origin, def) in &hook_macros {
-            origins
-                .entry(def.name.clone())
-                .or_insert_with(|| origin.clone());
-            macros
-                .entry(def.name.clone())
-                .or_insert_with(|| def.clone());
-        }
-        if macros.is_empty() {
+        if macros.is_empty() && hook_macros.is_empty() {
             continue;
         }
         let mut candidates = Vec::new();
         let mut calls = HashMap::<Symbol, usize>::new();
         let mut included = HashSet::new();
-        for id in &app.load_hook_class_macros {
-            included.insert(id.clone());
-        }
         for (index, item) in model.body.iter().enumerate() {
             let ModelBodyItem::Unknown { expr, .. } = item else {
                 continue;
             };
             let mut occurrences = Vec::new();
-            macro_calls(expr, &macros, &mut occurrences);
+            macro_calls(expr, &macros, &hook_macros, &mut occurrences);
             for name in &occurrences {
                 *calls.entry(name.clone()).or_default() += 1;
             }
@@ -100,7 +93,7 @@ pub(crate) fn expand_model_macros(
             };
             // Root calls are the only admitted placement. Calls nested
             // in conditionals/blocks must still poison partial expansion.
-            let root_macro = macros.contains_key(method)
+            let root_macro = (macros.contains_key(method) || hook_macros.contains_key(method))
                 && recv
                     .as_ref()
                     .is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef));
@@ -132,20 +125,20 @@ pub(crate) fn expand_model_macros(
             {
                 continue;
             }
-            let Some(def) = macros.get(method) else {
+            let Some((origin, def)) = macro_provider(method, &macros, &origins, &hook_macros)
+            else {
                 continue;
             };
-            let origin = &origins[method];
             let providers = app
                 .library_classes
                 .iter()
-                .filter(|c| included.contains(&c.name))
+                .filter(|c| included.contains(&c.name) || hook_origins.contains(&c.name))
                 .flat_map(|c| &c.methods)
                 .filter(|m| m.receiver == MethodReceiver::Class && &m.name == method)
                 .count();
             let methods = (recv.is_none()
                 && block.is_none()
-                && included.contains(origin)
+                && (included.contains(origin) || hook_origins.contains(origin))
                 && providers == 1
                 && [
                     "define_method",
@@ -277,6 +270,18 @@ pub(crate) fn expand_model_macros(
     Ok(())
 }
 
+fn macro_provider<'a>(
+    method: &Symbol,
+    macros: &'a HashMap<Symbol, MethodDef>,
+    origins: &'a HashMap<Symbol, ClassId>,
+    hook_macros: &'a HashMap<Symbol, (ClassId, MethodDef)>,
+) -> Option<(&'a ClassId, &'a MethodDef)> {
+    if let Some(def) = macros.get(method) {
+        return origins.get(method).map(|origin| (origin, def));
+    }
+    hook_macros.get(method).map(|(id, def)| (id, def))
+}
+
 fn include_closure(app: &App, id: ClassId, included: &mut HashSet<ClassId>) {
     if !included.insert(id.clone()) {
         return;
@@ -399,9 +404,14 @@ fn has_definition(body: &Expr) -> bool {
     found
 }
 
-fn macro_calls(expr: &Expr, macros: &HashMap<Symbol, MethodDef>, out: &mut Vec<Symbol>) {
+fn macro_calls(
+    expr: &Expr,
+    macros: &HashMap<Symbol, MethodDef>,
+    hook_macros: &HashMap<Symbol, (ClassId, MethodDef)>,
+    out: &mut Vec<Symbol>,
+) {
     if let ExprNode::Send { recv, method, .. } = &*expr.node {
-        if macros.contains_key(method)
+        if (macros.contains_key(method) || hook_macros.contains_key(method))
             && recv
                 .as_ref()
                 .is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
@@ -410,10 +420,10 @@ fn macro_calls(expr: &Expr, macros: &HashMap<Symbol, MethodDef>, out: &mut Vec<S
         }
     }
     expr.node
-        .for_each_child(&mut |child| macro_calls(child, macros, out));
+        .for_each_child(&mut |child| macro_calls(child, macros, hook_macros, out));
 }
 
-fn symbol(expr: &Expr) -> Option<&Symbol> {
+pub(super) fn symbol(expr: &Expr) -> Option<&Symbol> {
     match &*expr.node {
         ExprNode::Lit {
             value: Literal::Sym { value },
@@ -425,8 +435,11 @@ fn symbol(expr: &Expr) -> Option<&Symbol> {
 /// Required positionals plus required/optional keywords. Optional
 /// positionals, rest and forwarding need a fuller Ruby argument binder.
 /// Keywords retain their SOURCE kind even where library ingest flattened
-/// an optional keyword into a positional (`from_keyword`).
-fn bindings(def: &MethodDef, args: &[Expr]) -> Option<HashMap<Symbol, Expr>> {
+/// an optional keyword into a positional (`from_keyword`). A required
+/// keyword with no default fails closed (`None`); an optional keyword
+/// whose default is not a substitutable symbol is omitted so later
+/// statements that need it decline.
+pub(super) fn bindings(def: &MethodDef, args: &[Expr]) -> Option<HashMap<Symbol, Expr>> {
     if def.block_param.is_some()
         || def.params.iter().any(|p| {
             p.rest || p.from_kwrest || (!p.keyword && !p.from_keyword && p.default.is_some())
@@ -457,21 +470,20 @@ fn bindings(def: &MethodDef, args: &[Expr]) -> Option<HashMap<Symbol, Expr>> {
     let mut out = HashMap::new();
     for param in &def.params {
         let value = if param.keyword || param.from_keyword {
-            match keywords
-                .remove(&param.name)
-                .or_else(|| param.default.clone())
-            {
+            match keywords.remove(&param.name) {
                 Some(value) => {
                     symbol(&value)?;
                     value
                 }
-                None if param.keyword || param.from_keyword => {
-                    // Optional keyword not passed, default is not a
-                    // substitutable symbol — omit it from the binding
-                    // set so later statements that need it decline.
-                    continue;
-                }
-                None => return None,
+                None => match &param.default {
+                    Some(default) => {
+                        if symbol(default).is_none() {
+                            continue;
+                        }
+                        default.clone()
+                    }
+                    None => return None,
+                },
             }
         } else {
             positional.next()?.clone()
@@ -485,9 +497,9 @@ fn bindings(def: &MethodDef, args: &[Expr]) -> Option<HashMap<Symbol, Expr>> {
     (positional.next().is_none() && keywords.is_empty()).then_some(out)
 }
 
-struct Expansion {
-    methods: Vec<MethodDef>,
-    items: Vec<ModelBodyItem>,
+pub(super) struct Expansion {
+    pub(super) methods: Vec<MethodDef>,
+    pub(super) items: Vec<ModelBodyItem>,
 }
 
 fn expand(
@@ -502,7 +514,7 @@ fn expand(
             items: Vec::new(),
         });
     }
-    expand_class_eval_macro(def, args, sources, owner)
+    class_eval::expand(def, args, sources, owner)
 }
 
 fn expand_define_methods(
@@ -703,235 +715,4 @@ fn substitute(mut expr: Expr, bindings: &HashMap<Symbol, Expr>) -> Option<Expr> 
         _ => return None,
     }
     Some(expr)
-}
-
-fn expand_class_eval_macro(
-    def: &MethodDef,
-    args: &[Expr],
-    sources: &[SourceFile],
-    owner: &ClassId,
-) -> Option<Expansion> {
-    let bindings = bindings(def, args)?;
-    let mut idents = HashMap::new();
-    for (k, v) in &bindings {
-        idents.insert(k.as_str().to_string(), symbol(v)?.as_str().to_string());
-    }
-    let source = def
-        .name_span
-        .file
-        .0
-        .checked_sub(1)
-        .and_then(|i| sources.get(i as usize))?;
-    let parsed = ruby_prism::parse(source.text.as_bytes());
-    if parsed.errors().next().is_some() {
-        return None;
-    }
-    enum Piece {
-        ClassEval(String),
-        Stmt(String),
-    }
-    struct Collect {
-        offset: usize,
-        idents: HashMap<String, String>,
-        pieces: Vec<Piece>,
-    }
-    impl<'pr> ruby_prism::Visit<'pr> for Collect {
-        fn visit_def_node(&mut self, defn: &ruby_prism::DefNode<'pr>) {
-            if defn.name_loc().start_offset() != self.offset {
-                return;
-            }
-            let Some(body) = defn.body() else {
-                return;
-            };
-            for stmt in super::util::flatten_statements(body) {
-                if let Some(call) = stmt.as_call_node() {
-                    if call.receiver().is_none() && constant_id_str(&call.name()) == "class_eval" {
-                        if let Some(template) = class_eval_template(&call, &self.idents) {
-                            self.pieces.push(Piece::ClassEval(template));
-                            continue;
-                        }
-                    }
-                }
-                let loc = stmt.location();
-                self.pieces.push(Piece::Stmt(
-                    String::from_utf8_lossy(loc.as_slice()).into_owned(),
-                ));
-            }
-        }
-    }
-    let mut collect = Collect {
-        offset: def.name_span.start as usize,
-        idents: idents.clone(),
-        pieces: Vec::new(),
-    };
-    ruby_prism::Visit::visit(&mut collect, &parsed.node());
-    let mut methods = Vec::new();
-    let mut items = Vec::new();
-    let file = source.path.as_str();
-    for piece in collect.pieces {
-        let rewritten = match piece {
-            Piece::ClassEval(template) => template,
-            Piece::Stmt(src) => bind_local_reads(&src, &idents)?,
-        };
-        ingest_rewritten_body(&rewritten, owner, file, &mut methods, &mut items)?;
-    }
-    if items
-        .iter()
-        .any(|item| matches!(item, ModelBodyItem::Unknown { .. }))
-    {
-        return None;
-    }
-    (!methods.is_empty() || !items.is_empty()).then_some(Expansion { methods, items })
-}
-
-fn ingest_rewritten_body(
-    src: &str,
-    owner: &ClassId,
-    file: &str,
-    methods: &mut Vec<MethodDef>,
-    items: &mut Vec<ModelBodyItem>,
-) -> Option<()> {
-    let parsed = super::prism::parse_silent(src.as_bytes());
-    if parsed.errors().next().is_some() {
-        return None;
-    }
-    let program = parsed.node().as_program_node()?;
-    for stmt in program.statements().body().iter() {
-        absorb_items(
-            super::model::ingest_model_body_items(&stmt, owner, file, Vec::new()).ok()?,
-            methods,
-            items,
-        );
-    }
-    Some(())
-}
-
-fn absorb_items(
-    ingested: Vec<ModelBodyItem>,
-    methods: &mut Vec<MethodDef>,
-    items: &mut Vec<ModelBodyItem>,
-) {
-    for item in ingested {
-        match item {
-            ModelBodyItem::Method { method, .. } => methods.push(method),
-            other => items.push(other),
-        }
-    }
-}
-
-fn class_eval_template(
-    call: &ruby_prism::CallNode<'_>,
-    idents: &HashMap<String, String>,
-) -> Option<String> {
-    let args = call.arguments()?;
-    let first = args.arguments().iter().next()?;
-    if let Some(s) = first.as_string_node() {
-        return Some(String::from_utf8_lossy(s.unescaped()).into_owned());
-    }
-    interpolate_string_node(&first, idents)
-}
-
-fn interpolate_string_node(
-    node: &ruby_prism::Node<'_>,
-    idents: &HashMap<String, String>,
-) -> Option<String> {
-    if let Some(s) = node.as_string_node() {
-        return Some(String::from_utf8_lossy(s.unescaped()).into_owned());
-    }
-    let interp = node.as_interpolated_string_node()?;
-    let mut out = String::new();
-    for part in interp.parts().iter() {
-        if let Some(s) = part.as_string_node() {
-            out.push_str(&String::from_utf8_lossy(s.unescaped()));
-        } else if let Some(es) = part.as_embedded_statements_node() {
-            let stmts = es.statements()?;
-            let nodes: Vec<_> = stmts.body().iter().collect();
-            let [only] = nodes.as_slice() else {
-                return None;
-            };
-            let name = only
-                .as_local_variable_read_node()
-                .map(|n| String::from_utf8_lossy(n.name().as_slice()).into_owned())
-                .or_else(|| {
-                    only.as_call_node().and_then(|c| {
-                        (c.receiver().is_none() && c.arguments().is_none() && c.block().is_none())
-                            .then(|| String::from_utf8_lossy(c.name().as_slice()).into_owned())
-                    })
-                })?;
-            out.push_str(idents.get(&name)?);
-        } else if part.as_interpolated_string_node().is_some() {
-            out.push_str(&interpolate_string_node(&part, idents)?);
-        } else {
-            return None;
-        }
-    }
-    Some(out)
-}
-
-/// After `#{param}` has been substituted, remaining local reads of a
-/// bound param become symbol literals (`name` → `:body`). A statement
-/// sliced out of its `def` parses those names as receiverless calls,
-/// which must get the same rewrite.
-fn bind_local_reads(src: &str, idents: &HashMap<String, String>) -> Option<String> {
-    let parsed = ruby_prism::parse(src.as_bytes());
-    if parsed.errors().next().is_some() {
-        return None;
-    }
-    struct Locals {
-        hits: Vec<(usize, usize, String)>,
-        idents: HashMap<String, String>,
-    }
-    impl Locals {
-        fn record(&mut self, name: String, loc: ruby_prism::Location<'_>) {
-            if self.idents.contains_key(&name) {
-                self.hits.push((loc.start_offset(), loc.end_offset(), name));
-            }
-        }
-    }
-    impl<'pr> ruby_prism::Visit<'pr> for Locals {
-        fn visit_local_variable_read_node(
-            &mut self,
-            node: &ruby_prism::LocalVariableReadNode<'pr>,
-        ) {
-            self.record(
-                String::from_utf8_lossy(node.name().as_slice()).into_owned(),
-                node.location(),
-            );
-        }
-        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-            if node.receiver().is_none() && node.arguments().is_none() && node.block().is_none() {
-                self.record(
-                    String::from_utf8_lossy(node.name().as_slice()).into_owned(),
-                    node.location(),
-                );
-            }
-            if let Some(recv) = node.receiver() {
-                self.visit(&recv);
-            }
-            if let Some(args) = node.arguments() {
-                for arg in args.arguments().iter() {
-                    self.visit(&arg);
-                }
-            }
-            if let Some(block) = node.block() {
-                self.visit(&block);
-            }
-        }
-    }
-    let mut locals = Locals {
-        hits: Vec::new(),
-        idents: idents.clone(),
-    };
-    ruby_prism::Visit::visit(&mut locals, &parsed.node());
-    let mut out = src.to_string();
-    locals.hits.sort_by_key(|(start, _, _)| *start);
-    locals.hits.reverse();
-    for (start, end, name) in locals.hits {
-        let ident = idents.get(&name)?;
-        if start > out.len() || end > out.len() || start > end {
-            return None;
-        }
-        out.replace_range(start..end, &format!(":{ident}"));
-    }
-    Some(out)
 }

@@ -169,9 +169,9 @@ pub struct App {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachable_unsigned_models: Vec<Symbol>,
     /// Modules `include`d inside `ActiveSupport.on_load(:active_record)`
-    /// that provide class-methods macros. The mixin itself is not
-    /// installed (instance methods stay off); compile-time expansion
-    /// may still bind a literal call site to those class methods.
+    /// that provide class-method macros. Mixin instance methods are not
+    /// installed. Expansion treats these as an explicit provider origin
+    /// (not a seeded `include` set on every model).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub load_hook_class_macros: Vec<ClassId>,
     /// Partial → local name → type, harvested by the analyzer from the
