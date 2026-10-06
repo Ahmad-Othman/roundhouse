@@ -431,13 +431,23 @@ module ActiveRecord
     # either, as in Rails.
     def limit(n)
       @records = nil
-      @limit = n.nil? ? nil : sql_limit(n)
+      # Split rather than `n.nil? ? nil : sql_limit(n)`: Spinel cannot
+      # unify nil with Integer in a conditional expression.
+      if n.nil?
+        @limit = nil
+      else
+        @limit = sql_limit(n)
+      end
       self
     end
 
     def offset(n)
       @records = nil
-      @offset = n.nil? ? nil : n.to_i
+      if n.nil?
+        @offset = nil
+      else
+        @offset = n.to_i
+      end
       self
     end
 
