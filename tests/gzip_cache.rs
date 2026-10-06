@@ -349,3 +349,93 @@ puts "ALL OK"
     );
     assert!(out.status.success(), "driver exited {:?}", out.status.code());
 }
+
+/// The splice: a page that varies per request (a fresh token in the
+/// layout) around a large cached fragment inflates to exactly its body,
+/// with the fragment deflated once across requests. Non-ASCII text, a
+/// repeated page reusing the last splice, a nested fragment, and a
+/// fragment the body doesn't contain (the whole-body path) are each
+/// covered. Compared as bytes: `Zlib.gunzip` returns BINARY.
+#[test]
+fn spliced_gzip_inflates_to_the_body_and_deflates_a_fragment_once() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = r#"
+module Rails
+  class MemoryStore
+    def initialize; @d = {}; end
+    def read_str(k); @d[k]; end
+    def write_str(k, v, _ttl); @d[k] = v.dup.freeze; end
+  end
+end
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/gzip_cache"
+raise "splice unavailable" unless GzipCache::SPLICE_OK
+
+store = Rails::MemoryStore.new
+msgs = (1..400).map { |i| "<div class=\"message\" id=\"m#{i}\"><p>Message #{i} — héllo #{i * 7}</p></div>\n" }.join
+store.write_str("coll", msgs, 0)
+
+fragment_deflates = 0
+orig = GzipCache.method(:raw_deflate)
+GzipCache.define_singleton_method(:raw_deflate) do |d, dict, lv|
+  fragment_deflates += 1 if lv == Zlib::DEFAULT_COMPRESSION
+  orig.call(d, dict, lv)
+end
+
+bodies = []
+seq = 0
+app = GzipCache.wrap(lambda { |e|
+  tok = e["TOK"] || (seq += 1).to_s * 16
+  body = +"<html><head><meta content=#{tok}></head><body>" << store.read_str("coll") << "<form><input value=#{tok}></form></body></html>"
+  bodies << body.dup
+  [200, { "content-type" => "text/html" }, [body]]
+})
+env = { "REQUEST_METHOD" => "GET", "HTTP_ACCEPT_ENCODING" => "gzip" }
+3.times do |i|
+  _, h, b = app.call(env)
+  raise "encoding #{i}" unless h["content-encoding"] == "gzip"
+  raise "length #{i}" unless h["content-length"] == b[0].bytesize.to_s
+  raise "round trip #{i}" unless Zlib.gunzip(b[0]) == bodies[i].b
+end
+raise "fragment deflated #{fragment_deflates}x" unless fragment_deflates == 1
+whole = Zlib.gzip(bodies.last).bytesize
+_, _, last = app.call(env)
+raise "spliced #{last[0].bytesize} B vs whole #{whole} B" unless last[0].bytesize < whole * 1.10
+
+# The same page again (no per-request token) reuses the last splice.
+GzipCache.instance_variable_set(:@last_raw, nil)
+_, _, r1 = app.call(env.merge("TOK" => "same"))
+GzipCache.instance_variable_set(:@last_raw, nil)
+_, _, r2 = app.call(env.merge("TOK" => "same"))
+raise "repeat not reused" unless r1[0].equal?(r2[0])
+raise "repeat round trip" unless Zlib.gunzip(r2[0]) == bodies.last.b
+
+# A fragment nested in a later one (a collection miss writes its members
+# first) is found in order; the container is skipped.
+member = store.write_str("m1", msgs[0, 6000], 0)
+body = "pre-" + msgs + "-post"
+raise "nested" unless Zlib.gunzip(GzipCache.splice(body, [member, store.read_str("coll")])) == body.b
+
+# Not in the body: no splice, the whole-body path answers.
+raise "spliced a stranger" unless GzipCache.splice("plain page " * 50, [store.read_str("coll")]).nil?
+stray = GzipCache.wrap(lambda { |_e|
+  GzipCache.note_fragment(store.read_str("coll"))
+  [200, { "content-type" => "text/html" }, ["no fragment here " * 50]]
+})
+_, _, sb = stray.call(env)
+raise "fallback round trip" unless Zlib.gunzip(sb[0]) == ("no fragment here " * 50).b
+puts "ALL OK"
+"#;
+    let out = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .current_dir(root)
+        .output()
+        .expect("ruby is on PATH");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("ALL OK"),
+        "spliced gzip failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+    assert!(out.status.success(), "driver exited {:?}", out.status.code());
+}
