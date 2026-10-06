@@ -120,6 +120,10 @@ pub fn group_in_relation_chain(expr: &Expr) -> Option<GroupedCount<'_>> {
 
 fn rewrite(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut rewrite);
+    rewrite_node(expr);
+}
+
+pub(crate) fn rewrite_node(expr: &mut Expr) {
     // The SOURCE spelling only — `grouped_count_parts` accepts both, so
     // a second pass over an already-renamed tree is a no-op rather than
     // a rename of a rename.

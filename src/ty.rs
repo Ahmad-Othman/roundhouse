@@ -372,13 +372,136 @@ impl Ty {
 
     /// Sort a flattened variant list into the canonical order: `Nil`
     /// last (so nilable unions keep reading `T | Nil`), everything else
-    /// by its structural `Debug` rendering — an arbitrary but total and
-    /// stable key. Two unions built from the same variants in any join
-    /// order compare equal under derived `==` only because of this;
-    /// `analyze`'s lattice join (`union_of`) relies on it for fixpoint
-    /// convergence.
+    /// by a structural total order. Two unions built from the same
+    /// variants in any join order compare equal under derived `==` only
+    /// because of this; `analyze`'s lattice join (`union_of`) relies on
+    /// it for fixpoint convergence.
+    ///
+    /// Allocating a `Debug` string per variant on every join was the
+    /// previous key; Campfire's analyzer fixpoint does this each round.
     pub(crate) fn canonicalize_variants(variants: &mut [Ty]) {
-        variants.sort_by_cached_key(|v| (matches!(v, Ty::Nil), format!("{v:?}")));
+        variants.sort_by(cmp_ty_nil_last);
+    }
+}
+
+fn cmp_ty_nil_last(a: &Ty, b: &Ty) -> std::cmp::Ordering {
+    match (matches!(a, Ty::Nil), matches!(b, Ty::Nil)) {
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        _ => cmp_ty(a, b),
+    }
+}
+
+fn ty_tag(ty: &Ty) -> u8 {
+    match ty {
+        Ty::Int => 0,
+        Ty::Float => 1,
+        Ty::Bool => 2,
+        Ty::Str => 3,
+        Ty::Sym => 4,
+        Ty::Date => 5,
+        Ty::Time => 6,
+        Ty::Relation { .. } => 7,
+        Ty::Array { .. } => 8,
+        Ty::Hash { .. } => 9,
+        Ty::Tuple { .. } => 10,
+        Ty::Record { .. } => 11,
+        Ty::Union { .. } => 12,
+        Ty::SelfInstance => 13,
+        Ty::Class { .. } => 14,
+        Ty::Fn { .. } => 15,
+        Ty::Var { .. } => 16,
+        Ty::Untyped => 17,
+        Ty::Bottom => 18,
+        Ty::Nil => 19,
+    }
+}
+
+fn cmp_ty(a: &Ty, b: &Ty) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    ty_tag(a).cmp(&ty_tag(b)).then_with(|| match (a, b) {
+        (Ty::Relation { of: x }, Ty::Relation { of: y }) => x.cmp(y),
+        (Ty::Array { elem: x }, Ty::Array { elem: y }) => cmp_ty(x, y),
+        (Ty::Hash { key: kx, value: vx }, Ty::Hash { key: ky, value: vy }) => {
+            cmp_ty(kx, ky).then_with(|| cmp_ty(vx, vy))
+        }
+        (Ty::Tuple { elems: x }, Ty::Tuple { elems: y }) => cmp_ty_slice(x, y),
+        (Ty::Record { row: x }, Ty::Record { row: y }) => cmp_row(x, y),
+        (Ty::Union { variants: x }, Ty::Union { variants: y }) => cmp_ty_slice(x, y),
+        (Ty::Class { id: ix, args: ax }, Ty::Class { id: iy, args: ay }) => {
+            ix.cmp(iy).then_with(|| cmp_ty_slice(ax, ay))
+        }
+        (
+            Ty::Fn { params: px, block: bx, ret: rx, effects: ex },
+            Ty::Fn { params: py, block: by, ret: ry, effects: ey },
+        ) => cmp_params(px, py)
+            .then_with(|| match (bx, by) {
+                (None, None) => Ordering::Equal,
+                (None, Some(_)) => Ordering::Less,
+                (Some(_), None) => Ordering::Greater,
+                (Some(x), Some(y)) => cmp_ty(x, y),
+            })
+            .then_with(|| cmp_ty(rx, ry))
+            .then_with(|| ex.effects.cmp(&ey.effects)),
+        (Ty::Var { var: x }, Ty::Var { var: y }) => x.cmp(y),
+        _ => Ordering::Equal,
+    })
+}
+
+fn cmp_ty_slice(a: &[Ty], b: &[Ty]) -> std::cmp::Ordering {
+    a.len().cmp(&b.len()).then_with(|| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| cmp_ty(x, y))
+            .find(|o| *o != std::cmp::Ordering::Equal)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })
+}
+
+fn cmp_row(a: &Row, b: &Row) -> std::cmp::Ordering {
+    a.fields
+        .len()
+        .cmp(&b.fields.len())
+        .then_with(|| {
+            a.fields
+                .iter()
+                .zip(b.fields.iter())
+                .map(|((ka, va), (kb, vb))| ka.cmp(kb).then_with(|| cmp_ty(va, vb)))
+                .find(|o| *o != std::cmp::Ordering::Equal)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| a.rest.cmp(&b.rest))
+}
+
+fn cmp_params(a: &[Param], b: &[Param]) -> std::cmp::Ordering {
+    a.len().cmp(&b.len()).then_with(|| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| {
+                x.name
+                    .cmp(&y.name)
+                    .then_with(|| cmp_ty(&x.ty, &y.ty))
+                    .then_with(|| param_kind_tag(&x.kind).cmp(&param_kind_tag(&y.kind)))
+                    .then_with(|| match (&x.kind, &y.kind) {
+                        (ParamKind::Keyword { required: ra }, ParamKind::Keyword { required: rb }) => {
+                            ra.cmp(rb)
+                        }
+                        _ => std::cmp::Ordering::Equal,
+                    })
+            })
+            .find(|o| *o != std::cmp::Ordering::Equal)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })
+}
+
+fn param_kind_tag(kind: &ParamKind) -> u8 {
+    match kind {
+        ParamKind::Required => 0,
+        ParamKind::Optional => 1,
+        ParamKind::Rest => 2,
+        ParamKind::Keyword { .. } => 3,
+        ParamKind::KeywordRest => 4,
+        ParamKind::Block => 5,
     }
 }
 

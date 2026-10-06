@@ -3713,6 +3713,64 @@ end
 }
 
 #[test]
+fn subclass_filter_reads_parent_target_effects() {
+    // `before_action :load_room` declared on the subclass, method body
+    // on the parent. Lookup by included_via/defined_in both names the
+    // subclass, which never stamped the method.
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            r#"class ApplicationController < ActionController::Base
+  private
+
+  def load_room
+    @room = Room.find(1)
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/rooms_controller.rb",
+            r#"class RoomsController < ApplicationController
+  before_action :load_room
+
+  def show
+  end
+end
+"#,
+        ),
+        ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+        ("app/views/rooms/show.html.erb", "<p><%= @room %></p>\n"),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "rooms", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        ),
+    ]);
+
+    let res = app
+        .controller_resolutions
+        .get(&ClassId(Symbol::from("RoomsController")))
+        .expect("RoomsController resolution");
+    let load = res
+        .filter_chain
+        .iter()
+        .find(|rf| rf.filter.target.as_str() == "load_room")
+        .expect("load_room filter");
+    assert_eq!(load.defined_in.0.as_str(), "RoomsController");
+    assert_eq!(load.included_via.0.as_str(), "RoomsController");
+    assert!(
+        load.effects.effects.iter().any(|e| matches!(e, Effect::DbRead { .. })),
+        "parent load_room DbRead must reach the subclass filter hop; got {:?}",
+        load.effects
+    );
+}
+
+#[test]
 fn controller_resolutions_layout_inheritance_and_skip_entries() {
     let app = app_from_files(&[
         (

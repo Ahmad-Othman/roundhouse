@@ -3246,6 +3246,18 @@ mod tests {
     }
 
     #[test]
+    fn union_of_bool_int_nil_is_structural_not_debug_order() {
+        // Debug-string sort put Bool before Int; `ty_tag` puts Int first.
+        let got = union_of(union_of(Ty::Bool, Ty::Int), Ty::Nil);
+        assert_eq!(
+            got,
+            Ty::Union {
+                variants: vec![Ty::Int, Ty::Bool, Ty::Nil]
+            }
+        );
+    }
+
+    #[test]
     fn union_of_is_associative() {
         let universe = law_universe();
         for a in &universe {
