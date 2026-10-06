@@ -8,29 +8,39 @@ module ActionController
   REDIRECT_LINE_BREAK_PATTERN = /[\r\n\0]/.freeze
 
   # Puma's illegal-header rule: drop a key/value that cannot be one
-  # HTTP/1.1 line. Shared so non-Spinel servers inherit the same
-  # assignment-time drop that Tep/CGI apply on the wire.
+  # HTTP/1.1 line. Character walks (`[i, 1]`), not `getbyte`/`bytesize`
+  # — those do not exist on strict-target strings.
   def self.header_key_ok?(k)
-    n = k.bytesize
+    n = k.length
     return false if n == 0
     i = 0
     while i < n
-      b = k.getbyte(i)
-      return false if b <= 32 || b == 127 || b == 34 || b == 58
+      c = k[i, 1].to_s
+      return false if c == "\"" || c == ":" || c == " " || header_control?(c)
       i += 1
     end
     true
   end
 
   def self.header_value_ok?(v)
-    n = v.bytesize
+    n = v.length
     i = 0
     while i < n
-      b = v.getbyte(i)
-      return false if (b < 32 && b != 9) || b == 127
+      c = v[i, 1].to_s
+      return false if c != "\t" && header_control?(c)
       i += 1
     end
     true
+  end
+
+  def self.header_control?(c)
+    c == "\0" || c == "\r" || c == "\n" || c == "\x01" || c == "\x02" ||
+      c == "\x03" || c == "\x04" || c == "\x05" || c == "\x06" || c == "\x07" ||
+      c == "\x08" || c == "\t" || c == "\x0b" || c == "\x0c" || c == "\x0e" ||
+      c == "\x0f" || c == "\x10" || c == "\x11" || c == "\x12" || c == "\x13" ||
+      c == "\x14" || c == "\x15" || c == "\x16" || c == "\x17" || c == "\x18" ||
+      c == "\x19" || c == "\x1a" || c == "\x1b" || c == "\x1c" || c == "\x1d" ||
+      c == "\x1e" || c == "\x1f" || c == "\x7f"
   end
 
   def self.sanitize_location(path)
@@ -50,19 +60,40 @@ module ActionController
     if s.start_with?("//")
       rest = s[2, s.length].to_s
     else
-      at = s.index("://")
-      return "" if at.nil?
+      at = find_substr(s, "://")
+      return "" if at < 0
       rest = s[at + 3, s.length].to_s
     end
-    slash = rest.index("/")
-    hostport = slash.nil? ? rest : rest[0, slash].to_s
-    q = hostport.index("?")
-    hostport = hostport[0, q].to_s unless q.nil?
-    hash = hostport.index("#")
-    hostport = hostport[0, hash].to_s unless hash.nil?
-    user = hostport.rindex("@")
-    hostport = hostport[user + 1, hostport.length].to_s unless user.nil?
+    slash = find_substr(rest, "/")
+    hostport = slash < 0 ? rest : rest[0, slash].to_s
+    q = find_substr(hostport, "?")
+    hostport = hostport[0, q].to_s unless q < 0
+    hash = find_substr(hostport, "#")
+    hostport = hostport[0, hash].to_s unless hash < 0
+    user = find_last(hostport, "@")
+    hostport = hostport[user + 1, hostport.length].to_s unless user < 0
     hostport.downcase
+  end
+
+  def self.find_substr(hay, needle)
+    n = needle.length
+    i = 0
+    last = hay.length - n
+    while i <= last
+      return i if hay[i, n].to_s == needle
+      i += 1
+    end
+    -1
+  end
+
+  def self.find_last(hay, needle)
+    n = needle.length
+    i = hay.length - n
+    while i >= 0
+      return i if hay[i, n].to_s == needle
+      i -= 1
+    end
+    -1
   end
 
   class HeaderStore
@@ -75,12 +106,14 @@ module ActionController
     end
 
     def []=(key, value)
-      return value if value.nil?
-      k = key.to_s
-      v = value.to_s
-      return value unless ActionController.header_key_ok?(k) && ActionController.header_value_ok?(v)
-      @pairs[k] = v
-      value
+      unless value.nil?
+        k = key.to_s
+        v = value.to_s
+        if ActionController.header_key_ok?(k) && ActionController.header_value_ok?(v)
+          @pairs[k] = v
+        end
+      end
+      nil
     end
 
     def each
@@ -200,8 +233,12 @@ module ActionController
   # file would have to satisfy every strict target's type system for
   # a feature none of them exercise yet.
   class Base
-    class << self
-      attr_accessor :allow_forgery_protection
+    def self.allow_forgery_protection
+      @allow_forgery_protection
+    end
+
+    def self.allow_forgery_protection=(value)
+      @allow_forgery_protection = value
     end
 
     attr_accessor :params, :session, :flash, :request_method, :request_path, :request_format
@@ -480,7 +517,7 @@ module ActionController
     end
 
     def verified_request?
-      return true if Base.allow_forgery_protection == false
+      return true if ActionController::Base.allow_forgery_protection == false
       verb = @request_method.to_s
       return true if verb == "" || verb == "GET" || verb == "HEAD"
       expected = session[:_csrf_token].to_s
@@ -492,9 +529,7 @@ module ActionController
     end
 
     def csrf_header_token
-      req = request_for_csrf
-      return "" if req.nil?
-      req.env.fetch("HTTP_X_CSRF_TOKEN", "").to_s
+      ""
     end
 
     def request_for_csrf

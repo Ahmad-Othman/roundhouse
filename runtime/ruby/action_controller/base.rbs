@@ -1,8 +1,11 @@
 module ActionController
   def self.header_key_ok?: (String k) -> bool
   def self.header_value_ok?: (String v) -> bool
+  def self.header_control?: (String c) -> bool
   def self.sanitize_location: (untyped path) -> String
   def self.location_host: (untyped url) -> String
+  def self.find_substr: (String hay, String needle) -> Integer
+  def self.find_last: (String hay, String needle) -> Integer
 
   class HeaderStore
     @pairs: Hash[String, String]

@@ -25,6 +25,12 @@ module ActionController
     def request_for_csrf
       @request
     end
+
+    def csrf_header_token
+      req = @request
+      return "" if req.nil?
+      req.env.fetch("HTTP_X_CSRF_TOKEN", "").to_s
+    end
   end
 
   module Current

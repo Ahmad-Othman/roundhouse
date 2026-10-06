@@ -256,6 +256,7 @@ module ActiveRecord
     def order_direction: (untyped dir) -> String
     def sql_ident: (untyped name) -> String
     def order_hash_column: (untyped col) -> String
+    def order_fn_term?: (String c) -> bool
     def order_string: (String s) -> String
   end
 end

@@ -5851,6 +5851,10 @@ got = run(:sorted_str, { "sort" => "name desc" })
 raise "string order: #{got}" unless got == "gamma,beta,alpha"
 got = rejected(:sorted_str, { "sort" => "id DESC, (SELECT 1)" })
 raise "string ORDER took SQL: #{got}" unless got == "rejected"
+got = Widget.all.order("LOWER(name)").map { |w| w.name }.join(",")
+raise "LOWER(name) order: #{got}" unless got == "alpha,beta,gamma"
+got = rejected(:sorted_str, { "sort" => "LOWER(name); SELECT 1" })
+raise "LOWER plus splice: #{got}" unless got == "rejected"
 
 rel = Widget.all.order(:name)
 begin

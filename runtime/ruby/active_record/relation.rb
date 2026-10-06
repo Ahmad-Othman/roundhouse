@@ -1940,6 +1940,13 @@ module ActiveRecord
       sql_ident(col)
     end
 
+    # Developer SQL like campfire's `order("LOWER(name)")` /
+    # `order("LOWER(rooms.name)")`. A request-steered fragment such as
+    # `(SELECT 1)` does not match.
+    def order_fn_term?(c)
+      c.match?(/\A[A-Za-z_][A-Za-z0-9_]*\([A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?\)\z/)
+    end
+
     # A string `order` argument: comma-separated `col` / `table.col`
     # with optional ASC/DESC. Static corpus strings (`"id desc"`,
     # `"category asc, tags.tag asc"`) pass; `order(params[:sort])` with
@@ -1953,11 +1960,12 @@ module ActiveRecord
         if words.length == 0 || words.length > 2
           raise ArgumentError, "Order \"" + s + "\" is not a column name"
         end
-        col = order_hash_column(words[0])
+        col = words[0]
+        term = order_fn_term?(col) ? col : order_hash_column(col)
         if words.length == 2
-          parts << "#{col} #{order_direction(words[1])}"
+          parts << "#{term} #{order_direction(words[1])}"
         else
-          parts << col
+          parts << term
         end
       end
       parts.join(", ")
