@@ -1437,7 +1437,7 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
         // not implemented — runtime call sites use literal pairs.
         "tr" if args_s.len() == 2 && is_str => {
             format!(
-                "(lambda _f, _t: {recv}.translate(str.maketrans(_f, (_t[:len(_f)] if len(_t) >= len(_f) else _t + ((_t[-1] if _t else \"\") * (len(_f) - len(_t)))))))({}, {})",
+                "(lambda _f, _t: ({recv}).translate(str.maketrans(_f, (_t[:len(_f)] if len(_t) >= len(_f) else _t + ((_t[-1] if _t else \"\") * (len(_f) - len(_t)))))))({}, {})",
                 args_s[0],
                 args_s[1]
             )

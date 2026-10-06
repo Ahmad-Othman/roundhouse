@@ -332,6 +332,24 @@ fn recv_is_hash(r: &Expr) -> bool {
             if matches!(instance_prop_ty(name.as_str()), Some(crate::ty::Ty::Hash { .. })))
 }
 
+/// Key/value C# types for a Hash-typed receiver. Falls back to
+/// `string, object?` when the Hash shape is unknown (Untyped bag).
+fn hash_kv_tys(r: &Expr) -> (String, String) {
+    let hash_ty = match &*r.node {
+        ExprNode::Ivar { name } => instance_prop_ty(name.as_str()),
+        _ => None,
+    };
+    let hash_ty = hash_ty.as_ref().or(r.ty.as_ref());
+    let Some(t) = hash_ty else {
+        return ("string".into(), "object?".into());
+    };
+    // Peel `Hash | Nil` so a nullable opts hash still copies as Dictionary.
+    match t.peel_nilable() {
+        crate::ty::Ty::Hash { key, value } => (csharp_ty(key), csharp_ty(value)),
+        _ => ("string".into(), "object?".into()),
+    }
+}
+
 fn recv_is_array(r: &Expr) -> bool {
     if ty_is(r.ty.as_ref(), |t| matches!(t, crate::ty::Ty::Array { .. })) {
         return true;
@@ -1546,9 +1564,13 @@ fn emit_send(
             "keys" if recv_is_hash(r) => return format!("{rs}.Keys.ToList()"),
             "values" if recv_is_hash(r) => return format!("{rs}.Values.ToList()"),
             // Hash#dup must copy: see kotlin form_with (attrs.delete
-            // must not mutate the caller's opts).
+            // must not mutate the caller's opts). Preserve the
+            // receiver's Dictionary<K,V> — Dictionary is invariant, so
+            // `new Dictionary<string, object?>(dict)` does not compile
+            // when `dict` is `Dictionary<string, string>`.
             "dup" if recv_is_hash(r) => {
-                return format!("new Dictionary<string, object?>({rs})");
+                let (k, v) = hash_kv_tys(r);
+                return format!("new Dictionary<{k}, {v}>({rs})");
             }
             "freeze" | "dup" | "to_a" => return rs,
             "to_h" if recv_is_hash(r) => return rs,

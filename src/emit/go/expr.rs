@@ -3230,6 +3230,14 @@ fn is_known_class_method(name: &str) -> bool {
         // The value half of the Dirty read surface, called by the
         // synthesized `<col>_previously_was` readers.
         | "attribute_previously_was"
+        // Rails' implicit `protect_from_forgery` preamble emits a bare
+        // `verify_authenticity_token` on Self. Controllers inherit it
+        // via Go embedding of Base, so it is absent from the subclass
+        // `self_methods` set — without parens, `go vet` flags
+        // `self.VerifyAuthenticityToken` as an unused method value.
+        | "verify_authenticity_token"
+        // Halt check after a filter that can render/redirect.
+        | "performed?"
     )
 }
 
