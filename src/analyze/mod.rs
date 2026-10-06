@@ -895,7 +895,7 @@ impl Analyzer {
                 &module_methods,
                 &module_includes,
                 &parent_link_by_name,
-                true,
+                false,
             )
         });
 
@@ -938,10 +938,13 @@ impl Analyzer {
         // Intermediate rounds skip views/tests: they do not harvest
         // returns (except test helpers, typed below) and their call
         // sites are still walked by unify from the last typed trees.
-        // Re-type them once against the converged production registry
-        // so templates see the final controller ivars and helper
-        // returns. Then harvest/unify; if view sites moved a param,
-        // one more production-only pass absorbs it.
+        // The initial pass is production-only too — typing views against
+        // the empty first registry just to unify from those trees for
+        // seven rounds was wasted work. Re-type them once against the
+        // converged production registry so templates see the final
+        // controller ivars and helper returns. Then harvest/unify; if
+        // view sites moved a param, one more production-only pass
+        // absorbs it.
         crate::timings::phase("typing passes (views after fixpoint)", || {
             self.run_typing_passes(
                 app,
@@ -973,7 +976,7 @@ impl Analyzer {
                     &module_methods,
                     &module_includes,
                     &parent_link_by_name,
-                    true,
+                    false,
                 )
             });
             self.harvest_returns_to_registry(app);
