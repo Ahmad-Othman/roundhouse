@@ -66,7 +66,7 @@ use rubydex::model::ids::DeclarationId;
 use crate::adapter::{DatabaseAdapter, SqliteAdapter};
 use crate::App;
 use crate::dialect::{
-    Action, Controller, ControllerBodyItem, Filter, FilterKind, LayoutDecl, MethodDef,
+    Action, Controller, ControllerBodyItem, Filter, FilterKind, LayoutDecl, MethodDef, Model,
     ModelBodyItem, RenderTarget,
 };
 use crate::effect::EffectSet;
@@ -1536,6 +1536,145 @@ impl Analyzer {
 
         self.analyze_class_configuration(&mut app.controllers);
 
+        // Models do not read `controller_ivar_env`. Type and harvest
+        // each one before controllers so a round carries model returns
+        // into controller bodies. Dispatch reads the registry.
+        let _typing_models = crate::timings::begin("typing: models");
+        for model in &mut app.models {
+            // Seed class ivars for the body-typer. Three shapes in play:
+            // 1. `@attributes` — the legacy Hash-storage access path
+            //    (some transpiled patterns still use it).
+            // 2. Per-schema-column ivars (`@title`, `@body`, ...) — the
+            //    typed-field representation. `attr_accessor :title, ...`
+            //    in a transpiled model generates accessors that read/
+            //    write these ivars, but the generated methods aren't
+            //    `def` nodes so flow-sensitive typing can't discover
+            //    them — seed directly from schema metadata.
+            // 3. Memoization ivars (`@_comments`) — discovered by the
+            //    flow-sensitive pre-pass below.
+            let mut class_ivars: HashMap<Symbol, Ty> = HashMap::new();
+            class_ivars.insert(
+                Symbol::from("attributes"),
+                Ty::Hash {
+                    key: Box::new(Ty::Sym),
+                    value: Box::new(Ty::Var { var: crate::ident::TyVar(0) }),
+                },
+            );
+            for (name, ty) in &model.attributes.fields {
+                // Ivar reads may observe nil before the first write;
+                // union with Nil reflects that. The column's declared
+                // type from schema covers the post-initialization case.
+                // union_of so an already-nilable column type dedups
+                // instead of nesting.
+                class_ivars.insert(
+                    name.clone(),
+                    crate::analyze::body::union_of(ty.clone(), Ty::Nil),
+                );
+            }
+            // `attr_accessor :edit_user_id` virtual attributes: real
+            // ivars, untyped, absent from the schema. Seed as gradual
+            // so a direct `@edit_user_id` read resolves (don't clobber
+            // a schema column of the same name).
+            for name in collect_attr_accessor_names(&model.body) {
+                class_ivars.entry(name).or_insert(Ty::Untyped);
+            }
+
+            // Phase 0: type the model's `Unknown` body items so the
+            // RHS of in-class constant assignments (`FLAGGABLE_DAYS = 7`,
+            // `MIN_KARMA_TO_SUGGEST = 50`, `COMMENT_REASONS = {...}`)
+            // gets `value.ty` populated. Without this, the subsequent
+            // const-table extraction sees `None` and the body-typer
+            // falls through to `Ty::Class { id: ConstName }` for every
+            // read — observable as `incompatible_binop` errors
+            // (`Int > Class { MIN_KARMA }`) and `send_dispatch_failed`
+            // (`days` on `Class { NEW_USER_DAYS }`).
+            let const_ctx = Ctx {
+                self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
+                ivar_bindings: class_ivars.clone(),
+                local_bindings: HashMap::new(),
+                constants: global_constants.clone(),
+                annotate_self_dispatch: false, in_view: false,
+            };
+            for item in model.body.iter_mut() {
+                if let ModelBodyItem::Unknown { expr, .. } = item {
+                    self.body_typer().analyze_expr(expr, &const_ctx);
+                }
+            }
+            // Own constants layered over the global registry (own shadows).
+            let class_constants = global_constants.with_own(extract_const_assignments(&model.body));
+
+            let class_ctx = Ctx {
+                self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
+                ivar_bindings: class_ivars.clone(),
+                local_bindings: HashMap::new(),
+                constants: class_constants.clone(),
+                annotate_self_dispatch: false, in_view: false,
+            };
+
+            // Pass A: type every method body with only `@attributes`
+            // seeded. Assignments inside bodies (e.g. `@_comments = ...`
+            // in a memoizing getter) populate `value.ty` on those
+            // assignments, which Pass B harvests.
+            for scope in model.scopes_mut() {
+                self.body_typer().analyze_expr(&mut scope.body, &class_ctx);
+            }
+            let model_name = model.name.clone();
+            for method in model.methods_mut() {
+                // A default is part of the parameter's type. Typed before
+                // seeding so `value = nil` is `Nil` when no call site has
+                // said otherwise, and a later site can union with it.
+                for param in &mut method.params {
+                    if let Some(default) = &mut param.default {
+                        self.body_typer().analyze_expr(default, &class_ctx);
+                    }
+                }
+                let mctx = self.seed_method_params(&class_ctx, &model_name, method);
+                self.body_typer().analyze_expr(&mut method.body, &mctx);
+            }
+
+            // Pass B: gather every ivar assignment across the model's
+            // methods. Each discovered `@x = value` seeds the ivar's
+            // type for the second typing pass, so reads that occur
+            // *before* the assignment lexically (e.g. the left side of
+            // `@x ||= ...` lowered to `@x || (@x = ...)`) still resolve
+            // cleanly.
+            let mut flow_ivars: HashMap<Symbol, Ty> = HashMap::new();
+            for method in model.methods() {
+                extract_ivar_assignments(&method.body, &mut flow_ivars);
+            }
+            for scope in model.scopes() {
+                extract_ivar_assignments(&scope.body, &mut flow_ivars);
+            }
+
+            if !flow_ivars.is_empty() {
+                // Re-seed ctx with discovered ivars alongside @attributes.
+                // Memoizing ivars become `Union<T, Nil>` to reflect that
+                // the read can be nil before the first assignment.
+                let mut reseeded = class_ivars;
+                for (name, ty) in flow_ivars {
+                    let union_ty = crate::analyze::body::union_of(ty, Ty::Nil);
+                    reseeded.insert(name, union_ty);
+                }
+                let reseeded_ctx = Ctx {
+                    self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
+                    ivar_bindings: reseeded,
+                    local_bindings: HashMap::new(),
+                    constants: class_constants.clone(),
+                    annotate_self_dispatch: false, in_view: false,
+                };
+
+                for scope in model.scopes_mut() {
+                    self.body_typer().analyze_expr(&mut scope.body, &reseeded_ctx);
+                }
+                for method in model.methods_mut() {
+                    let mctx = self.seed_method_params(&reseeded_ctx, &model_name, method);
+                    self.body_typer().analyze_expr(&mut method.body, &mctx);
+                }
+            }
+            self.harvest_one_model(model);
+        }
+        drop(_typing_models);
+
         // ── Phase A: type Unknown body items + every action body
         // ── once per controller, with no parent inheritance.
         let _typing_controllers_a = crate::timings::begin("typing: controllers A");
@@ -2537,141 +2676,6 @@ impl Analyzer {
                 }
             }
         }
-        let _typing_models = crate::timings::begin("typing: models");
-        for model in &mut app.models {
-            // Seed class ivars for the body-typer. Three shapes in play:
-            // 1. `@attributes` — the legacy Hash-storage access path
-            //    (some transpiled patterns still use it).
-            // 2. Per-schema-column ivars (`@title`, `@body`, ...) — the
-            //    typed-field representation. `attr_accessor :title, ...`
-            //    in a transpiled model generates accessors that read/
-            //    write these ivars, but the generated methods aren't
-            //    `def` nodes so flow-sensitive typing can't discover
-            //    them — seed directly from schema metadata.
-            // 3. Memoization ivars (`@_comments`) — discovered by the
-            //    flow-sensitive pre-pass below.
-            let mut class_ivars: HashMap<Symbol, Ty> = HashMap::new();
-            class_ivars.insert(
-                Symbol::from("attributes"),
-                Ty::Hash {
-                    key: Box::new(Ty::Sym),
-                    value: Box::new(Ty::Var { var: crate::ident::TyVar(0) }),
-                },
-            );
-            for (name, ty) in &model.attributes.fields {
-                // Ivar reads may observe nil before the first write;
-                // union with Nil reflects that. The column's declared
-                // type from schema covers the post-initialization case.
-                // union_of so an already-nilable column type dedups
-                // instead of nesting.
-                class_ivars.insert(
-                    name.clone(),
-                    crate::analyze::body::union_of(ty.clone(), Ty::Nil),
-                );
-            }
-            // `attr_accessor :edit_user_id` virtual attributes: real
-            // ivars, untyped, absent from the schema. Seed as gradual
-            // so a direct `@edit_user_id` read resolves (don't clobber
-            // a schema column of the same name).
-            for name in collect_attr_accessor_names(&model.body) {
-                class_ivars.entry(name).or_insert(Ty::Untyped);
-            }
-
-            // Phase 0: type the model's `Unknown` body items so the
-            // RHS of in-class constant assignments (`FLAGGABLE_DAYS = 7`,
-            // `MIN_KARMA_TO_SUGGEST = 50`, `COMMENT_REASONS = {...}`)
-            // gets `value.ty` populated. Without this, the subsequent
-            // const-table extraction sees `None` and the body-typer
-            // falls through to `Ty::Class { id: ConstName }` for every
-            // read — observable as `incompatible_binop` errors
-            // (`Int > Class { MIN_KARMA }`) and `send_dispatch_failed`
-            // (`days` on `Class { NEW_USER_DAYS }`).
-            let const_ctx = Ctx {
-                self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
-                ivar_bindings: class_ivars.clone(),
-                local_bindings: HashMap::new(),
-                constants: global_constants.clone(),
-                annotate_self_dispatch: false, in_view: false,
-            };
-            for item in model.body.iter_mut() {
-                if let ModelBodyItem::Unknown { expr, .. } = item {
-                    self.body_typer().analyze_expr(expr, &const_ctx);
-                }
-            }
-            // Own constants layered over the global registry (own shadows).
-            let class_constants = global_constants.with_own(extract_const_assignments(&model.body));
-
-            let class_ctx = Ctx {
-                self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
-                ivar_bindings: class_ivars.clone(),
-                local_bindings: HashMap::new(),
-                constants: class_constants.clone(),
-                annotate_self_dispatch: false, in_view: false,
-            };
-
-            // Pass A: type every method body with only `@attributes`
-            // seeded. Assignments inside bodies (e.g. `@_comments = ...`
-            // in a memoizing getter) populate `value.ty` on those
-            // assignments, which Pass B harvests.
-            for scope in model.scopes_mut() {
-                self.body_typer().analyze_expr(&mut scope.body, &class_ctx);
-            }
-            let model_name = model.name.clone();
-            for method in model.methods_mut() {
-                // A default is part of the parameter's type. Typed before
-                // seeding so `value = nil` is `Nil` when no call site has
-                // said otherwise, and a later site can union with it.
-                for param in &mut method.params {
-                    if let Some(default) = &mut param.default {
-                        self.body_typer().analyze_expr(default, &class_ctx);
-                    }
-                }
-                let mctx = self.seed_method_params(&class_ctx, &model_name, method);
-                self.body_typer().analyze_expr(&mut method.body, &mctx);
-            }
-
-            // Pass B: gather every ivar assignment across the model's
-            // methods. Each discovered `@x = value` seeds the ivar's
-            // type for the second typing pass, so reads that occur
-            // *before* the assignment lexically (e.g. the left side of
-            // `@x ||= ...` lowered to `@x || (@x = ...)`) still resolve
-            // cleanly.
-            let mut flow_ivars: HashMap<Symbol, Ty> = HashMap::new();
-            for method in model.methods() {
-                extract_ivar_assignments(&method.body, &mut flow_ivars);
-            }
-            for scope in model.scopes() {
-                extract_ivar_assignments(&scope.body, &mut flow_ivars);
-            }
-
-            if !flow_ivars.is_empty() {
-                // Re-seed ctx with discovered ivars alongside @attributes.
-                // Memoizing ivars become `Union<T, Nil>` to reflect that
-                // the read can be nil before the first assignment.
-                let mut reseeded = class_ivars;
-                for (name, ty) in flow_ivars {
-                    let union_ty = crate::analyze::body::union_of(ty, Ty::Nil);
-                    reseeded.insert(name, union_ty);
-                }
-                let reseeded_ctx = Ctx {
-                    self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
-                    ivar_bindings: reseeded,
-                    local_bindings: HashMap::new(),
-                    constants: class_constants.clone(),
-                    annotate_self_dispatch: false, in_view: false,
-                };
-
-                for scope in model.scopes_mut() {
-                    self.body_typer().analyze_expr(&mut scope.body, &reseeded_ctx);
-                }
-                for method in model.methods_mut() {
-                    let mctx = self.seed_method_params(&reseeded_ctx, &model_name, method);
-                    self.body_typer().analyze_expr(&mut method.body, &mctx);
-                }
-            }
-        }
-        drop(_typing_models);
-
         // Library classes (non-model classes under app/models/): mirror
         // the per-model body typing pass on a smaller surface — no
         // schema attributes, no associations, just methods. Two-pass
@@ -3414,36 +3418,59 @@ impl Analyzer {
         }
     }
 
-    fn harvest_method_returns(&mut self, app: &App) {
-        for model in &app.models {
-            let class_id = &model.name;
-            let scope_names: std::collections::HashSet<Symbol> =
-                model.scopes().map(|s| s.name.clone()).collect();
-            for method in model.methods() {
-                let ret = self.method_return_ty(class_id, method);
-                let target = match method.receiver {
-                    crate::dialect::MethodReceiver::Instance => {
-                        &mut self.classes.entry(class_id.clone()).or_default().instance_methods
-                    }
-                    crate::dialect::MethodReceiver::Class => {
-                        &mut self.classes.entry(class_id.clone()).or_default().class_methods
-                    }
-                };
-                // A class method whose body tail is a query-builder
-                // chain declares `Relation { of: Self }` to callers —
-                // the same relation type a scope seeds — overriding
-                // the body's `Array<Self>` typing (inside the body the
-                // chain keeps the inline-chain Array representation;
-                // the relation type is introduced at the boundary).
-                // This is what lets `Story.recent.for_user(u)`
-                // delegate `for_user` on the relation receiver.
-                if method.receiver == crate::dialect::MethodReceiver::Class
-                    && body_tail_yields_relation(&method.body, class_id, &scope_names)
+    fn harvest_one_model(&mut self, model: &Model) {
+        let class_id = &model.name;
+        let scope_names: std::collections::HashSet<Symbol> =
+            model.scopes().map(|s| s.name.clone()).collect();
+        for method in model.methods() {
+            let ret = self.method_return_ty(class_id, method);
+            let target = match method.receiver {
+                crate::dialect::MethodReceiver::Instance => {
+                    &mut self.classes.entry(class_id.clone()).or_default().instance_methods
+                }
+                crate::dialect::MethodReceiver::Class => {
+                    &mut self.classes.entry(class_id.clone()).or_default().class_methods
+                }
+            };
+            // A class method whose body tail is a query-builder
+            // chain declares `Relation { of: Self }` to callers —
+            // the same relation type a scope seeds — overriding
+            // the body's `Array<Self>` typing (inside the body the
+            // chain keeps the inline-chain Array representation;
+            // the relation type is introduced at the boundary).
+            // This is what lets `Story.recent.for_user(u)`
+            // delegate `for_user` on the relation receiver.
+            if method.receiver == crate::dialect::MethodReceiver::Class
+                && body_tail_yields_relation(&method.body, class_id, &scope_names)
+            {
+                Self::insert_inferred_return(
+                    target,
+                    &method.name,
+                    Ty::Relation { of: class_id.clone() },
+                );
+                self.classes
+                    .entry(class_id.clone())
+                    .or_default()
+                    .relation_derived
+                    .insert(method.name.clone());
+                continue;
+            }
+            // …and the half that TERMINATES the chain rather than
+            // extending it: `def self.original; order(:created_at)
+            // .first; end` returns a record, not a relation, but it
+            // is just as much a query over this model and Rails
+            // delegates it on a relation receiver the same way.
+            // Marked `relation_derived` so that delegation can tell
+            // it apart from a class method that merely happens to
+            // return a record.
+            if method.receiver == crate::dialect::MethodReceiver::Class {
+                if let Some(kind) =
+                    body_tail_terminal_kind(&method.body, class_id, &scope_names)
                 {
                     Self::insert_inferred_return(
                         target,
                         &method.name,
-                        Ty::Relation { of: class_id.clone() },
+                        instantiate_return_kind(kind, class_id),
                     );
                     self.classes
                         .entry(class_id.clone())
@@ -3452,33 +3479,14 @@ impl Analyzer {
                         .insert(method.name.clone());
                     continue;
                 }
-                // …and the half that TERMINATES the chain rather than
-                // extending it: `def self.original; order(:created_at)
-                // .first; end` returns a record, not a relation, but it
-                // is just as much a query over this model and Rails
-                // delegates it on a relation receiver the same way.
-                // Marked `relation_derived` so that delegation can tell
-                // it apart from a class method that merely happens to
-                // return a record.
-                if method.receiver == crate::dialect::MethodReceiver::Class {
-                    if let Some(kind) =
-                        body_tail_terminal_kind(&method.body, class_id, &scope_names)
-                    {
-                        Self::insert_inferred_return(
-                            target,
-                            &method.name,
-                            instantiate_return_kind(kind, class_id),
-                        );
-                        self.classes
-                            .entry(class_id.clone())
-                            .or_default()
-                            .relation_derived
-                            .insert(method.name.clone());
-                        continue;
-                    }
-                }
-                Self::register_method_return(target, &method.name, ret.as_ref());
             }
+            Self::register_method_return(target, &method.name, ret.as_ref());
+        }
+    }
+
+    fn harvest_method_returns(&mut self, app: &App) {
+        for model in &app.models {
+            self.harvest_one_model(model);
         }
         for lc in &app.library_classes {
             let class_id = &lc.name;
