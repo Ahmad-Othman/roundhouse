@@ -23,6 +23,7 @@
 # Hash mutation. No metaprogramming.
 
 require "json"
+require_relative "http_headers"
 
 module CgiIo
   REASON_PHRASES = {
@@ -135,32 +136,9 @@ module CgiIo
   # control character, space, `"` or `:`, or a value holding a control
   # character other than tab.
   def self.write_header(io, key, value)
-    return nil unless header_key_ok?(key) && header_value_ok?(value)
+    return nil unless HttpHeaders.key_ok?(key) && HttpHeaders.value_ok?(value)
     io.write(key + ": " + value + "\r\n")
     nil
-  end
-
-  def self.header_key_ok?(k)
-    n = k.bytesize
-    return false if n == 0
-    i = 0
-    while i < n
-      b = k.getbyte(i)
-      return false if b <= 32 || b == 127 || b == 34 || b == 58
-      i += 1
-    end
-    true
-  end
-
-  def self.header_value_ok?(v)
-    n = v.bytesize
-    i = 0
-    while i < n
-      b = v.getbyte(i)
-      return false if (b < 32 && b != 9) || b == 127
-      i += 1
-    end
-    true
   end
 
   # ── cookie parsing ──────────────────────────────────────────────

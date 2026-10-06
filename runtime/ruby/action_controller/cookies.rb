@@ -19,6 +19,9 @@ module ActionController
     def initialize(inbound = {})
       @inbound = {}
       @out = {}
+      @flag_httponly = {}
+      @flag_samesite = {}
+      @flag_secure = {}
       # Copy via `.each` (pair iteration), not `.keys`: the inbound hash is
       # the request's `Tep.str_hash` (a `Hash.new("")`), whose `.keys`
       # intrinsic yields a null array through the loosely-typed `req.cookies`
@@ -90,6 +93,30 @@ module ActionController
     def raw_set(key, value)
       @out[key.to_s] = value.to_s
       @out[key.to_s]
+    end
+
+    def record_flags(key, httponly, same_site, secure)
+      k = key.to_s
+      @flag_httponly[k] = httponly ? "1" : ""
+      ss = same_site.to_s
+      ss = "Lax" if ss == "lax" || ss == "Lax"
+      ss = "Strict" if ss == "strict" || ss == "Strict"
+      ss = "None" if ss == "none" || ss == "None"
+      @flag_samesite[k] = ss
+      @flag_secure[k] = secure ? "1" : ""
+      k
+    end
+
+    def flag_httponly?(key)
+      @flag_httponly[key.to_s] == "1"
+    end
+
+    def flag_samesite(key)
+      @flag_samesite[key.to_s].to_s
+    end
+
+    def flag_secure?(key)
+      @flag_secure[key.to_s] == "1"
     end
 
     # Removing a cookie is recorded as an empty write; the dispatcher emits a
@@ -203,6 +230,11 @@ module ActionController
         "cookie." + key.to_s, true
       )
       @jar.raw_set(key, signed)
+      if value.is_a?(Hash)
+        ss = value[:same_site]
+        ss = "" if ss.nil?
+        @jar.record_flags(key, value[:httponly] == true, ss.to_s, value[:secure] == true)
+      end
       value
     end
 

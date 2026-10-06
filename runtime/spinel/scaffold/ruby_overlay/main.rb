@@ -328,11 +328,14 @@ module Main
     # with GIT_REVISION) — Rack 3 refuses a nil, so it is not written.
     extra_headers.each { |k, v| headers[k.to_s.downcase] = v unless v.nil? }
     cookies = []
+    https = env["HTTPS"].to_s == "on" || env.fetch("HTTP_X_FORWARDED_PROTO", "").to_s.split(",").first.to_s.strip.downcase == "https"
     set_cookies.each do |name, val|
       cookies << if val.nil?
         "#{name}=; Path=/; Max-Age=0"
       else
-        "#{name}=#{CgiIo.url_encode(val.to_s)}; Path=/; HttpOnly"
+        line = "#{name}=#{CgiIo.url_encode(val.to_s)}; Path=/; HttpOnly; SameSite=Lax"
+        line = line + "; Secure" if https
+        line
       end
     end
     headers["set-cookie"] = cookies unless cookies.empty?

@@ -1856,12 +1856,8 @@ const PYTHON_RUNTIME: &[RuntimeEntry] = &[
         namespace: "ActionController",
         out_path: "app/action_controller_base.py",
         mode: Mode::Library,
-        imports: &[("Flash", "app.flash"), ("Session", "app.session")],
-        // `redirect_to` deletes CR/LF from the location through a
-        // module-level `REDIRECT_LINE_BREAK_PATTERN = re.compile(...)`
-        // and `re.sub`, so `re` must be in scope, as for json_builder
-        // above.
-        prelude: "import re\n\n",
+        imports: &[("re", ""), ("Flash", "app.flash"), ("Session", "app.session")],
+        prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
     runtime_entry! {

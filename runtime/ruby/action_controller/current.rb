@@ -15,6 +15,16 @@
 module ActionController
   class Base
     attr_accessor :request
+
+    def request_host_for_redirect
+      r = @request
+      return "" if r.nil?
+      r.host.to_s
+    end
+
+    def request_for_csrf
+      @request
+    end
   end
 
   module Current

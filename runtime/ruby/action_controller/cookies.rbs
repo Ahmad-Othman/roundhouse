@@ -17,6 +17,9 @@ module ActionController
     # comment below already says.
     @inbound: Hash[String, String]
     @out: Hash[String, String]
+    @flag_httponly: Hash[String, String]
+    @flag_samesite: Hash[String, String]
+    @flag_secure: Hash[String, String]
 
     def initialize: (?Hash[String, String] inbound) -> void
     def []: (untyped key) -> String
@@ -30,6 +33,10 @@ module ActionController
     def signed: () -> ActionController::SignedCookieJar
     def raw: (untyped key) -> String
     def raw_set: (untyped key, untyped value) -> String
+    def record_flags: (untyped key, bool httponly, untyped same_site, bool secure) -> String
+    def flag_httponly?: (untyped key) -> bool
+    def flag_samesite: (untyped key) -> String
+    def flag_secure?: (untyped key) -> bool
     def delete: (untyped key) -> String
     def pending: () -> Hash[String, String]
     def to_h: () -> Hash[String, String]

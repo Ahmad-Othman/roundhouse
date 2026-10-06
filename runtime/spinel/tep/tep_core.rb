@@ -1,5 +1,6 @@
 require "digest"
 require "zlib"
+require_relative "../http_headers"
 
 module Tep
   # The name the server announces itself by. scaffold/main.rb sets
@@ -96,37 +97,22 @@ module Tep
   def self.header_lines(res)
     out = +""
     res.headers.each do |k, v|
-      if Tep.header_key_ok?(k) && Tep.header_value_ok?(v)
+      if HttpHeaders.key_ok?(k) && HttpHeaders.value_ok?(v)
         out << k + ": " + v + "\r\n"
       end
     end
     res.set_cookies.each do |line|
-      out << "Set-Cookie: " + line + "\r\n" if Tep.header_value_ok?(line)
+      out << "Set-Cookie: " + line + "\r\n" if HttpHeaders.value_ok?(line)
     end
     out
   end
 
   def self.header_key_ok?(k)
-    n = k.bytesize
-    return false if n == 0
-    i = 0
-    while i < n
-      b = k.getbyte(i)
-      return false if b <= 32 || b == 127 || b == 34 || b == 58
-      i += 1
-    end
-    true
+    HttpHeaders.key_ok?(k)
   end
 
   def self.header_value_ok?(v)
-    n = v.bytesize
-    i = 0
-    while i < n
-      b = v.getbyte(i)
-      return false if (b < 32 && b != 9) || b == 127
-      i += 1
-    end
-    true
+    HttpHeaders.value_ok?(v)
   end
 
   # The largest request body the servers will read, in bytes. Headers

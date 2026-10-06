@@ -1601,16 +1601,10 @@ fn build_filter_preamble(
     // bot_key?` sees who signed in); the default then yields to it.
     // ActionController::API does not include the module.
     //
-    // OFF, the `allow_browser` generator form's posture and for its
-    // reason: the default would put the call into every app, real-blog
-    // included, and real-blog is emitted for twelve targets of which
-    // only the ruby family defines `verify_authenticity_token` (the
-    // strict emitters compiled neither the method nor the dispatcher's
-    // call to it). An app that WRITES the macro — campfire — reaches
-    // only the ruby lanes and is protected; one that relies on the
-    // default is not, which the guide's security posture states. This
-    // is the switch when the strict runtimes carry the method.
-    const IMPLICIT_DEFAULT: bool = false;
+    // ON: `verify_authenticity_token` lives on shared Base (fail-closed
+    // unless tests set `allow_forgery_protection = false`). An app that
+    // WRITES the macro still wins (campfire's `unless: bot_key?`).
+    const IMPLICIT_DEFAULT: bool = true;
     let root_parent = chain.first().copied().unwrap_or(controller).parent.as_ref();
     let redeclared = chain.iter().copied().chain(std::iter::once(controller)).any(|c| {
         c.filters().any(|f| {

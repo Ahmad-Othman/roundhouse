@@ -112,6 +112,8 @@ class ActionControllerCookiesTest < Minitest::Test
     jar = ActionController::CookieJar.new({})
     jar.signed.permanent[:session_token] = { value: "tok", httponly: true, same_site: :lax }
     assert_equal "tok", jar.signed[:session_token]
+    assert jar.flag_httponly?(:session_token)
+    assert_equal "Lax", jar.flag_samesite(:session_token)
   end
 
   # NIL, as Rails answers — the signed read is the one nullable read in

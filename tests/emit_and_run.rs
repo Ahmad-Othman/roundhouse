@@ -5737,3 +5737,240 @@ puts "header values passed"
 "#)
         .assert_passes();
 }
+
+fn query_value_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", r#"ActiveRecord::Schema.define do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#)
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write("config/routes.rb", r#"Rails.application.routes.draw do
+  get "/limited", to: "widgets#limited"
+  get "/paged", to: "widgets#paged"
+  get "/sorted", to: "widgets#sorted"
+  get "/sorted_by", to: "widgets#sorted_by"
+  get "/sorted_str", to: "widgets#sorted_str"
+  get "/bounce", to: "widgets#bounce"
+  post "/touch", to: "widgets#touch"
+  get "/headed", to: "widgets#headed"
+end
+"#)
+        .write("app/controllers/widgets_controller.rb", r#"class WidgetsController < ApplicationController
+  def limited
+    render plain: Widget.order(:name).limit(params[:n]).map { |w| w.name }.join(",")
+  end
+
+  def paged
+    render plain: Widget.order(:name).offset(params[:skip]).map { |w| w.name }.join(",")
+  end
+
+  def sorted
+    render plain: Widget.order(name: params[:dir]).map { |w| w.name }.join(",")
+  end
+
+  def sorted_by
+    render plain: Widget.order(params[:sort] => :asc).map { |w| w.name }.join(",")
+  end
+
+  def sorted_str
+    render plain: Widget.order(params[:sort]).map { |w| w.name }.join(",")
+  end
+
+  def bounce
+    redirect_to params[:back]
+  end
+
+  def touch
+    render plain: "ok"
+  end
+
+  def headed
+    head :created, location: params[:back]
+  end
+end
+"#)
+}
+
+fn query_value_assertions() -> &'static str {
+    r#"
+require_relative "app/controllers/widgets_controller"
+Widget.create!(name: "beta")
+Widget.create!(name: "alpha")
+Widget.create!(name: "gamma")
+
+def run(action, params)
+  controller = WidgetsController.new
+  controller.params = params
+  controller.process_action(action)
+  controller.body
+end
+
+def rejected(action, params)
+  "ran: " + run(action, params)
+rescue ArgumentError
+  "rejected"
+end
+
+got = run(:limited, { "n" => "2" })
+raise "a numeric String limit is Rails' Integer(): #{got}" unless got == "alpha,beta"
+got = rejected(:limited, { "n" => "(SELECT COUNT(*) FROM widgets)" })
+raise "LIMIT took SQL: #{got}" unless got == "rejected"
+
+got = run(:paged, { "skip" => "1" })
+raise "a numeric String offset is Rails' to_i: #{got}" unless got == "beta,gamma"
+got = run(:paged, { "skip" => "(SELECT 2)" })
+raise "OFFSET took SQL: #{got}" unless got == "alpha,beta,gamma"
+got = run(:paged, { "skip" => "1; SELECT 1" })
+raise "OFFSET to_i prefix: #{got}" unless got == "beta,gamma"
+
+got = run(:sorted, { "dir" => "desc" })
+raise "a String direction: #{got}" unless got == "gamma,beta,alpha"
+got = rejected(:sorted, { "dir" => "asc, (SELECT 1)" })
+raise "ORDER direction took SQL: #{got}" unless got == "rejected"
+
+got = run(:sorted_by, { "sort" => "name" })
+raise "a String column key: #{got}" unless got == "alpha,beta,gamma"
+got = rejected(:sorted_by, { "sort" => "(SELECT 1)" })
+raise "ORDER column took SQL: #{got}" unless got == "rejected"
+got = run(:sorted_by, { "sort" => "widgets.name" })
+raise "table.col hash key: #{got}" unless got == "alpha,beta,gamma"
+
+got = run(:sorted_str, { "sort" => "name desc" })
+raise "string order: #{got}" unless got == "gamma,beta,alpha"
+got = rejected(:sorted_str, { "sort" => "id DESC, (SELECT 1)" })
+raise "string ORDER took SQL: #{got}" unless got == "rejected"
+
+rel = Widget.order(:name)
+begin
+  rel.last_n("(SELECT 1)")
+  raise "last_n accepted SQL"
+rescue ArgumentError
+  got = rel.order(:name).map { |w| w.name }.join(",")
+  raise "last_n mutated orders: #{got}" unless got == "alpha,beta,gamma"
+end
+got = Widget.order(:name).first_n("2").map { |w| w.name }.join(",")
+raise "first_n string: #{got}" unless got == "alpha,beta"
+got = Widget.order(:name).limit(2.9).map { |w| w.name }.join(",")
+raise "float limit truncate: #{got}" unless got == "alpha,beta"
+
+puts "query values passed"
+"#
+}
+
+#[test]
+fn query_params_are_values_not_sql() {
+    query_value_app()
+        .run_ruby(query_value_assertions())
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn query_params_are_values_not_sql_on_spinel() {
+    let script = format!(
+        "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{}",
+        query_value_assertions()
+    );
+    query_value_app().run_spinel(&script).assert_passes();
+}
+
+#[test]
+fn request_steered_head_and_headers_stay_one_line() {
+    query_value_app()
+        .run_ruby(r#"
+require_relative "app/controllers/widgets_controller"
+controller = WidgetsController.new
+controller.params = { "back" => "/next\r\nSet-Cookie: pwned=1" }
+controller.process_action(:headed)
+location = controller.location.to_s
+raise "head location kept CR/LF: #{location.inspect}" if location.include?("\r") || location.include?("\n")
+
+controller = WidgetsController.new
+controller.headers["X-Link"] = "a\r\nSet-Cookie: pwned=1"
+stored = false
+controller.headers.each { |k, v| stored = true if k == "X-Link" }
+raise "CR/LF header was stored" if stored
+
+controller.headers["X-Ok"] = "one-line"
+ok = false
+controller.headers.each { |k, v| ok = true if k == "X-Ok" && v == "one-line" }
+raise "legal header dropped" unless ok
+puts "head and headers passed"
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn redirect_to_rejects_an_unvalidated_host() {
+    query_value_app()
+        .run_ruby(r#"
+require_relative "app/controllers/widgets_controller"
+controller = WidgetsController.new
+controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.params = { "back" => "http://evil.example/" }
+begin
+  controller.process_action(:bounce)
+  raise "open redirect ran: #{controller.location.inspect}"
+rescue ArgumentError
+end
+
+controller = WidgetsController.new
+controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.params = { "back" => "/home" }
+controller.process_action(:bounce)
+raise "relative redirect lost: #{controller.location.inspect}" unless controller.location == "/home"
+
+controller = WidgetsController.new
+controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+controller.params = { "back" => "http://app.example/ok" }
+controller.process_action(:bounce)
+raise "same-host absolute refused: #{controller.location.inspect}" unless controller.location == "http://app.example/ok"
+
+controller = WidgetsController.new
+controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "evil.example")
+controller.session[:return_to_after_authenticating] = controller.request.url
+controller.params = { "back" => controller.session[:return_to_after_authenticating] }
+controller.request = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example")
+begin
+  controller.process_action(:bounce)
+  raise "spoofed request.url honored: #{controller.location.inspect}"
+rescue ArgumentError
+end
+puts "open redirect passed"
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn csrf_rejects_a_post_without_the_session_token() {
+    query_value_app()
+        .run_ruby(r#"
+require_relative "app/controllers/widgets_controller"
+ActionController::Base.allow_forgery_protection = true
+controller = WidgetsController.new
+ActionController::Current.controller = controller
+controller.request_method = "POST"
+controller.params = {}
+controller.process_action(:touch)
+raise "empty CSRF ran: #{controller.status}" unless controller.status == 422
+
+controller = WidgetsController.new
+ActionController::Current.controller = controller
+controller.request_method = "POST"
+controller.session[:_csrf_token] = "tok"
+controller.params = { "authenticity_token" => "tok" }
+controller.process_action(:touch)
+raise "matching CSRF failed: #{controller.status} #{controller.body}" unless controller.status == 200 && controller.body == "ok"
+
+token = ActionView::ViewHelpers.form_authenticity_token
+raise "parked session token not read: #{token.inspect}" unless token == "tok"
+puts "csrf passed"
+"#)
+        .assert_passes();
+}
+

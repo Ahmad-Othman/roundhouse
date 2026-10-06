@@ -4,8 +4,90 @@ require_relative "../action_view"
 
 module ActionController
   # What `Base#redirect_to` deletes from a location — see there.
-  REDIRECT_LINE_BREAKS = { "\r" => "", "\n" => "" }.freeze
-  REDIRECT_LINE_BREAK_PATTERN = /[\r\n]/.freeze
+  REDIRECT_LINE_BREAKS = { "\r" => "", "\n" => "", "\0" => "" }.freeze
+  REDIRECT_LINE_BREAK_PATTERN = /[\r\n\0]/.freeze
+
+  # Puma's illegal-header rule: drop a key/value that cannot be one
+  # HTTP/1.1 line. Shared so non-Spinel servers inherit the same
+  # assignment-time drop that Tep/CGI apply on the wire.
+  def self.header_key_ok?(k)
+    n = k.bytesize
+    return false if n == 0
+    i = 0
+    while i < n
+      b = k.getbyte(i)
+      return false if b <= 32 || b == 127 || b == 34 || b == 58
+      i += 1
+    end
+    true
+  end
+
+  def self.header_value_ok?(v)
+    n = v.bytesize
+    i = 0
+    while i < n
+      b = v.getbyte(i)
+      return false if (b < 32 && b != 9) || b == 127
+      i += 1
+    end
+    true
+  end
+
+  def self.sanitize_location(path)
+    s = path.to_s
+    if s.include?("\r") || s.include?("\n") || s.include?("\0")
+      s = s.gsub(REDIRECT_LINE_BREAK_PATTERN, REDIRECT_LINE_BREAKS)
+    end
+    s
+  end
+
+  # Host of an absolute URL (`http://h/path`), or "" when the value is
+  # a relative path. Protocol-relative `//host/...` is a host.
+  def self.location_host(url)
+    s = url.to_s
+    return "" if s.empty?
+    rest = s
+    if s.start_with?("//")
+      rest = s[2, s.length].to_s
+    else
+      at = s.index("://")
+      return "" if at.nil?
+      rest = s[at + 3, s.length].to_s
+    end
+    slash = rest.index("/")
+    hostport = slash.nil? ? rest : rest[0, slash].to_s
+    q = hostport.index("?")
+    hostport = hostport[0, q].to_s unless q.nil?
+    hash = hostport.index("#")
+    hostport = hostport[0, hash].to_s unless hash.nil?
+    user = hostport.rindex("@")
+    hostport = hostport[user + 1, hostport.length].to_s unless user.nil?
+    hostport.downcase
+  end
+
+  class HeaderStore
+    def initialize
+      @pairs = {}
+    end
+
+    def [](key)
+      @pairs[key.to_s]
+    end
+
+    def []=(key, value)
+      return value if value.nil?
+      k = key.to_s
+      v = value.to_s
+      return value unless ActionController.header_key_ok?(k) && ActionController.header_value_ok?(v)
+      @pairs[k] = v
+      value
+    end
+
+    def each
+      @pairs.each { |k, v| yield k, v }
+      self
+    end
+  end
 
   # Symbol form (`status: :see_other`) to integer code — Rack's
   # `SYMBOL_TO_STATUS_CODE`, PORTED whole rather than grown entry by
@@ -86,6 +168,25 @@ module ActionController
     network_authentication_required: 511,
   }.freeze
 
+  # Per-request controller seat so view helpers can mint a CSRF token
+  # without a Request-typed field (that stays on the ruby-family reopen).
+  module Current
+    def self.controller
+      @controller
+    end
+
+    def self.controller=(value)
+      @controller = value
+      value
+    end
+
+    def self.session
+      c = @controller
+      return nil if c.nil?
+      c.session
+    end
+  end
+
   # Base controller class. Holds the per-request state (params,
   # session, flash) and the response state (status, body, location).
   # Subclasses define their actions and a `process_action` dispatch
@@ -99,6 +200,10 @@ module ActionController
   # file would have to satisfy every strict target's type system for
   # a feature none of them exercise yet.
   class Base
+    class << self
+      attr_accessor :allow_forgery_protection
+    end
+
     attr_accessor :params, :session, :flash, :request_method, :request_path, :request_format
     # True when the request's Accept is a bare `*/*` — an
     # XMLHttpRequest or fetch that set none. Rails reads that as "any
@@ -131,10 +236,12 @@ module ActionController
       @status  = 200
       @body    = +""
       @location = nil
+      @request_method = +""
+      @request_path = +""
       @request_format = :html
       @accepts_any_format = false
       @content_type = "text/html; charset=utf-8"
-      @headers = {}
+      @headers = ActionController::HeaderStore.new
       @performed = false
       # Set unconditionally, not on first `expires_in`: an ivar a strict
       # target never sees assigned has no type to infer, and the readers
@@ -212,7 +319,7 @@ module ActionController
       @status = resolve_status(status)
       @performed = true
       @content_type = content_type unless content_type.nil?
-      @location = location unless location.nil?
+      @location = ActionController.sanitize_location(location) unless location.nil?
       nil
     end
 
@@ -221,20 +328,16 @@ module ActionController
     # status 302 (Found). Real-blog uses 303 (See Other) on
     # PATCH/DELETE responses; pass `status: :see_other` to match.
     #
-    # CR and LF are DELETED from the location, as Rails'
-    # `_compute_redirect_to_location` does (`.delete("\0\r\n")`): the
-    # target is routinely request data (`redirect_to params[:return_to]`)
-    # and becomes the Location header, where a line break would end the
-    # header and start one of the attacker's. The include?-probe +
-    # gsub-with-Hash shape of `ViewHelpers.html_escape`, which every
-    # target compiles (a String-pattern `gsub` does not: Go and TS read
-    # the pattern as a Regexp). NUL is left to the servers, which drop
-    # a header holding one (Tep.header_lines, CgiIo.write_header).
+    # CR, LF and NUL are DELETED from the location, as Rails'
+    # `_compute_redirect_to_location` does (`.delete("\0\r\n")`).
+    # An absolute URL whose host is not this request's Host is refused
+    # (`raise_on_open_redirects`): `redirect_to params[:back]` and a
+    # stored `request.url` from a spoofed `HTTP_HOST` must not become
+    # Location on another origin.
     def redirect_to(path, notice: nil, alert: nil, status: :found)
-      @location = path
-      if path.include?("\r") || path.include?("\n")
-        @location = path.gsub(REDIRECT_LINE_BREAK_PATTERN, REDIRECT_LINE_BREAKS)
-      end
+      loc = ActionController.sanitize_location(path)
+      loc = same_host_location(loc)
+      @location = loc
       @status   = resolve_status(status)
       @performed = true
       @flash[:notice] = notice unless notice.nil?
@@ -255,7 +358,7 @@ module ActionController
     # on a 3xx status, so setting the location beside a 201 records the
     # URL without turning the response into one.
     def head(status, content_type: nil, location: nil)
-      @location = location unless location.nil?
+      @location = ActionController.sanitize_location(location) unless location.nil?
       @status = resolve_status(status)
       @body   = +""
       @performed = true
@@ -360,7 +463,58 @@ module ActionController
       @body = data
       @content_type = type
       @performed = true
+      disp = disposition.to_s == "inline" ? "inline" : "attachment"
+      @headers["Content-Disposition"] = disp
       nil
+    end
+
+    # Rails' `verify_authenticity_token`: GET/HEAD pass; anything else
+    # must carry the session token as `authenticity_token` or
+    # `X-CSRF-Token`. An empty session token matches nothing (fail
+    # closed). Tests set `allow_forgery_protection = false`.
+    def verify_authenticity_token
+      unless verified_request?
+        render "<h1>422 Unprocessable Content</h1>", status: :unprocessable_content
+      end
+      nil
+    end
+
+    def verified_request?
+      return true if Base.allow_forgery_protection == false
+      verb = @request_method.to_s
+      return true if verb == "" || verb == "GET" || verb == "HEAD"
+      expected = session[:_csrf_token].to_s
+      return false if expected.empty?
+      given = params["authenticity_token"].to_s
+      return true if given.length > 0 && given == expected
+      header = csrf_header_token
+      header.length > 0 && header == expected
+    end
+
+    def csrf_header_token
+      req = request_for_csrf
+      return "" if req.nil?
+      req.env.fetch("HTTP_X_CSRF_TOKEN", "").to_s
+    end
+
+    def request_for_csrf
+      nil
+    end
+
+    # Relative locations (`/path`, not `//host`) pass. An absolute URL
+    # must name this request's host; a missing request refuses any host.
+    def same_host_location(loc)
+      host = ActionController.location_host(loc)
+      return loc if host.empty?
+      req_host = request_host_for_redirect
+      if req_host.empty? || host != req_host.downcase
+        raise ArgumentError, "Unsafe redirect to \"" + loc + "\", pass allow_other_host: true to redirect anyway."
+      end
+      loc
+    end
+
+    def request_host_for_redirect
+      ""
     end
 
     # Monomorphic on Symbol — real-blog never passes a literal Integer

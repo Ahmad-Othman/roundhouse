@@ -554,13 +554,13 @@ module Main
     persisted = controller.flash.to_persisted
     pn = persisted.fetch("notice", "")
     if pn.length > 0
-      Main.set_flash_cookie(res, "flash_notice", ActionDispatch::SignedCookie.sign(pn, "flash_notice"))
+      Main.set_flash_cookie(res, "flash_notice", ActionDispatch::SignedCookie.sign(pn, "flash_notice"), request_obj.ssl?)
     elsif req.cookies.fetch("flash_notice", "").length > 0
       Main.clear_flash_cookie(res, "flash_notice")
     end
     pa = persisted.fetch("alert", "")
     if pa.length > 0
-      Main.set_flash_cookie(res, "flash_alert", ActionDispatch::SignedCookie.sign(pa, "flash_alert"))
+      Main.set_flash_cookie(res, "flash_alert", ActionDispatch::SignedCookie.sign(pa, "flash_alert"), request_obj.ssl?)
     elsif req.cookies.fetch("flash_alert", "").length > 0
       Main.clear_flash_cookie(res, "flash_alert")
     end
@@ -571,10 +571,15 @@ module Main
     out_cookies = controller.cookies.pending
     ock = out_cookies.keys
     ci = 0
+    jar = controller.cookies
     while ci < ock.length
       cname = ock[ci]
       copts = Tep.str_hash
       copts["Path"] = "/"
+      copts["HttpOnly"] = +"" if jar.flag_httponly?(cname)
+      ss = jar.flag_samesite(cname)
+      copts["SameSite"] = ss if ss.length > 0
+      copts["Secure"] = +"" if jar.flag_secure?(cname) || request_obj.ssl?
       res.set_cookie(cname, out_cookies[cname], copts)
       ci += 1
     end
@@ -594,7 +599,7 @@ module Main
         Main.clear_flash_cookie(res, session_cookie)
       else
         Main.set_flash_cookie(res, session_cookie,
-          ActionDispatch::Session.signed_cookie(session_out, session_cookie))
+          ActionDispatch::Session.signed_cookie(session_out, session_cookie), request_obj.ssl?)
       end
     end
   end
@@ -602,10 +607,12 @@ module Main
   # Flash cookies are HttpOnly + Path=/; the read side is server-only
   # (no JS access). A set carries the message to the next request; a
   # clear (empty value + Max-Age=0) expires a consumed one.
-  def self.set_flash_cookie(res, name, value)
+  def self.set_flash_cookie(res, name, value, secure)
     opts = Tep.str_hash
     opts["Path"] = "/"
     opts["HttpOnly"] = +""
+    opts["SameSite"] = "Lax"
+    opts["Secure"] = +"" if secure
     res.set_cookie(name, value, opts)
   end
 
