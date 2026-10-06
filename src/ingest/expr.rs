@@ -385,9 +385,19 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // Only the outermost eligible expression may consume the comment.
     let end = node.location().end_offset();
     let outermost = super::type_ascription::push_trailing_ascription_claim(end);
-    let expr = ingest_expr_node(node, file);
-    super::type_ascription::pop_trailing_ascription_claim();
-    let expr = expr?;
+    // Drop-guard: ingest paths can panic (`expect` in constant_id_str);
+    // a skipped pop would leave a stale end on the thread-local stack
+    // and silently drop later trailing `#:` ascriptions at that offset.
+    struct PopClaim;
+    impl Drop for PopClaim {
+        fn drop(&mut self) {
+            super::type_ascription::pop_trailing_ascription_claim();
+        }
+    }
+    let expr = {
+        let _pop = PopClaim;
+        ingest_expr_node(node, file)
+    }?;
     if !outermost {
         return Ok(expr);
     }
