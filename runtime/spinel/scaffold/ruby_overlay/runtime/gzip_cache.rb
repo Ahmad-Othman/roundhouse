@@ -184,7 +184,16 @@ module GzipCache
     texts << raw.byteslice(cur, raw.bytesize - cur)
 
     last = @pieces_mutex.synchronize { @last_splice }
-    return last[2] if !last.nil? && same_splice?(last, frags, texts)
+    if !last.nil? && same_splice?(last, frags, texts)
+      # A repeated page: hand it to the last-hit path in `compress`, so the
+      # next repeat is one comparison instead of a locate. Only a repeat
+      # pays for this copy; a page with a per-request token never does.
+      @mutex.synchronize do
+        @last_raw = raw.dup
+        @last_gz = last[2]
+      end
+      return last[2]
+    end
 
     out = String.new(capacity: raw.bytesize / 6, encoding: Encoding::BINARY)
     out << GZIP_HEADER
