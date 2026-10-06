@@ -63,15 +63,25 @@ module ActionController
       s = s.gsub(REDIRECT_LINE_BREAK_PATTERN, REDIRECT_LINE_BREAKS)
     end
     s = s.tr("\\", "/")
-    while s.length > 0
+    # No `break`: go/typescript emit cannot lower it (MCP wont_lower
+    # and the TS real-blog gate both flagged this walk).
+    keep = true
+    while keep && s.length > 0
       c = s[0, 1].to_s
-      break unless c == " " || header_control?(c)
-      s = s[1, s.length].to_s
+      if c == " " || header_control?(c)
+        s = s[1, s.length].to_s
+      else
+        keep = false
+      end
     end
-    while s.length > 0
+    keep = true
+    while keep && s.length > 0
       c = s[s.length - 1, 1].to_s
-      break unless c == " " || header_control?(c)
-      s = s[0, s.length - 1].to_s
+      if c == " " || header_control?(c)
+        s = s[0, s.length - 1].to_s
+      else
+        keep = false
+      end
     end
     s
   end
