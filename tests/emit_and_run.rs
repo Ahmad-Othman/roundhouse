@@ -5758,6 +5758,7 @@ end
   get "/bounce", to: "widgets#bounce"
   post "/touch", to: "widgets#touch"
   get "/headed", to: "widgets#headed"
+  get "/tails", to: "widgets#tails"
 end
 "#)
         .write("app/controllers/widgets_controller.rb", r#"class WidgetsController < ApplicationController
@@ -5791,6 +5792,10 @@ end
 
   def headed
     head :created, location: params[:back]
+  end
+
+  def tails
+    render plain: Widget.order(:name).first_n(1).map { |w| w.name }.join(",") + Widget.order(:name).last_n(1).map { |w| w.name }.join(",")
   end
 end
 "#)
@@ -5847,7 +5852,7 @@ raise "string order: #{got}" unless got == "gamma,beta,alpha"
 got = rejected(:sorted_str, { "sort" => "id DESC, (SELECT 1)" })
 raise "string ORDER took SQL: #{got}" unless got == "rejected"
 
-rel = Widget.order(:name)
+rel = Widget.all.order(:name)
 begin
   rel.last_n("(SELECT 1)")
   raise "last_n accepted SQL"
@@ -5855,9 +5860,9 @@ rescue ArgumentError
   got = rel.order(:name).map { |w| w.name }.join(",")
   raise "last_n mutated orders: #{got}" unless got == "alpha,beta,gamma"
 end
-got = Widget.order(:name).first_n("2").map { |w| w.name }.join(",")
+got = Widget.all.order(:name).first_n("2").map { |w| w.name }.join(",")
 raise "first_n string: #{got}" unless got == "alpha,beta"
-got = Widget.order(:name).limit(2.9).map { |w| w.name }.join(",")
+got = Widget.all.order(:name).limit(2.9).map { |w| w.name }.join(",")
 raise "float limit truncate: #{got}" unless got == "alpha,beta"
 
 puts "query values passed"
