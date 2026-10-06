@@ -329,7 +329,43 @@ pub(super) fn ingest_model_with_enum_constants(
             // the library-class pass over this very file registers it
             // under its qualified name. Reaching the expression ingester
             // with it aborted the whole file.
-            if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() {
+            //
+            // Exception: a nested `class JSON` / `module JSON` shadows
+            // bare `JSON` for `serialize …, coder: JSON` — leave a
+            // synthetic Const-assign marker so lower::serialize can see
+            // the shadow without treating the namespace as a body item.
+            if let Some(path) = stmt
+                .as_class_node()
+                .and_then(|c| constant_path_of(&c.constant_path()))
+                .or_else(|| {
+                    stmt.as_module_node()
+                        .and_then(|m| constant_path_of(&m.constant_path()))
+                })
+            {
+                let path_syms: Vec<Symbol> = path.iter().map(|s| Symbol::from(s.as_str())).collect();
+                if crate::lower::serialize::const_path_shadows_bare_json(
+                    &path_syms,
+                    owner.0.as_str(),
+                ) {
+                    body.push(ModelBodyItem::Unknown {
+                        expr: Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Assign {
+                                target: crate::expr::LValue::Const {
+                                    path: vec![Symbol::from("JSON")],
+                                },
+                                value: Expr::new(
+                                    Span::synthetic(),
+                                    ExprNode::Lit {
+                                        value: crate::expr::Literal::Nil,
+                                    },
+                                ),
+                            },
+                        ),
+                        leading_comments: Vec::new(),
+                        leading_blank_line: false,
+                    });
+                }
                 prev_end = Some(stmt.location().end_offset());
                 continue;
             }

@@ -154,7 +154,7 @@ fn serialize_json_coder_variants_are_claimed() {
             )),
             "serialize stays Unknown until lower claims it: {decl}"
         );
-        let decls = roundhouse::lower::serialize::serialize_decls(&article.body);
+        let decls = roundhouse::lower::serialize::serialize_decls(article);
         assert_eq!(decls.len(), 1, "{decl}");
         assert_eq!(decls[0].column.as_str(), "payload");
     }
@@ -168,7 +168,7 @@ fn serialize_yaml_default_stays_unclaimed() {
     ))
     .expect("ingest");
     let article = app.models.iter().find(|m| m.name.0.as_str() == "Article").unwrap();
-    assert!(roundhouse::lower::serialize::serialize_decls(&article.body).is_empty());
+    assert!(roundhouse::lower::serialize::serialize_decls(article).is_empty());
 }
 
 #[test]
@@ -180,7 +180,7 @@ fn serialize_json_shadowed_by_local_const_stays_unclaimed() {
     .expect("ingest");
     let article = app.models.iter().find(|m| m.name.0.as_str() == "Article").unwrap();
     assert!(
-        roundhouse::lower::serialize::serialize_decls(&article.body).is_empty(),
+        roundhouse::lower::serialize::serialize_decls(article).is_empty(),
         "bare JSON shadowed by a model constant must not claim JsonColumn"
     );
     // Absolute ::JSON still names the stdlib coder.
@@ -191,9 +191,63 @@ fn serialize_json_shadowed_by_local_const_stays_unclaimed() {
     .expect("ingest");
     let article = app.models.iter().find(|m| m.name.0.as_str() == "Article").unwrap();
     assert_eq!(
-        roundhouse::lower::serialize::serialize_decls(&article.body).len(),
+        roundhouse::lower::serialize::serialize_decls(article).len(),
         1
     );
+}
+
+#[test]
+fn serialize_json_shadow_detection_is_scope_aware() {
+    // Unrelated Foo::JSON must not unclaim bare coder: JSON.
+    let app = ingest_app_from_tree(article_app(
+        "  Foo::JSON = Object\n  serialize :payload, coder: JSON\n",
+        "    t.text :payload\n",
+    ))
+    .expect("ingest");
+    let article = app.models.iter().find(|m| m.name.0.as_str() == "Article").unwrap();
+    assert_eq!(
+        roundhouse::lower::serialize::serialize_decls(article).len(),
+        1,
+        "Foo::JSON must not shadow bare JSON on Article"
+    );
+
+    // Owner-qualified Article::JSON does shadow.
+    let app = ingest_app_from_tree(article_app(
+        "  Article::JSON = Object\n  serialize :payload, coder: JSON\n",
+        "    t.text :payload\n",
+    ))
+    .expect("ingest");
+    let article = app.models.iter().find(|m| m.name.0.as_str() == "Article").unwrap();
+    assert!(
+        roundhouse::lower::serialize::serialize_decls(article).is_empty(),
+        "Article::JSON shadows bare JSON"
+    );
+
+    // OpAssign JSON ||= …
+    let app = ingest_app_from_tree(article_app(
+        "  JSON ||= Object\n  serialize :payload, coder: JSON\n",
+        "    t.text :payload\n",
+    ))
+    .expect("ingest");
+    let article = app.models.iter().find(|m| m.name.0.as_str() == "Article").unwrap();
+    assert!(
+        roundhouse::lower::serialize::serialize_decls(article).is_empty(),
+        "JSON ||= shadows bare JSON"
+    );
+
+    // Nested class JSON / module JSON leave a shadow marker.
+    for nested in ["class JSON; end", "module JSON; end"] {
+        let app = ingest_app_from_tree(article_app(
+            &format!("  {nested}\n  serialize :payload, coder: JSON\n"),
+            "    t.text :payload\n",
+        ))
+        .expect("ingest");
+        let article = app.models.iter().find(|m| m.name.0.as_str() == "Article").unwrap();
+        assert!(
+            roundhouse::lower::serialize::serialize_decls(article).is_empty(),
+            "nested `{nested}` shadows bare JSON"
+        );
+    }
 }
 
 #[test]

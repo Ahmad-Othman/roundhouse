@@ -676,7 +676,7 @@ fn report_unclaimed_unknowns(model: &Model) {
         // `serialize :col, coder: JSON` (and legacy positional `JSON`) —
         // claimed by lower::serialize; accessors go through JsonColumn.
         if name == "serialize"
-            && crate::lower::serialize::serialize_decls(&model.body)
+            && crate::lower::serialize::serialize_decls(model)
                 .iter()
                 .any(|d| d.span == expr.span)
         {

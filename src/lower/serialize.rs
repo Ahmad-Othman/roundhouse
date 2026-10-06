@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 
-use crate::dialect::ModelBodyItem;
+use crate::dialect::{Model, ModelBodyItem};
 use crate::expr::{ExprNode, Literal, LValue};
 use crate::ident::Symbol;
 use crate::span::Span;
@@ -21,10 +21,10 @@ pub struct SerializeDecl {
 }
 
 /// Every claimed JSON `serialize` in a model body.
-pub fn serialize_decls(body: &[ModelBodyItem]) -> Vec<SerializeDecl> {
-    let json_shadowed = body_defines_json_const(body);
+pub fn serialize_decls(model: &Model) -> Vec<SerializeDecl> {
+    let json_shadowed = body_defines_json_const(&model.body, model.name.0.as_str());
     let mut out = Vec::new();
-    for item in body {
+    for item in &model.body {
         let ModelBodyItem::Unknown { expr, .. } = item else { continue };
         let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
             continue;
@@ -45,23 +45,52 @@ pub fn serialize_decls(body: &[ModelBodyItem]) -> Vec<SerializeDecl> {
 }
 
 /// Column names claimed by [`serialize_decls`].
-pub fn json_serialize_columns(body: &[ModelBodyItem]) -> HashSet<Symbol> {
-    serialize_decls(body).into_iter().map(|d| d.column).collect()
+pub fn json_serialize_columns(model: &Model) -> HashSet<Symbol> {
+    serialize_decls(model).into_iter().map(|d| d.column).collect()
 }
 
-/// `JSON = MyCoder` in the model body shadows bare `JSON` / `coder: JSON`.
-fn body_defines_json_const(body: &[ModelBodyItem]) -> bool {
+/// Whether a constant path written in `owner`'s body shadows bare `JSON`.
+///
+/// Bare `JSON`, owner-qualified `Owner::JSON` / `A::B::JSON` when `owner`
+/// is `A::B`, and absolute `::JSON` all affect bare lookup. Unrelated
+/// `Foo::JSON` does not.
+pub(crate) fn const_path_shadows_bare_json(path: &[Symbol], owner: &str) -> bool {
+    match path {
+        [name] if name.as_str() == "JSON" => true,
+        [root, name] if name.as_str() == "JSON" && root.as_str().is_empty() => true,
+        _ => {
+            let Some(last) = path.last() else { return false };
+            if last.as_str() != "JSON" {
+                return false;
+            }
+            let owner_parts: Vec<&str> = owner.split("::").filter(|p| !p.is_empty()).collect();
+            path.len() == owner_parts.len() + 1
+                && path[..owner_parts.len()]
+                    .iter()
+                    .zip(owner_parts.iter())
+                    .all(|(seg, part)| seg.as_str() == *part)
+        }
+    }
+}
+
+/// `JSON = …` / `JSON ||= …` / nested `class JSON` / `module JSON` markers
+/// in the model body shadow bare `JSON` / `coder: JSON`.
+fn body_defines_json_const(body: &[ModelBodyItem], owner: &str) -> bool {
     body.iter().any(|item| {
         let ModelBodyItem::Unknown { expr, .. } = item else {
             return false;
         };
-        matches!(
-            &*expr.node,
+        match &*expr.node {
             ExprNode::Assign {
                 target: LValue::Const { path },
                 ..
-            } if path.last().is_some_and(|n| n.as_str() == "JSON")
-        )
+            }
+            | ExprNode::OpAssign {
+                target: LValue::Const { path },
+                ..
+            } => const_path_shadows_bare_json(path, owner),
+            _ => false,
+        }
     })
 }
 
@@ -95,7 +124,7 @@ fn is_json_const(expr: &crate::expr::Expr, json_shadowed: bool) -> bool {
     ) {
         return true;
     }
-    // Bare `JSON` only when the model body does not define `JSON = …`.
+    // Bare `JSON` only when the model body does not define a shadowing JSON.
     !json_shadowed && matches!(path.as_slice(), [name] if name.as_str() == "JSON")
 }
 

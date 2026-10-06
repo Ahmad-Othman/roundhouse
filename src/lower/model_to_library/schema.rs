@@ -985,7 +985,7 @@ fn synth_attr_reader(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
 /// schema `t.json` / `t.jsonb` (except `has_json` keyed schemas), or an
 /// ActiveRecord `serialize …, coder: JSON` declaration on text/string/json.
 fn is_generic_json_col(col: &Column, model: &Model) -> bool {
-    if crate::lower::serialize::json_serialize_columns(&model.body).contains(&col.name) {
+    if crate::lower::serialize::json_serialize_columns(model).contains(&col.name) {
         return true;
     }
     matches!(col.col_type, crate::schema::ColumnType::Json)
