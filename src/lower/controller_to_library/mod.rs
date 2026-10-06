@@ -392,8 +392,10 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // AFTER `extras` so the existing `Views::Articles` entry (from
     // view_to_library, with `show`/`index`/`new`/`edit`) gets the
     // `_json` siblings merged in rather than overwritten.
+    // Signatures only — body typing belongs to the jbuilder lowerer,
+    // which dump_ir / emit already ran (or will run) separately.
     let app_stub = crate::App::new();
-    for lc in crate::lower::lower_jbuilder_to_library_classes(views, &app_stub, Vec::new()) {
+    for lc in crate::lower::jbuilder_signature_classes(views, &app_stub) {
         let info = classes.entry(lc.name.clone()).or_default();
         for m in &lc.methods {
             if let Some(sig) = &m.signature {
@@ -483,6 +485,8 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         .map(|(n, _)| n.clone())
         .collect();
 
+    let permitted_fields = self::params::permitted_field_tys(&params_specs);
+
     let mut out = Vec::new();
     for (mut methods, controller) in all_methods {
         // Surveyed over the WHOLE controller before any body is
@@ -509,49 +513,20 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                 continue;
             }
             crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
-            // Stage 3: now that bodies are typed, rewrite
-            // `<typed-params>[:field]` → `<typed-params>.field`.
-            // Re-type after the rewrite so the synthesized
-            // attr_reader Send carries its return type and any
-            // chained dispatch picks up the concrete `Str`.
-            method.body = self::params::rewrite_typed_bracket_to_field(
-                &method.body, &params_specs,
+            // Bracket rewrite and broadcast rewrite both need the first
+            // typing pass and do not consume each other's output, so they
+            // share one walk-pair and one follow-up type when either fires.
+            let mut rewritten = self::params::rewrite_typed_bracket_to_field_in_place(
+                &mut method.body, &permitted_fields,
             );
-            crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
-            // `broadcast_prepend_to user, :rooms, target: [@room, :list],
-            // partial: …` — the Rails broadcast API written from a
-            // CONTROLLER, a home `lower::broadcast_calls` (models and
-            // the concerns beside them) never visits. Emitted verbatim
-            // until now, i.e. an undefined method: those actions raise
-            // in a real server, not only under test.
-            //
-            // HERE, in the typed loop, and not in `lower_action_body`:
-            // the model-side rewriter resolves its record from a
-            // `belongs_to` on the owning model, and a controller has no
-            // owner — what it has is the analyzer's `Ty::Class` stamp on
-            // `user` / `@room`, which does not exist until
-            // `type_method_body` has run. Placed before the arel pass
-            // for the same reason its neighbours are: the pass re-types
-            // afterwards, so the synthesized `Views::…` payload and
-            // `<record>.id` reads carry their types downstream.
-            method.body = self::broadcasts::rewrite_broadcast_to(
-                &method.body,
+            rewritten |= self::broadcasts::rewrite_broadcast_to_in_place(
+                &mut method.body,
                 views_module_name(controller).as_deref(),
                 &partials,
             );
-            crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
-            // Arel pass — when schema is provided, lift recognized
-            // AR call chains into inline SELECT/hydrate over the Db
-            // primitive surface. Re-type after so the body-typer's
-            // earlier annotations on the rewritten subtree refresh.
-            // A method whose RESULT this controller refines with a
-            // relation method keeps its body on the Relation path.
-            // Lifting a chain to a materializing hydrate loop is a
-            // decision the CONSUMER licenses, and the consumer of a
-            // return value is in another body — see
-            // `relation_refined_method_names`, which is the same guard
-            // the pass already applies to a name refined within one
-            // body, asked one scope out.
+            if rewritten {
+                crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
+            }
             let refined_across_methods = refined_result_methods.contains(&method.name);
             if let Some(schema) = schema {
                 if !refined_across_methods {

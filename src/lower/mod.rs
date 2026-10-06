@@ -48,6 +48,7 @@ pub mod create_block;
 pub mod as_json_poro;
 pub mod active_model_model;
 pub mod enumerable_ext;
+mod fused;
 pub mod time_calendar;
 pub mod boolean_cast;
 pub mod where_range_split;
@@ -298,6 +299,34 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("params_residue", &["bool_fold"]),
     // After the ledger, which reads the calls this rewrites; before the controller lowering turns `params` into `@params`.
     ("params_permit", &["params_residue"]),
+    // Independent send rewrites: one fused tree walk in
+    // `fused::apply_fused_independent_rewrites`. Grouped here so the
+    // executed-pass assert stays a straight list match.
+    ("pathname_ctor", &[]),
+    ("array_ordinal", &[]),
+    ("save_without_validation", &[]),
+    ("random_formatter", &[]),
+    ("number_to_fs", &[]),
+    ("string_inflections", &[]),
+    ("to_json", &[]),
+    ("csv_generate", &[]),
+    ("presence_in", &[]),
+    ("enumerable_ext", &[]),
+    ("boolean_cast", &[]),
+    ("values_at_splat", &[]),
+    ("exclude_predicate", &[]),
+    ("in_predicate", &[]),
+    ("including", &[]),
+    ("exists_conditions", &[]),
+    ("destroy_by", &[]),
+    ("literal_append", &[]),
+    ("byte_size", &[]),
+    ("dirty_predicate_kwargs", &[]),
+    ("relation_select_block", &[]),
+    ("arel_attribute", &[]),
+    ("attr_or_assign", &[]),
+    ("group_count", &[]),
+    ("errors_full_messages", &[]),
     ("blank", &[]),
     ("time_current", &[]),
     ("as_json_super", &[]),
@@ -306,10 +335,6 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // blocks: the pass leaves a `super` inside a block alone.
     ("secure_password_super", &[]),
     ("parameterize", &[]),
-    // `Pathname(p)` → `Pathname.new(p)`. Rewrites a receiverless call
-    // no other pass produces or consumes into a Const-receiver send of
-    // a name no other pass reads, so no ordering constraints.
-    ("pathname_ctor", &[]),
     // A class body's bare `new` gets the class as its receiver. Reads a
     // receiverless send no other pass produces and writes a
     // Const-receiver one nothing else keys on, so no ordering
@@ -326,51 +351,19 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // neither of which any other pass produces or consumes, so no
     // ordering constraints.
     ("global_id_locate", &[]),
-    // ActiveSupport `Array#second`..`#fifth` → an index read. Keys on
-    // a typed-Array receiver, which no other pass produces or
-    // consumes, so no ordering constraints.
-    ("array_ordinal", &[]),
     // `recv.each.with_index(n?) { }` → `each_with_index` (+ offset bind).
     // Keys on an Enumerator chain no other pass produces or consumes,
     // so no ordering constraints. Unblocks Spinel AOT on Writebook
     // Positionable#move_to_position (keyword call closing over index).
     ("each_with_index", &[]),
-    // `save(validate: false)` → `save_after_validation`. Keys on a
-    // literal `validate: false` kwarg no other pass produces or
-    // consumes, so no ordering constraints.
-    ("save_without_validation", &[]),
     ("assoc_pluck", &[]),
     ("try_guard", &[]),
-    // `Random.uuid` → `SecureRandom.uuid` — the same `Random::Formatter`
-    // method under a byte source that exists. Rewrites a receiver
-    // Const no pass produces and writes a name no pass consumes, so
-    // no ordering constraints.
-    ("random_formatter", &[]),
-    // `number.to_fs(:delimited)` → `ActiveSupport.number_delimited(number)`;
-    // a rewrite of a name no other pass produces or consumes.
-    ("number_to_fs", &[]),
-    // `str.humanize` → `ActiveSupport.humanize(str)`; a rewrite of a name no other pass produces or consumes.
-    ("string_inflections", &[]),
     // `record.read_attribute(:x)` → `record[:x]`; a rename of a name no other pass produces or consumes.
     ("attribute_aliases", &[]),
-    // `hash.to_json` → `JSON.generate(hash)`; a receiver-shape rewrite
-    // of a name no other pass produces or consumes.
-    ("to_json", &[]),
-    // `value.presence_in(list)` → `ActiveSupport.presence_in(value,
-    // list)`; a receiver-shape rewrite of a name no other pass produces
-    // or consumes, so no ordering constraints.
-    // No runs_after: it rewrites a `CSV.generate` call's own arguments and block.
-    ("csv_generate", &[]),
-    ("presence_in", &[]),
-    // `list.index_by { … }` → `ActiveSupport.index_by(list) { … }`.
-    // Same receiver-shape rewrite, same absence of constraints.
-    ("enumerable_ext", &[]),
     // No runs_after: it reads only analyzer types and produces calls no other pass consumes.
     ("time_calendar", &[]),
     // After time_calendar: `t.all_month` becomes the Range literal this splits out.
     ("where_range_split", &["time_calendar"]),
-    // No runs_after: it rewrites one constant-rooted shape no other pass produces.
-    ("boolean_cast", &[]),
     // `Rooms::Open.count` → `Room.where(type: "Rooms::Open").count`.
     // Produces a `where` at a model Const root, which is vocabulary
     // every later pass already reads; consumes nothing any pass
@@ -406,11 +399,6 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // nothing else reads, so no ordering constraints.
     ("job_test_only", &[]),
     ("test_cookie_jar", &[]),
-    // `x_previously_changed?(to: V)` → the predicate AND a comparison.
-    // Reads a kwargs hash on a synthesized predicate name and writes
-    // reads of the same synthesis; no pass produces or consumes either
-    // shape, so no ordering constraints.
-    ("dirty_predicate_kwargs", &[]),
     // `<X>Controller.render partial:` → the view-module call. Reads a
     // shape no pass produces and writes a `Views::` call no pass
     // consumes, so no ordering constraints.
@@ -418,9 +406,6 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `sum(:col)` → block form; no ordering constraints (rewrites a
     // literal-symbol arg shape no other pass produces or consumes).
     ("sum_symbol", &[]),
-    // `values_at(*keys)` → keys.map block form; same no-constraints
-    // rationale.
-    ("values_at_splat", &[]),
     // `tag.div(…)` → the HTML string it builds. BEFORE `html_safe`
     // (whose fold would erase the `.html_safe` marker it reads on
     // content, and which must SEE the marker this pass writes so the
@@ -437,22 +422,6 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("status_literal", &[]),
     // `"#{v.to_param}"` on an untyped receiver → `ActiveSupport.to_param(v)`.
     ("to_param_residue", &[]),
-    // `x.exclude?(y)` → `!x.include?(y)`; total rewrite, no ordering
-    // constraints (no other pass produces or consumes `exclude?`).
-    ("exclude_predicate", &[]),
-    // `x.in?(xs)` → `xs.include?(x)`; the `exclude_predicate` mirror,
-    // same total rewrite and same lack of ordering constraints.
-    ("in_predicate", &[]),
-    // `xs.including(a)` → `xs.to_a + [a]`; same shape and same lack of
-    // ordering constraints as `exclude_predicate` above.
-    ("including", &[]),
-    // `<relation>.select { … }` → `.filter { … }`, so the projection
-    // `select(*specs)` is the only thing left on the name and answers a
-    // Relation and nothing else. Reads the receiver's analyzer type
-    // (Relation, or untyped) and rewrites only the method name, so it
-    // has no ordering constraint of its own — it just has to run before
-    // the `relation_residue` ledger reads the final chain shape.
-    ("relation_select_block", &[]),
     // `x_path(format: :json)` → `x_path() + ".json"`. Must run before
     // the route-helper lowering surveys call sites for query keys; the
     // two do not overlap (`format` is on NON_QUERY_OPTIONS) but the
@@ -490,15 +459,6 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `x.inquiry` / `x.<name>?` → equality against the label; total
     // rewrite of a name no other pass produces or consumes.
     ("inquiry", &[]),
-    // `Model.exists?(col: v)` → `Model.where(col: v).exists?`, so the
-    // conditions form reaches the Relation instead of the by-id
-    // primitive. Before the emit-time arel rewrite, which then folds
-    // the chain when the values are literal.
-    ("exists_conditions", &[]),
-    // `Model.destroy_by(col: v)` → `Model.where(col: v).destroy_all`,
-    // Rails' own definition. Same placement and same reasons as
-    // `exists_conditions`: before the arel rewrite that folds the chain.
-    ("destroy_by", &[]),
     // `owner.create_<assoc>!(…)` → `Target.create!(fk: owner.id, …)` for
     // a `has_one`. Runs after `destroy_by` and before the arel rewrite,
     // like the other call-site rewrites: what it produces is an ordinary
@@ -517,13 +477,6 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("symbolize_keys", &["config_reader"]),
     // No runs_after: it reads the ingested enum tables and rewrites only the key argument.
     ("enum_mapping_keys", &[]),
-    ("arel_attribute", &[]),
-    // `"lit" << x` → `"lit" + x`; local expression rewrite, no ordering
-    // constraints.
-    ("literal_append", &[]),
-    // `5.megabytes` → `5 * 1048576`; local expression rewrite of a name
-    // no other pass produces or consumes.
-    ("byte_size", &[]),
     // `f(**h)` (erased to `f(h)` at ingest) → `f(k: h[:k], …)` when the
     // callee declares explicit keywords. Reads the arg count against the
     // callee's signature, so it must see the argument list as ingested —
@@ -554,7 +507,6 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("and_return", &[]),
     ("case_lambda", &[]),
     ("first_or_create", &[]),
-    ("attr_or_assign", &[]),
     ("system_exception", &[]),
     ("case_class_narrow", &[]),
     ("reset_counters", &[]),
@@ -568,13 +520,8 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Wraps finder keywords in a model's `normalizes`; authenticate_by
     // expands into one such `find_by`.
     ("normalizes", &["authenticate_by"]),
-    ("group_count", &[]),
     ("dead_default", &[]),
     ("errors_add", &[]),
-    // `errors.full_messages` -> `errors`; total rewrite, no ordering
-    // constraints (no other pass produces or consumes `full_messages`,
-    // and the `errors` receiver it matches is left untouched).
-    ("errors_full_messages", &[]),
     // `errors[:field]` -> `ActiveSupport.errors_for(errors, "Field ")`.
     // AFTER `errors_add`, so a hand-written `errors.add(:field, …)` in
     // the same body has already baked its humanized prefix — the
@@ -788,6 +735,34 @@ pub fn apply_post_analyze_lowerings(
     ran!("params_residue");
     params_permit::apply_params_permit_lowering(app);
     ran!("params_permit");
+    crate::timings::phase("post-analyze: fused send rewrites", || {
+        fused::apply_fused_independent_rewrites(app);
+    });
+    ran!("pathname_ctor");
+    ran!("array_ordinal");
+    ran!("save_without_validation");
+    ran!("random_formatter");
+    ran!("number_to_fs");
+    ran!("string_inflections");
+    ran!("to_json");
+    ran!("csv_generate");
+    ran!("presence_in");
+    ran!("enumerable_ext");
+    ran!("boolean_cast");
+    ran!("values_at_splat");
+    ran!("exclude_predicate");
+    ran!("in_predicate");
+    ran!("including");
+    ran!("exists_conditions");
+    ran!("destroy_by");
+    ran!("literal_append");
+    ran!("byte_size");
+    ran!("dirty_predicate_kwargs");
+    ran!("relation_select_block");
+    ran!("arel_attribute");
+    ran!("attr_or_assign");
+    ran!("group_count");
+    ran!("errors_full_messages");
     diags.extend(blank::apply_blank_lowering(app));
     ran!("blank");
     time_current::apply_time_current_lowering(app);
@@ -798,8 +773,6 @@ pub fn apply_post_analyze_lowerings(
     ran!("secure_password_super");
     parameterize::apply_parameterize_grounding(app);
     ran!("parameterize");
-    pathname_ctor::apply_pathname_ctor_lowering(app);
-    ran!("pathname_ctor");
     diags.extend(class_body_new::apply_class_body_new_lowering(app));
     ran!("class_body_new");
     mocha::apply_mocha_lowering(app);
@@ -808,38 +781,18 @@ pub fn apply_post_analyze_lowerings(
     ran!("webmock");
     global_id_locate::apply_global_id_locate_lowering(app);
     ran!("global_id_locate");
-    array_ordinal::apply_array_ordinal_lowering(app);
-    ran!("array_ordinal");
     each_with_index::apply_each_with_index_lowering(app);
     ran!("each_with_index");
-    save_without_validation::apply_save_without_validation_lowering(app);
-    ran!("save_without_validation");
     assoc_pluck::apply_assoc_pluck_lowering(app);
     ran!("assoc_pluck");
     try_guard::apply_try_guard_lowering(app);
     ran!("try_guard");
-    random_formatter::apply_random_formatter_grounding(app);
-    ran!("random_formatter");
-    number_to_fs::apply_number_to_fs_grounding(app);
-    ran!("number_to_fs");
-    string_inflections::apply_string_inflection_grounding(app);
-    ran!("string_inflections");
     attribute_aliases::apply_attribute_alias_lowering(app);
     ran!("attribute_aliases");
-    to_json::apply_to_json_lowering(app);
-    ran!("to_json");
-    csv_generate::apply_csv_generate_lowering(app);
-    ran!("csv_generate");
-    presence_in::apply_presence_in_grounding(app);
-    ran!("presence_in");
-    enumerable_ext::apply_enumerable_ext_grounding(app);
-    ran!("enumerable_ext");
     time_calendar::apply_time_calendar_grounding(app);
     ran!("time_calendar");
     diags.extend(where_range_split::apply_where_range_split(app));
     ran!("where_range_split");
-    boolean_cast::apply_boolean_cast_grounding(app);
-    ran!("boolean_cast");
     sti_scope::apply_sti_scope_lowering(app);
     ran!("sti_scope");
     relation_ivar_materialize::apply_relation_ivar_materialize(app);
@@ -854,14 +807,10 @@ pub fn apply_post_analyze_lowerings(
     ran!("job_test_only");
     test_cookie_jar::apply_test_cookie_jar_lowering(app);
     ran!("test_cookie_jar");
-    dirty_predicate_kwargs::apply_dirty_predicate_kwargs(app);
-    ran!("dirty_predicate_kwargs");
     controller_class_render::apply_controller_class_render(app);
     ran!("controller_class_render");
     sum_symbol::apply_sum_symbol_lowering(app);
     ran!("sum_symbol");
-    values_at_splat::apply_values_at_splat_lowering(app);
-    ran!("values_at_splat");
     diags.extend(tag_builder::apply_tag_builder_lowering(app, registry));
     ran!("tag_builder");
     request_index::apply_request_index_lowering(app);
@@ -872,14 +821,6 @@ pub fn apply_post_analyze_lowerings(
     ran!("status_literal");
     to_param_residue::apply_to_param_residue_lowering(app);
     ran!("to_param_residue");
-    exclude_predicate::apply_exclude_predicate_lowering(app);
-    ran!("exclude_predicate");
-    in_predicate::apply_in_predicate_lowering(app);
-    ran!("in_predicate");
-    including::apply_including_lowering(app);
-    ran!("including");
-    relation_select_block::apply_relation_select_block_lowering(app);
-    ran!("relation_select_block");
     route_format_suffix::apply_route_format_suffix_lowering(app);
     ran!("route_format_suffix");
     route_url_options::apply_route_url_options_lowering(app);
@@ -900,10 +841,6 @@ pub fn apply_post_analyze_lowerings(
     ran!("update_writer_check");
     inquiry::apply_inquiry_lowering(app);
     ran!("inquiry");
-    exists_conditions::apply_exists_conditions_lowering(app);
-    ran!("exists_conditions");
-    destroy_by::apply_destroy_by_lowering(app);
-    ran!("destroy_by");
     has_one_builder::apply_has_one_builder_lowering(app);
     ran!("has_one_builder");
     config_reader::apply_config_reader_lowering(app);
@@ -912,12 +849,6 @@ pub fn apply_post_analyze_lowerings(
     ran!("symbolize_keys");
     enum_mapping_keys::apply_enum_mapping_keys(app);
     ran!("enum_mapping_keys");
-    arel_attribute::apply_arel_attribute_lowering(app);
-    ran!("arel_attribute");
-    literal_append::apply_literal_append_lowering(app);
-    ran!("literal_append");
-    byte_size::apply_byte_size_lowering(app);
-    ran!("byte_size");
     diags.extend(kwsplat::apply_kwsplat_expansion(app));
     ran!("kwsplat");
     rails_cache::apply_rails_cache_lowering(app);
@@ -942,8 +873,6 @@ pub fn apply_post_analyze_lowerings(
     ran!("case_lambda");
     diags.extend(first_or_create::apply_first_or_create_lowering(app));
     ran!("first_or_create");
-    attr_or_assign::apply_attr_or_assign_lowering(app);
-    ran!("attr_or_assign");
     system_exception::apply_system_exception_lowering(app);
     ran!("system_exception");
     case_class_narrow::apply_case_class_narrowing(app);
@@ -958,14 +887,10 @@ pub fn apply_post_analyze_lowerings(
     // a `normalizes` declaration applies to.
     normalizes::apply_normalizes_finder_lowering(app);
     ran!("normalizes");
-    group_count::apply_group_count_lowering(app);
-    ran!("group_count");
     dead_default::apply_dead_default_lowering(app, registry);
     ran!("dead_default");
     diags.extend(errors_add::apply_errors_add_lowering(app));
     ran!("errors_add");
-    errors_full_messages::apply_errors_full_messages_lowering(app);
-    ran!("errors_full_messages");
     diags.extend(errors_index::apply_errors_index_lowering(app));
     ran!("errors_index");
     diags.extend(create_block::apply_create_block_inline(app));
@@ -1530,7 +1455,7 @@ pub use view_to_library::{
     preliminary_view_classes, type_view_library_classes,
 };
 pub use jbuilder_to_library::{
-    lower_jbuilder_to_library_class, lower_jbuilder_to_library_classes,
+    jbuilder_signature_classes, lower_jbuilder_to_library_class, lower_jbuilder_to_library_classes,
 };
 pub use broadcasts::{
     app_broadcasts_live, lower_broadcasts, BroadcastAction, LoweredAssocRef, LoweredBroadcast,

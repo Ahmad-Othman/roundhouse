@@ -169,6 +169,17 @@ pub fn lower_jbuilder_to_library_classes(
     lcs
 }
 
+/// Untyped jbuilder LibraryClasses — method signatures only. The
+/// controller lowerer registers these so `Views::X.<action>_json`
+/// resolves; body typing is the jbuilder lowerer's job.
+pub fn jbuilder_signature_classes(views: &[View], app: &App) -> Vec<LibraryClass> {
+    views
+        .iter()
+        .filter(|v| v.jbuilder && !v.analysis_only)
+        .map(|v| build_library_class(v, app, /*type_body=*/ false))
+        .collect()
+}
+
 /// Single-template entry. Used by tests and the dump_ir binary; the
 /// production bulk path is `lower_jbuilder_to_library_classes`.
 pub fn lower_jbuilder_to_library_class(view: &View, app: &App) -> LibraryClass {

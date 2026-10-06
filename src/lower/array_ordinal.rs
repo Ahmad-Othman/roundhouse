@@ -52,7 +52,10 @@ pub(crate) fn rewrite_body(expr: &mut Expr) {
 
 fn rewrite(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut rewrite);
+    rewrite_node(expr);
+}
 
+pub(crate) fn rewrite_node(expr: &mut Expr) {
     let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &mut *expr.node else {
         return;
     };
