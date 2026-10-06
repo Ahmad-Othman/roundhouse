@@ -5609,6 +5609,26 @@ end
         .assert_passes();
 }
 
+/// A rooted `class_name:` names the top-level class (chatwoot's
+/// `has_many :portals, class_name: "::Portal"`).
+#[test]
+fn a_rooted_class_name_association_runs() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  has_many :rooted_comments, class_name: \"::Comment\"\n\n  def first_rooted_body\n    rooted_comments.first.body\n  end\n",
+        )
+        .run_ruby(
+            r#"article = Article.create!(title: "Rooted", body: "Body text here")
+Comment.create!(article_id: article.id, commenter: "Ann", body: "First remark")
+raise "rooted association count" unless article.rooted_comments.count == 1
+raise "rooted association read" unless article.first_rooted_body == "First remark"
+"#,
+        )
+        .assert_passes();
+}
+
 /// Interface keys belong to `as:`, even when the Concern name matches it.
 #[test]
 fn a_polymorphic_inverse_from_a_concern_runs() {
