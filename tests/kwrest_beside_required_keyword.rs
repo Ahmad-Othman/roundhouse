@@ -94,8 +94,12 @@ end
 /// ActiveRecord model, so its methods take `ingest::model`'s parameter
 /// path, not `ingest::library_class`'s.
 fn model_files() -> Vec<(String, String)> {
+    model_files_with(POST)
+}
+
+fn model_files_with(post: &str) -> Vec<(String, String)> {
     spinel(&[
-        ("app/models/post.rb", POST),
+        ("app/models/post.rb", post),
         ("db/schema.rb", POSTS_SCHEMA),
         ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
     ])
@@ -121,4 +125,16 @@ fn a_model_sidecar_declares_the_keyword_rest() {
     let rbs = file(&files, "app/models/post.rbs");
     assert!(rbs.contains("**untyped rest"), "{rbs}");
     assert!(!rbs.contains("Hash[untyped, untyped] rest"), "{rbs}");
+}
+
+/// A scalar return takes `backfill_scalar_signature`'s path, which
+/// declared the kept `**rest` as a positional `*untyped rest` — RBS
+/// neither the `rbs` gem nor Spinel's reader parses.
+#[test]
+fn a_model_sidecar_with_a_scalar_return_declares_the_keyword_rest() {
+    let files = model_files_with(
+        "class Post < ApplicationRecord\n  def tag(name:, **rest) = \"#{name}:#{rest[:x]}\"\nend\n",
+    );
+    let rbs = file(&files, "app/models/post.rbs");
+    assert!(rbs.contains("def tag: (name: untyped, **untyped rest) -> String"), "{rbs}");
 }
