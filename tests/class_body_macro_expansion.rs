@@ -1263,6 +1263,8 @@ fn rest_actions_macro_refuses_what_it_cannot_read() {
     for call in [
         // Unknown actions: expanding would drop them from `only`.
         "has_mobile_version *ACTIONS",
+        "has_mobile_version *[:index, ACTIONS.first]",
+        "has_mobile_version :index, ACTIONS.first",
         // The last `if:` is a guard this expansion does not carry.
         "has_mobile_version :index, if: nil, if: :x",
         // A computed key might be `:if`.

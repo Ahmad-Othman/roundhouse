@@ -3275,10 +3275,18 @@ fn filter_from_send(
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
         _ => None,
     };
-    let sym_list = |e: &crate::expr::Expr| -> Vec<crate::ident::Symbol> {
+    // `only:` / `except:` actions, a Symbol or String each as Rails takes
+    // them. None when any is something else: dropping it would narrow
+    // the list, or empty it into an unscoped filter.
+    let action_of = |e: &crate::expr::Expr| match &*e.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(crate::ident::Symbol::from(value.as_str())),
+        _ => None,
+    };
+    let sym_list = |e: &crate::expr::Expr| -> Option<Vec<crate::ident::Symbol>> {
         match &*e.node {
-            ExprNode::Array { elements, .. } => elements.iter().filter_map(&sym_of).collect(),
-            _ => sym_of(e).into_iter().collect(),
+            ExprNode::Array { elements, .. } => elements.iter().map(&action_of).collect(),
+            _ => action_of(e).map(|a| vec![a]),
         }
     };
 
@@ -3304,8 +3312,8 @@ fn filter_from_send(
         };
         for (key, value) in entries {
             match sym_of(key).as_ref().map(|k| k.as_str().to_string()).as_deref() {
-                Some("only") => only = sym_list(value),
-                Some("except") => except = sym_list(value),
+                Some("only") => only = sym_list(value)?,
+                Some("except") => except = sym_list(value)?,
                 // if:/unless: guards on a macro-expanded filter would
                 // need the predicate to resolve in the INCLUDER; not
                 // modeled, and silently dropping a guard changes when a
