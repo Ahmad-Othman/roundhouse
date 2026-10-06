@@ -29,7 +29,7 @@ use super::library_class::{
     ingest_helper_method_names, ingest_library_classes, ingest_rails_application_singleton_methods,
 };
 use super::model::ingest_model_with_enum_constants;
-use super::routes::ingest_routes_with_draws;
+use super::routes::ingest_routes_with_dsl;
 use super::schema::{ingest_migration, ingest_schema};
 use super::structure_sql::ingest_structure_sql;
 use super::test::ingest_test_files;
@@ -256,6 +256,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     if vfs.exists(&lock_path) {
         if let Ok(text) = vfs.read_to_string(&lock_path) {
             app.gem_lock = Some(crate::gems::Lockfile::parse(&text));
+            if let Some(lock) = &app.gem_lock {
+                app.gem_boundary = super::rbi::load_gem_boundary(vfs, dir, lock);
+            }
         }
     }
 
@@ -1200,6 +1203,16 @@ end
         }
     }
 
+    let mut model_files = Vec::new();
+    for root in &roots {
+        let models_dir = dir.join(root).join("models");
+        if vfs.is_dir(&models_dir) {
+            model_files.extend(read_rb_files(vfs, &models_dir)?);
+        }
+    }
+    app.generated_helper_methods =
+        super::generated_helpers::ingest_generated_helpers(&app, vfs, dir, &model_files);
+
     let routes_path = dir.join("config/routes.rb");
     if vfs.exists(&routes_path) {
         if let Some(source) = read_or_ledger(vfs, &routes_path)? {
@@ -1227,10 +1240,12 @@ end
                     draw_files.insert(key, (split_source, entry.display().to_string()));
                 }
             }
-            if let Some(routes) = unwrap_or_record(ingest_routes_with_draws(
+            let block_wrappers = mapper_extension_block_methods(&app, vfs, dir);
+            if let Some(routes) = unwrap_or_record(ingest_routes_with_dsl(
                 &source,
                 &routes_path.display().to_string(),
                 &draw_files,
+                &block_wrappers,
             ))? {
                 // `to: redirect("/x")` routes point at actions nobody
                 // wrote, so write them: one controller, one action per
@@ -1618,7 +1633,9 @@ end
         let Ok(entries) = read_rb_files(vfs, &tree) else { continue };
         for entry in entries {
             let Ok(source) = vfs.read(&entry) else { continue };
-            for (class_id, methods) in super::sorbet_sig::ingest_sorbet_signatures(&source) {
+            let (signatures, abstracts) = super::sorbet_sig::ingest_sorbet_declarations(&source);
+            drop_abstract_stubs(&mut app, &abstracts);
+            for (class_id, methods) in signatures {
                 let declared = app.rbs_signatures.entry(class_id).or_default();
                 for (name, ty) in methods {
                     declared.entry(name).or_insert(ty);
@@ -1674,7 +1691,7 @@ end
 
     // Before the splice: it (and every later consumer) looks concerns up
     // by ClassId, so the lexical-scope resolution has to have happened.
-    qualify_relative_model_includes(&mut app);
+    qualify_relative_includes(&mut app);
     // Before the concern splices: they read `library_classes`, and this
     // turns `Current`'s metaprogrammed surface into real methods first.
     super::current_attributes::lower_current_attributes(&mut app);
@@ -1718,11 +1735,8 @@ end
     // this is the same real-file list that Rubydex indexes, and its
     // answers use these `FileId`s.
     app.sources = super::sources::drain();
-    debug_assert_eq!(
-        app.sources.len(),
-        sources.len(),
-        "a pass registered a source after Rubydex took its snapshot"
-    );
+    super::sources::assert_snapshot_matches(&sources, &app.sources);
+    app.source_index_required = !app.sources.is_empty();
     drop(sources);
     splice_concerns_into_controllers(&mut app);
     // After the splice: an action a concern provides is not implicit.
@@ -1767,11 +1781,10 @@ end
     super::concern_accessors::validate(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
 
     collect_binary_assets(vfs, dir, &mut app);
-
-    debug_assert!(
-        super::sources::drain().is_empty(),
-        "a pass registered a source after ingest drained the registry"
-    );
+    // Generated re-ingest labels never register real sources. No later
+    // pass may append source-backed FileIds beyond the indexed snapshot.
+    let late_sources = super::sources::drain();
+    super::sources::assert_snapshot_matches(&[], &late_sources);
     Ok(app)
 }
 
@@ -2243,6 +2256,34 @@ fn synthesize_template_only_actions(app: &mut App) {
 /// emits) and the reference becomes `IntervalHelper::TIME_INTERVALS`,
 /// which is what Ruby's lexical lookup means and what every strict
 /// target can resolve.
+/// A `sig { abstract… }` method is a declaration: its `def` is an empty stub
+/// and the includer supplies the real one. Spliced into the includer, the
+/// stub answered `nil` ahead of the implementation the includer inherits
+/// (a concern declaring `abstract.returns(ActionController::Parameters)
+/// def params; end` made every includer's `params` nil). The sig stays in
+/// `rbs_signatures` as the module's declaration; only the empty body goes.
+fn drop_abstract_stubs(
+    app: &mut App,
+    abstracts: &HashMap<crate::ident::ClassId, std::collections::HashSet<crate::ident::Symbol>>,
+) {
+    for lc in &mut app.library_classes {
+        let Some(names) = abstracts.get(&lc.name) else { continue };
+        lc.methods.retain(|m| {
+            !(matches!(m.receiver, crate::dialect::MethodReceiver::Instance)
+                && names.contains(&m.name)
+                && is_empty_body(&m.body))
+        });
+    }
+}
+
+fn is_empty_body(body: &crate::expr::Expr) -> bool {
+    match &*body.node {
+        crate::expr::ExprNode::Seq { exprs } => exprs.is_empty(),
+        crate::expr::ExprNode::Lit { value: crate::expr::Literal::Nil } => true,
+        _ => false,
+    }
+}
+
 fn splice_concerns_into_controllers(app: &mut App) {
     use crate::dialect::{Action, ControllerBodyItem, MethodReceiver, RenderTarget};
     use crate::ty::{Row, Ty};
@@ -2446,6 +2487,23 @@ fn splice_concerns_into_controllers(app: &mut App) {
         }
         filters.extend(methods);
         controller.body = filters;
+    }
+    // The `sig` above a module's `def` describes the COPY as well: the
+    // includer's method is that `def`, and inference over the copy would
+    // otherwise replace the declared return with whatever the body
+    // happens to end in.
+    for (controller, origins) in &spliced_origin {
+        for (name, module) in origins {
+            let Some(sig) = app.rbs_signatures.get(module).and_then(|m| m.get(name)).cloned()
+            else {
+                continue;
+            };
+            app.rbs_signatures
+                .entry(controller.clone())
+                .or_default()
+                .entry(name.clone())
+                .or_insert(sig);
+        }
     }
     app.concern_spliced_actions = spliced_origin;
 }
@@ -3533,25 +3591,36 @@ fn qualify_relative_controller_superclasses(
     }
 }
 
-/// Resolve a model's `include <Const>` against Ruby's lexical scope:
-/// inside `class User`, `include Avatar` names `User::Avatar` when such
-/// a module exists, and only falls back to a top-level `Avatar`.
+/// Resolve an `include <Const>` against Ruby's lexical scope.
+///
+/// Inside `class User`, `include Avatar` names `User::Avatar` when such
+/// a module exists, and only falls back to a top-level `Avatar`. The
+/// same walk covers a namespaced owner: in `module Auth; class
+/// SessionsController`, `include Concerns::RequireClient` names
+/// `Auth::SessionsController::Concerns::RequireClient`, then
+/// `Auth::Concerns::RequireClient`, then `Concerns::RequireClient`,
+/// innermost first, the way `Module.nesting` is consulted.
 ///
 /// Campfire keeps every model concern that way —
 /// `app/models/user/{avatar,bannable,bot,mentionable,role,transferable}.rb`
 /// each declare `module User::Avatar` and friends — so the unqualified
 /// ClassId matched no ingested module and the whole mixed-in surface
 /// (`ban`, `create_bot!`, `active_bots`, `from_avatar_token`) dispatched
-/// into nothing.
+/// into nothing. Shopify's customer-authentication controllers keep
+/// theirs one namespace up (`Auth::Concerns::RequireClient`, included
+/// as `Concerns::RequireClient`), so every ivar those concerns write
+/// (`@client_id`, `@redirect_uri`) read as `has no known type` in the
+/// includer.
 ///
 /// Rewrites the IR node rather than resolving at each consumer:
-/// `model_includes` (analyze), `splice_concerns_into_models` above, and
-/// every emitter that re-emits the line then read one qualified path.
-/// Narrow trigger — only when `<Model>::<Const>` actually names an
-/// ingested module, so apps whose concerns live at the top level
+/// `model_includes` / `controller_includes` (analyze),
+/// `splice_concerns_into_models` above, and every emitter that
+/// re-emits the line then read one qualified path. Narrow trigger —
+/// only when some `<scope>::<Const>` actually names an ingested module,
+/// so apps whose concerns live at the top level
 /// (`app/models/concerns/…`) are untouched.
-fn qualify_relative_model_includes(app: &mut App) {
-    use crate::dialect::ModelBodyItem;
+fn qualify_relative_includes(app: &mut App) {
+    use crate::dialect::{ControllerBodyItem, ModelBodyItem};
     use crate::expr::ExprNode;
 
     let known: std::collections::HashSet<crate::ident::ClassId> = app
@@ -3561,27 +3630,58 @@ fn qualify_relative_model_includes(app: &mut App) {
         .chain(app.concern_model_items.keys().cloned())
         .collect();
 
+    /// `path` as written inside `owner`, when a nesting scope above it
+    /// (innermost first) defines it. `None` leaves the node alone.
+    fn resolve(
+        owner: &str,
+        path: &[crate::ident::Symbol],
+        known: &std::collections::HashSet<crate::ident::ClassId>,
+    ) -> Option<Vec<crate::ident::Symbol>> {
+        let scope: Vec<&str> = owner.split("::").collect();
+        let tail = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+        for depth in (1..=scope.len()).rev() {
+            let candidate = format!("{}::{tail}", scope[..depth].join("::"));
+            if known.contains(&crate::ident::ClassId(crate::ident::Symbol::from(
+                candidate.as_str(),
+            ))) {
+                return Some(candidate.split("::").map(crate::ident::Symbol::from).collect());
+            }
+        }
+        None
+    }
+
+    fn rewrite_include(
+        expr: &mut crate::expr::Expr,
+        owner: &str,
+        known: &std::collections::HashSet<crate::ident::ClassId>,
+    ) {
+        let ExprNode::Send { recv: None, method, args, .. } = &mut *expr.node else {
+            return;
+        };
+        if method.as_str() != "include" {
+            return;
+        }
+        for arg in args.iter_mut() {
+            let ExprNode::Const { path } = &mut *arg.node else { continue };
+            if let Some(qualified) = resolve(owner, path, known) {
+                *path = qualified;
+            }
+        }
+    }
+
     for model in &mut app.models {
         let model_name = model.name.0.as_str().to_string();
         for item in &mut model.body {
             let ModelBodyItem::Unknown { expr, .. } = item else { continue };
-            let ExprNode::Send { recv: None, method, args, .. } = &mut *expr.node else {
-                continue;
-            };
-            if method.as_str() != "include" {
-                continue;
-            }
-            for arg in args.iter_mut() {
-                let ExprNode::Const { path } = &mut *arg.node else { continue };
-                let [segment] = &path[..] else { continue };
-                let qualified = crate::ident::ClassId(crate::ident::Symbol::from(format!(
-                    "{model_name}::{}",
-                    segment.as_str()
-                )));
-                if known.contains(&qualified) {
-                    *path = vec![crate::ident::Symbol::from(model_name.as_str()), segment.clone()];
-                }
-            }
+            rewrite_include(expr, &model_name, &known);
+        }
+    }
+
+    for controller in &mut app.controllers {
+        let name = controller.name.0.as_str().to_string();
+        for item in &mut controller.body {
+            let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
+            rewrite_include(expr, &name, &known);
         }
     }
 
@@ -3595,15 +3695,11 @@ fn qualify_relative_model_includes(app: &mut App) {
     for lc in &mut app.library_classes {
         let owner = lc.name.0.as_str().to_string();
         for inc in &mut lc.includes {
-            if inc.0.as_str().contains("::") {
-                continue;
-            }
-            let qualified = crate::ident::ClassId(crate::ident::Symbol::from(format!(
-                "{owner}::{}",
-                inc.0.as_str()
-            )));
-            if known.contains(&qualified) {
-                *inc = qualified;
+            let path: Vec<crate::ident::Symbol> =
+                inc.0.as_str().split("::").map(crate::ident::Symbol::from).collect();
+            if let Some(qualified) = resolve(&owner, &path, &known) {
+                let joined = qualified.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+                *inc = crate::ident::ClassId(crate::ident::Symbol::from(joined));
             }
         }
     }
@@ -6292,6 +6388,93 @@ fn unqualify_helper_constants(
     }
     e.node
         .for_each_child_mut(&mut |c| unqualify_helper_constants(c, qualified));
+}
+
+/// The block-taking methods an app adds to the routes DSL by prepending
+/// (or including) a module into `ActionDispatch::Routing::Mapper`:
+///
+/// ```ruby
+/// ActionDispatch::Routing::Mapper.prepend(Podding::RoutingAnnotations)
+/// # ... then in routes.rb:
+/// routing_method :main_pod do ... end
+/// ```
+///
+/// Read off the initializers and `lib/` the way Rails loads them: a
+/// top-level `Mapper.prepend(Const)`, with `Const` looked up among the
+/// ingested modules. The methods that take a block are the DSL scopes;
+/// the module's other methods are not.
+fn mapper_extension_block_methods<V: Vfs + ?Sized>(
+    app: &App,
+    vfs: &V,
+    dir: &Path,
+) -> std::collections::HashSet<String> {
+    const TARGET: &str = "Routing::Mapper";
+    let mut modules: Vec<String> = Vec::new();
+    for sub in ["config/initializers", "lib"] {
+        let d = dir.join(sub);
+        if !vfs.is_dir(&d) {
+            continue;
+        }
+        for entry in read_rb_files(vfs, &d).unwrap_or_default() {
+            let Ok(bytes) = vfs.read(&entry) else { continue };
+            // Cheap reject before parsing every initializer and lib file.
+            if !bytes.windows(TARGET.len()).any(|w| w == TARGET.as_bytes()) {
+                continue;
+            }
+            let file = entry.display().to_string();
+            let result = super::prism::parse(&bytes, &file);
+            let src = String::from_utf8_lossy(&bytes).into_owned();
+            let root = result.node();
+            let Some(program) = root.as_program_node() else { continue };
+            for stmt in initializer_statements(&program) {
+                let Some(call) = stmt.as_call_node() else { continue };
+                if !matches!(super::util::constant_id_str(&call.name()), "prepend" | "include") {
+                    continue;
+                }
+                let Some(recv) = call.receiver() else { continue };
+                if constant_text(&recv, &src)
+                    .map(|t| t.trim_start_matches("::") == format!("ActionDispatch::{TARGET}"))
+                    != Some(true)
+                {
+                    continue;
+                }
+                let Some(args) = call.arguments() else { continue };
+                for arg in args.arguments().iter() {
+                    if let Some(name) = constant_text(&arg, &src) {
+                        modules.push(name.trim_start_matches("::").to_string());
+                    }
+                }
+            }
+        }
+    }
+    // The DSL's own scoping macros, which the routes ingest handles
+    // natively; a same-named override in the extension wraps them and
+    // still means the native thing.
+    const NATIVE: [&str; 9] = [
+        "resources", "resource", "collection", "member", "namespace", "scope", "constraints",
+        "concern", "concerns",
+    ];
+    let mut out = std::collections::HashSet::new();
+    for name in modules {
+        // Top-level `Mapper.prepend(Const)` resolves `Const` by its
+        // written name; a suffix match would also pull in unrelated
+        // `Other::Const` modules that share only the final segment.
+        for lc in &app.library_classes {
+            let full = lc.name.0.as_str();
+            if full != name {
+                continue;
+            }
+            for m in &lc.methods {
+                if m.receiver == MethodReceiver::Instance
+                    && m.block_param.is_some()
+                    && !NATIVE.contains(&m.name.as_str())
+                {
+                    out.insert(m.name.as_str().to_string());
+                }
+            }
+        }
+    }
+    out
 }
 
 // Not left on the declaring base: an abstract base's `enum :state` reads through the subclass's own column reader, which has to know the mapping.

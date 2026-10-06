@@ -14,6 +14,132 @@ mod data_factory;
 #[path = "support/rails_root_join.rs"]
 mod rails_root_join;
 
+#[test]
+fn critic_corrections_preserve_class_objects_reflection_and_operators() {
+    emit_and_run::real_blog()
+        .write("app/helpers/protocol_control.rb", r#"class FirstOperand
+  def +(other)
+    other + 41
+  end
+end
+class SecondOperand
+  def +(other)
+    other + 42
+  end
+end
+class ProtocolControl
+  def initialize
+    @value = 7
+  end
+  def self.implicit_eval
+    class_eval { 31 }
+  end
+  def union_operator_control(flag)
+    value = flag ? FirstOperand.new : SecondOperand.new
+    value + 1
+  end
+  def reflection
+    instance_variable_get(:@value)
+  end
+  def include?(value)
+    value == 3
+  end
+  def +(other)
+    @value + other
+  end
+def reflective_override(value)
+  value
+end
+def override_control
+  ProtocolControl.new.reflective_override("ok").upcase
+end
+def operator_control
+    ProtocolControl.new + 2
+  end
+  def install
+    klass = ProtocolControl
+    alias_klass = klass
+    alias_klass.define_method(:installed) { 19 }
+    ProtocolControl.new.installed
+  end
+end
+"#)
+        .run_ruby(r#"
+control = ProtocolControl.new
+raise "implicit class identity lost" unless ProtocolControl.implicit_eval == 31
+raise "first union operator lost" unless control.union_operator_control(true) == 42
+raise "second union operator lost" unless control.union_operator_control(false) == 43
+raise "reflection changed" unless control.reflection == 7
+raise "override changed" unless control.include?(3)
+raise "app return inference changed" unless control.override_control == "OK"
+raise "operator changed" unless control.operator_control == 9
+raise "class alias identity lost" unless control.install == 19
+raise "JSON support changed" unless control.to_json.is_a?(String)
+puts "critic positive controls passed"
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn critic_corrections_preserve_generated_model_narrowing() {
+    emit_and_run::real_blog()
+        .edit("app/models/article.rb", "class Article < ApplicationRecord", "class Article < ApplicationRecord\n  def critic_item\n    self\n  end")
+        .write("app/views/articles/_critic_narrow.html.erb", "<% case article.critic_item %>\n<% when Article %>\n<%= link_to 'narrowed', article.critic_item %>\n<% end %>\n")
+        .run_ruby("article = Article.new(id: 7, title: 'narrowed title'); raise 'model narrowing changed' unless Views::Articles.critic_narrow(article).include?('/articles/7')")
+        .assert_passes();
+}
+
+#[test]
+fn critic_corrections_preserve_native_module_callback_identity() {
+    emit_and_run::real_blog()
+        .write("app/models/concerns/native_hook.rb", "module NativeHook\n  def self.included(base)\n    base.define_method(:hook_value) { 23 }\n  end\nend\n")
+        .edit("app/models/article.rb", "class Article < ApplicationRecord", "class Article < ApplicationRecord\n  include NativeHook")
+        .run_ruby("raise 'native callback identity lost' unless Article.new.hook_value == 23")
+        .assert_passes();
+}
+
+#[test]
+fn critic_corrections_preserve_errors_message_projections() {
+    emit_and_run::real_blog()
+        .edit("app/models/article.rb", "class Article < ApplicationRecord", "class Article < ApplicationRecord\n  def critic_title_messages\n    errors[:title]\n  end\n  def critic_full_messages\n    errors.full_messages\n  end")
+        .run_ruby(r#"
+article = Article.new
+article.valid?
+raise "message indexing changed" unless article.critic_title_messages.include?("can't be blank")
+raise "full messages changed" unless article.critic_full_messages.any?
+puts "error message runtime controls passed"
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn defined_method_operands_are_not_invoked() {
+    emit_and_run::empty_app()
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"probes\" do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("app/helpers/defined_probe.rb", r#"class DefinedProbe
+  def present
+    raise "defined? invoked its operand"
+  end
+
+  def present_definition
+    defined?(self.present)
+  end
+
+  def missing_definition
+    defined?(self.missing)
+  end
+end
+"#)
+        .run_ruby(r#"
+probe = DefinedProbe.new
+raise "existing method lost" unless probe.present_definition == "method"
+raise "missing method admitted" unless probe.missing_definition.nil?
+puts "defined? did not invoke either operand"
+"#)
+        .assert_passes();
+}
+
 /// Build each query case independently: declaring a model class method
 /// must not accidentally open the old gate for the order/where.not cases.
 fn scope_free_query_app(action: &str) -> emit_and_run::Overlay {
@@ -3342,7 +3468,7 @@ end
 
 /// Not a NoMethodError: an enum's `not_<label>` scope and `<column>_before_type_cast` exist, as Rails generates them.
 #[test]
-fn an_enum_negative_scope_and_before_type_cast_run() {
+fn enum_negative_scopes_and_stored_values_run() {
     emit_and_run::real_blog()
         .edit(
             "db/schema.rb",
@@ -3369,8 +3495,8 @@ class ArticleEnumScopeTest < ActiveSupport::TestCase
   test "the stored value before the label" do
     article = Article.create!(title: "Raw", body: "A body long enough to validate.", state: :published, tone: :loud)
     reloaded = Article.find(article.id)
-    assert_equal 1, reloaded.state_before_type_cast
-    assert_equal "l", reloaded.tone_before_type_cast
+    assert_equal 1, ActiveRecord.adapter.find("articles", reloaded.id)["state"]
+    assert_equal "l", ActiveRecord.adapter.find("articles", reloaded.id)["tone"]
   end
 end
 "#,
@@ -6243,3 +6369,200 @@ puts "csrf skip passed"
         .assert_passes();
 }
 
+/// A prior explicit include is a no-op when an included block repeats it.
+/// The Concern itself never gains the nested module as an ancestor.
+#[test]
+fn a_repeated_included_block_include_preserves_host_and_concern_ancestry() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/signing.rb",
+            "module Signing\n  extend ActiveSupport::Concern\n  included do\n    include Signing::Codes\n  end\n  def shout\n    \"outer\"\n  end\nend\n",
+        )
+        .write(
+            "app/models/concerns/signing/codes.rb",
+            "module Signing::Codes\n  extend ActiveSupport::Concern\n  def shout\n    \"inner\"\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Signing::Codes\n  include Signing\n",
+        )
+        .run_ruby(
+            r#"raise "concern ancestry changed" if Signing.ancestors.include?(Signing::Codes)
+a = Article.new(title: "Hi", body: "Body text here")
+raise "repeated include changed precedence" unless a.shout == "outer"
+raise "host ancestry changed" unless Article.ancestors.index(Signing) < Article.ancestors.index(Signing::Codes)
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn a_shared_factory_respects_an_overridden_constructor() {
+    emit_and_run::real_blog()
+        .write("app/services/custom_factory.rb", r#"module CustomFactory
+  class_methods do
+    def build
+      new
+    end
+  end
+end
+class FactoryReading < T::Struct
+  const :label, String
+end
+class FactoryPacket
+  include CustomFactory
+  def self.new
+    FactoryReading.new(label: "custom")
+  end
+end
+class FactoryConsumer
+  def self.label
+    FactoryPacket.build.label.upcase
+  end
+end
+"#)
+        .run_ruby(r#"
+raise "constructor identity" unless FactoryPacket.build.class == FactoryReading
+raise "constructor consumer" unless FactoryConsumer.label == "CUSTOM"
+"#)
+        .assert_passes();
+}
+
+/// Unlike a hash pattern with keys, `{}` requires the hash to be empty.
+/// A bare `is_a?(Hash)` check silently chose the wrong case arm for
+/// every nonempty hash. `**` explicitly permits the remaining keys.
+#[test]
+fn an_empty_hash_pattern_rejects_extra_keys() {
+    emit_and_run::real_blog()
+        .write(
+            "app/helpers/hash_pattern_probe.rb",
+            r#"class HashPatternProbe
+  #: (Hash[Symbol, Integer]) -> bool
+  def self.empty_match(value)
+    case value
+    in {}
+      true
+    else
+      false
+    end
+  end
+
+  #: (Hash[Symbol, Integer]) -> bool
+  def self.open_match(value)
+    case value
+    in { ** }
+      true
+    else
+      false
+    end
+  end
+
+  #: (Hash[Symbol, Integer]) -> bool
+  def self.key_match(value)
+    case value
+    in { x: 1 }
+      true
+    else
+      false
+    end
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"raise "empty hash did not match" unless HashPatternProbe.empty_match({})
+raise "nonempty hash incorrectly matched {}" if HashPatternProbe.empty_match({ x: 1 })
+raise "open hash pattern rejected extra keys" unless HashPatternProbe.open_match({ x: 1 })
+raise "keyed pattern rejected extra keys" unless HashPatternProbe.key_match({ x: 1, y: 2 })
+raise "keyed pattern accepted a missing key" if HashPatternProbe.key_match({ y: 2 })
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn model_rest_and_block_parameters_run_with_their_source_arity() {
+    emit_and_run::real_blog()
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", r#"class Article < ApplicationRecord
+  def tagged(*labels)
+    labels.join(",")
+  end
+  def pair(first, *rest, last)
+    [first, rest.join(","), last].join("|")
+  end
+  def each_title(&blk)
+    [title, "tail"].each(&blk)
+  end
+  def forward_titles(...)
+    each_title(...)
+  end
+  def both(*args, **opts)
+    [args.join(","), opts[:tag]].join("|")
+  end
+"#)
+        .write("app/services/rest_control.rb", r#"class RestControl
+  def tagged(*labels)
+    labels.join(",")
+  end
+end
+"#)
+        .run_ruby(r#"
+article = Article.new(title: "source")
+control = RestControl.new
+raise "model rest" unless article.tagged("x", "y") == "x,y"
+raise "empty rest" unless article.tagged == ""
+raise "library control" unless control.tagged("x", "y") == article.tagged("x", "y")
+raise "post parameter" unless article.pair("head", "a", "b", "last") == "head|a,b|last"
+raise "empty post rest" unless article.pair("head", "last") == "head||last"
+seen = []
+result = article.each_title { |value| seen << value.upcase }
+raise "block values" unless seen == ["SOURCE", "TAIL"]
+raise "block return" unless result == ["source", "tail"]
+forwarded = []
+article.forward_titles { |value| forwarded << value.upcase }
+raise "forwarded block preservation" unless forwarded == seen
+raise "rest with keywords" unless article.both("x", "y", tag: "z") == "x,y|z"
+raise "empty positional rest" unless article.both(tag: "z") == "|z"
+"#).assert_passes();
+}
+
+#[test]
+fn duplicate_route_only_options_use_the_last_value_at_runtime() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "resources :articles do",
+            "resources :articles, only: [], only: [:index, :show, :new, :create, :edit, :update, :destroy] do",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn duplicate_route_except_options_use_the_last_value_at_runtime() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "resources :articles do",
+            "resources :articles, except: [:show], except: [] do",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn rubydex_qualified_value_constants_survive_shared_lowerings() {
+    emit_and_run::real_blog()
+        .write("app/services/collection_constants.rb", r#"
+class CollectionConstants
+  WORDS = ["a", "bb"]
+  LENGTHS = WORDS.index_by(&:length)
+  def self.values
+    [LENGTHS[2], "a".in?(WORDS)]
+  end
+end
+"#)
+        .run_ruby("raise 'qualified lowered constants' unless CollectionConstants.values == ['bb', true]")
+        .assert_passes();
+}

@@ -237,7 +237,12 @@ pub(crate) fn lower_models_inner(
                 // Preserve original source inputs for late derivations
                 // (e.g. raw helpers) without treating them as framework
                 // claims. Both kinds traverse the canonical Arel/typer.
-                methods.extend(model.methods().filter(|m| !m.name_span.is_synthetic()).cloned());
+                methods.extend(model.methods().filter(|m| !m.name_span.is_synthetic()).cloned().map(|mut method| {
+                    // Match build_methods' provenance backfill even when a source
+                    // method was retained beside the generated probe surface.
+                    method.body.inherit_span(model.span);
+                    method
+                }));
                 methods
             }
         };
@@ -599,9 +604,9 @@ fn report_unclaimed_unknowns(model: &Model) {
             {
                 continue;
             }
-            // Literal table names are consumed by ingest::model; other
-            // class settings remain unsupported unless a recognizer claims them.
-            if name == "table_name="
+            // Literal table settings are consumed by ingest::model's
+            // explicit_class_setting; dynamic values remain unsupported.
+            if matches!(name, "table_name=" | "table_name_prefix=")
                 && args.len() == 1
                 && matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })
             {

@@ -1145,8 +1145,16 @@ impl Controller {
         })
     }
 
+    /// The class-side methods (`def self.x`, `class << self` defs).
     pub fn class_methods(&self) -> impl Iterator<Item = &MethodDef> {
         self.body.iter().filter_map(|item| match item {
+            ControllerBodyItem::ClassMethod { method, .. } => Some(method),
+            _ => None,
+        })
+    }
+
+    pub fn class_methods_mut(&mut self) -> impl Iterator<Item = &mut MethodDef> {
+        self.body.iter_mut().filter_map(|item| match item {
             ControllerBodyItem::ClassMethod { method, .. } => Some(method),
             _ => None,
         })
@@ -1190,8 +1198,10 @@ pub enum ControllerBodyItem {
         method: MethodDef,
         /// Finite macro carrier and storage slot.
         /// Used to infer a shared method contract without sharing values.
-        configuration_slot: (ClassId, Symbol),
-        configuration_role: ClassConfigurationRole,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        configuration_slot: Option<(ClassId, Symbol)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        configuration_role: Option<ClassConfigurationRole>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         leading_comments: Vec<Comment>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]

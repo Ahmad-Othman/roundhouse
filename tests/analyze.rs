@@ -124,22 +124,20 @@ fn params_resolves_via_implicit_self_in_action_body() {
     assert_eq!(method.as_str(), "[]");
     let params_recv = recv.as_ref().expect("bracket has a receiver");
 
-    // `params` (implicit self Send) — now resolved via ctx.self_ty to Hash<Sym, Str>.
+    // `params` (implicit self Send) — now resolved via ctx.self_ty to ActionController::Parameters.
     match params_recv.ty.as_ref().expect("params ty populated") {
-        Ty::Hash { key, value } => {
-            assert!(matches!(**key, Ty::Sym));
-            assert!(matches!(**value, Ty::Str));
-        }
-        other => panic!("expected Hash<Sym, Str>, got {other:?}"),
+        Ty::Class { id, .. } => assert_eq!(id.0.as_str(), "ActionController::Parameters"),
+        other => panic!("expected ActionController::Parameters, got {other:?}"),
     }
 
-    // `params[:id]` resolves to Union<Str, Nil>.
+    // `params[:id]` resolves to the element union: a String among
+    // Array / Parameters arms, or nil.
     match bracket_send.ty.as_ref().expect("bracket ty populated") {
         Ty::Union { variants } => {
             assert!(variants.iter().any(|v| matches!(v, Ty::Str)));
             assert!(variants.iter().any(|v| matches!(v, Ty::Nil)));
         }
-        other => panic!("expected Union<Str, Nil>, got {other:?}"),
+        other => panic!("expected the params element union, got {other:?}"),
     }
 }
 

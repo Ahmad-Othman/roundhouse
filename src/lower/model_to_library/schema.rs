@@ -98,7 +98,6 @@ pub(super) fn push_schema_methods(
     for col in &table.columns {
         methods.push(synth_attr_reader(owner, col, model));
         if model.enums.contains_key(&col.name) {
-            methods.push(synth_before_type_cast(owner, col));
             methods.push(synth_enum_storage_writer(owner, col));
         }
         if is_generic_json_col(col, model) {
@@ -1046,28 +1045,6 @@ fn json_dump_value(col: &Column, value: Expr) -> Expr {
         ),
         super::ty_of_column_slot(col),
     )
-}
-
-// Not the assigned input: Rails answers the label an unsaved write was given, but a saved or loaded record answers the stored value, which is what this holds.
-fn synth_before_type_cast(owner: &ClassId, col: &Column) -> MethodDef {
-    let slot = super::ty_of_column_slot(col);
-    MethodDef {
-        visibility: crate::dialect::MethodVisibility::Public,
-        unsupported_formals: None,
-        has_anonymous_block: false,
-        name_span: crate::span::Span::synthetic(),
-        name: Symbol::from(format!("{}_before_type_cast", col.name.as_str())),
-        receiver: MethodReceiver::Instance,
-        params: Vec::new(),
-        body: with_ty(Expr::new(Span::synthetic(), ExprNode::Ivar { name: col_storage_name(col) }), slot.clone()),
-        signature: Some(fn_sig(vec![], slot)),
-        effects: EffectSet::default(),
-        enclosing_class: Some(owner.0.clone()),
-        kind: AccessorKind::Method,
-        is_async: false,
-        mutates_self: false,
-        block_param: None,
-    }
 }
 
 /// True for a stored-text column with native Date or Time accessors.
@@ -2416,6 +2393,20 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
         let nullable = matches!(super::ty_of_column_slot(col), Ty::Union { .. })
             && schema_default.is_none();
         let default = schema_default.unwrap_or_else(|| default_literal_for_ty(&col_ty));
+        // Defaults are stored database values, not assignments through
+        // the enum type. In particular, a base constructor must not
+        // dispatch its default through a child's different enum writer.
+        // Only explicit input goes through the public writer.
+        if crate::dialect::enum_reads_label(model, &col.name) {
+            let slot_ty = super::ty_of_column_slot(col);
+            let raw_default = if nullable { nil_lit() } else { default };
+            stmts.push(with_ty(Expr::new(Span::synthetic(), ExprNode::Assign {
+                target: LValue::Ivar { name: col_storage_name(col) },
+                value: with_ty(raw_default, slot_ty.clone()),
+            }), slot_ty));
+            stmts.push(given_value_assign(col, &attrs, enum_label_cast(model, col, lookup.clone()).unwrap_or_else(|| Expr::new(Span::synthetic(), ExprNode::Cast { value: lookup, target_ty: super::ty_of_column_slot(col) }))));
+            continue;
+        }
         // is_id_column reference retained as a feature flag for
         // future per-column override hooks; today every column flows
         // through the same default-lookup shape.
