@@ -1072,10 +1072,13 @@ impl<'a> BodyTyper<'a> {
                 // Kernel.Array is a container even for scalar params.
                 // App methods (including inherited/included overrides)
                 // have already dispatched above and must win.
+                // RBS declares it `(untyped) -> Array[untyped]`; the
+                // argument says more.
                 if recv.is_none() && method.as_str() == "Array" && args.len() == 1
-                    && block.is_none() && matches!(dispatched, Ty::Var { .. })
+                    && block.is_none() && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
                 {
-                    return Ty::Array { elem: Box::new(unknown()) };
+                    let elem = args[0].ty.as_ref().and_then(kernel_array_elem);
+                    return Ty::Array { elem: Box::new(elem.unwrap_or_else(unknown)) };
                 }
                 dispatched
             }
@@ -1817,6 +1820,23 @@ fn qualify_resolved_path(path: &mut Vec<Symbol>, resolved: &ClassId) {
     }
 }
 
+/// The element type of `Kernel#Array(arg)`: an Array stays itself, nil
+/// is empty, anything else is wrapped. None when the argument is not
+/// known well enough to say (a Hash becomes pairs; not modeled).
+fn kernel_array_elem(arg: &Ty) -> Option<Ty> {
+    match arg {
+        Ty::Array { elem } => Some((**elem).clone()),
+        Ty::Nil => Some(Ty::Bottom),
+        Ty::Union { variants } => variants
+            .iter()
+            .map(kernel_array_elem)
+            .collect::<Option<Vec<_>>>()
+            .map(|elems| elems.into_iter().reduce(union_of).unwrap_or(Ty::Bottom)),
+        Ty::Var { .. } | Ty::Untyped | Ty::Hash { .. } => None,
+        scalar => Some(scalar.clone()),
+    }
+}
+
 pub(super) fn unknown() -> Ty {
     Ty::Var { var: TyVar(0) }
 }
@@ -2230,6 +2250,33 @@ mod tests {
             let mut expr = send(None, "Array", vec![nil_lit()]);
             assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expr, &ctx), Ty::Str);
         }
+    }
+
+    #[test]
+    fn kernel_array_keeps_the_argument_element_type() {
+        let array_of = |elem: Ty| Ty::Array { elem: Box::new(elem) };
+        for (arg, elem) in [
+            (array_of(Ty::Str), Ty::Str),
+            (Ty::Sym, Ty::Sym),
+            (Ty::Union { variants: vec![array_of(Ty::Sym), Ty::Sym, Ty::Nil] }, Ty::Sym),
+        ] {
+            let ctx = ctx_with_local("x", arg);
+            let mut expr = send(None, "Array", vec![var("x")]);
+            assert_eq!(BodyTyper::new(&empty_classes()).analyze_expr(&mut expr, &ctx), array_of(elem));
+        }
+    }
+
+    #[test]
+    fn array_plus_onto_an_unknown_element_takes_the_argument_element() {
+        let array_of = |elem: Ty| Ty::Array { elem: Box::new(elem) };
+        let mut ctx = ctx_with_local("empty", array_of(Ty::Var { var: TyVar(0) }));
+        ctx.local_bindings.insert(Symbol::from("strs"), array_of(Ty::Str));
+        ctx.local_bindings.insert(Symbol::from("syms"), array_of(Ty::Sym));
+        let mut expr = send(Some(var("empty")), "+", vec![var("strs")]);
+        assert_eq!(BodyTyper::new(&empty_classes()).analyze_expr(&mut expr, &ctx), array_of(Ty::Str));
+        // A known receiver element still answers for the result.
+        let mut expr = send(Some(var("strs")), "+", vec![var("syms")]);
+        assert_eq!(BodyTyper::new(&empty_classes()).analyze_expr(&mut expr, &ctx), array_of(Ty::Str));
     }
 
     #[test]

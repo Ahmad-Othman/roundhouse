@@ -122,6 +122,40 @@ fn concern_class_attribute_macros_run_at_class_load() {
     assert!(run.stdout.contains("class_attribute contract passed"));
 }
 
+/// The same Concern types without a diagnostic of any severity: the
+/// macro parameters from the class-body calls (a subclass's included),
+/// the helper's keywords through `**options`, `Array(...)`'s elements,
+/// and the attribute from the values its methods store.
+#[test]
+fn concern_class_attribute_macros_are_fully_typed() {
+    let controllers = [
+        ("probe_controller.rb", "class ProbeController < ApplicationController\n  include PreloadableConfigurationConcern\n  preload_site_configs %w[a b], only: :show\nend\n"),
+        ("own_controller.rb", "class OwnController < ProbeController\n  preload_feature_flags %w[f], only: %i[index show]\nend\n"),
+        ("inherit_controller.rb", "class InheritController < ProbeController\n  def show\n    render plain: self.class._preload_definitions.length.to_s\n  end\nend\n"),
+    ];
+    let tree = [
+        ("app/controllers/concerns/preloadable_configuration_concern.rb".to_string(), class_attribute::CONCERN.to_string()),
+        ("app/controllers/application_controller.rb".to_string(), "class ApplicationController < ActionController::Base\nend\n".to_string()),
+    ]
+    .into_iter()
+    .chain(controllers.iter().map(|(f, s)| (format!("app/controllers/{f}"), s.to_string())))
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
+    .collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let _ = roundhouse::session::analyze_and_lower(&mut app);
+    let concern: Vec<String> = roundhouse::analyze::diagnose(&app)
+        .into_iter()
+        .filter(|d| {
+            (d.span.file.0 as usize)
+                .checked_sub(1)
+                .and_then(|i| app.sources.get(i))
+                .is_some_and(|f| f.path.ends_with("preloadable_configuration_concern.rb"))
+        })
+        .map(|d| d.message)
+        .collect();
+    assert!(concern.is_empty(), "concern diagnostics: {concern:#?}");
+}
+
 /// The harness itself: the unedited blog emits and its controller
 /// suite, which renders every page, passes.
 /// `reorder`, `skip_preloading!` and `preload_associations`, the three
