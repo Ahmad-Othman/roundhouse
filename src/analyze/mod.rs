@@ -963,7 +963,9 @@ impl Analyzer {
         // inside ArticleResource.to_h), so each absorb pass must
         // unify WithViews again — Production unify would drop the
         // view sites, and skipping unify leaves nested initialize
-        // params as Var.
+        // params as Var. After helper returns absorb those params,
+        // views are typed once more so template calls see the
+        // harvested helper surface rather than leftover untyped.
         let production_sig = prev_sig.clone();
         let mut production_view_params = None;
         for round in 0..FIXPOINT_CAP {
@@ -1043,7 +1045,41 @@ impl Analyzer {
                 }
                 absorb_sig = self.capture_inference_sig();
             }
+        } else {
+            // View unify did not move production signatures, but helper
+            // *bodies* still need a pass against view-inferred params
+            // (`highlight_searched_content`'s `content` is only called
+            // from templates) before views are restamped.
+            crate::timings::phase("typing passes (helpers after view unify)", || {
+                self.run_typing_passes(
+                    app,
+                    &dynamic_render_ivars,
+                    &existing_view_names,
+                    &module_methods,
+                    &module_includes,
+                    &parent_link_by_name,
+                    false,
+                )
+            });
+            self.harvest_returns_to_registry(app, true);
         }
+        // Wave 12 types views once against production-only helper
+        // returns, then unifies helper params from those sites. Helper
+        // returns therefore settle only after the absorb/harvest above.
+        // Stamp view trees again so template Sends are not leftover
+        // `gradual_untyped` against the pre-unify helper registry
+        // (Writebook `leafables/show` `highlight_searched_content`).
+        crate::timings::phase("typing passes (views after helper harvest)", || {
+            self.run_typing_passes(
+                app,
+                &dynamic_render_ivars,
+                &existing_view_names,
+                &module_methods,
+                &module_includes,
+                &parent_link_by_name,
+                true,
+            )
+        });
         // Effects are a function of the converged typed trees, not of
         // the fixpoint. Collecting inside every typing round walked
         // the same bodies two or three times per round for no harvest
