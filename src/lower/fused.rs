@@ -13,16 +13,19 @@
 //! extra app-level context, diagnostics, or a later predecessor stay
 //! sequential.
 //!
-//! Five walks, split by ordering constraints: the early group runs
+//! Six walks, split by ordering constraints: the early group runs
 //! before any pass that mutates argument lists; the context group sits
-//! after mocha; the narrow and mid groups sit after `tag_builder` and
-//! before `kwsplat`; the late group runs after `kwsplat` (and after
-//! `tag_builder`, which `capture_inline` depends on).
+//! after mocha (`try_guard` last, so minted method names are not fed
+//! back into this walk); the pre-tag group sits after the STI
+//! predecessor cluster and before `tag_builder`; the narrow and mid
+//! groups sit after `tag_builder` and before `kwsplat`; the late group
+//! runs after `kwsplat` (and after `tag_builder`, which `capture_inline`
+//! depends on).
 
 use crate::app::App;
 use crate::expr::Expr;
 use crate::ident::Symbol;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 pub fn apply_fused_independent_rewrites(app: &mut App) {
     let skip_exclude = super::exclude_predicate::app_defines_exclude(app);
@@ -63,32 +66,175 @@ pub fn apply_fused_late_rewrites(app: &mut App) {
 /// Context-heavy independent send rewrites that still do a full tree
 /// walk each: collect per-pass tables once, then one hook walk, one
 /// test walk, and one view walk matching the original surfaces.
+/// `try_guard` is last: it mints arbitrary method names from a literal
+/// symbol, so a later fused rewrite that keyed on those names would see
+/// new children the sequential order never walked. `attribute_aliases`
+/// still runs after this walk for that reason.
 pub fn apply_fused_context_rewrites(app: &mut App) {
     let formats = std::mem::take(&mut app.time_formats);
     let mut gid_models: BTreeSet<Symbol> = BTreeSet::new();
     let materialized = super::assoc_pluck::materialized_assoc_names(app);
+    let try_definers = super::try_guard::collect_definers(app);
+    let try_parents = super::try_guard::collect_parents(app);
 
     super::for_each_hook_body(app, &mut |body| {
         walk_postorder(body, &mut |e| {
             super::time_current::rewrite_node(e, &formats);
             super::global_id_locate::rewrite_node(e, &mut gid_models);
             super::assoc_pluck::rewrite_node(e, &materialized);
+            super::try_guard::rewrite_node(e, &try_definers, &try_parents);
         });
     });
     super::for_each_test_body(app, &mut |body| {
         walk_postorder(body, &mut |e| {
             super::time_current::rewrite_node(e, &formats);
             super::webmock::rewrite_node(e);
+            super::try_guard::rewrite_node(e, &try_definers, &try_parents);
         });
     });
+    // `try_guard` also rewrites test constants and inner-class methods,
+    // which `for_each_test_body` does not reach. The other context
+    // rewrites never walked those surfaces.
+    for tm in &mut app.test_modules {
+        for (_, value) in &mut tm.constants {
+            walk_postorder(value, &mut |e| {
+                super::try_guard::rewrite_node(e, &try_definers, &try_parents);
+            });
+        }
+        for ic in &mut tm.inner_classes {
+            for m in &mut ic.methods {
+                walk_postorder(&mut m.body, &mut |e| {
+                    super::try_guard::rewrite_node(e, &try_definers, &try_parents);
+                });
+            }
+        }
+    }
     for view in &mut app.views {
         walk_postorder(&mut view.body, &mut |e| {
             super::global_id_locate::rewrite_node(e, &mut gid_models);
+            super::try_guard::rewrite_node(e, &try_definers, &try_parents);
         });
     }
 
     app.time_formats = formats;
     app.global_id_locate_models.extend(gid_models);
+}
+
+/// Independent rewrites after the STI predecessor cluster and before
+/// `tag_builder`. Surfaces match the original per-pass walks:
+/// `attribute_aliases` starts with an in-model walk then hooks/tests/views;
+/// `sti_is_a` is hooks+views; job/cookie tests are tests only;
+/// `controller_class_render` is hooks plus per-test attachment locals;
+/// `sum_symbol` is model methods/unknown last so its new `to_a`/`sum`
+/// children are not fed to the other fused rewrites.
+pub fn apply_fused_pre_tag_rewrites(app: &mut App) {
+    let models: HashSet<String> = app
+        .models
+        .iter()
+        .map(|m| m.name.0.as_str().to_string())
+        .collect();
+    let sti_names = super::sti_is_a::subclass_type_names(app);
+    let contracts = super::controller_class_render::call_contracts(app);
+    let none = HashSet::new();
+
+    for model in &mut app.models {
+        for item in &mut model.body {
+            use crate::dialect::{Association, ModelBodyItem};
+            match item {
+                ModelBodyItem::Method { method, .. } => {
+                    walk_postorder(&mut method.body, &mut |e| {
+                        super::attribute_aliases::rewrite_node(e, &models, true);
+                    });
+                }
+                ModelBodyItem::Scope { scope, .. } => {
+                    walk_postorder(&mut scope.body, &mut |e| {
+                        super::attribute_aliases::rewrite_node(e, &models, true);
+                    });
+                }
+                ModelBodyItem::Callback { callback, .. } => {
+                    if let Some(cond) = &mut callback.condition {
+                        walk_postorder(cond, &mut |e| {
+                            super::attribute_aliases::rewrite_node(e, &models, true);
+                        });
+                    }
+                }
+                ModelBodyItem::Unknown { expr, .. } => {
+                    walk_postorder(expr, &mut |e| {
+                        super::attribute_aliases::rewrite_node(e, &models, true);
+                    });
+                }
+                ModelBodyItem::Association {
+                    assoc: Association::HasMany { extension, .. },
+                    ..
+                } => {
+                    for m in extension.iter_mut() {
+                        walk_postorder(&mut m.body, &mut |e| {
+                            super::attribute_aliases::rewrite_node(e, &models, true);
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    super::for_each_hook_body(app, &mut |body| {
+        walk_postorder(body, &mut |e| {
+            super::attribute_aliases::rewrite_node(e, &models, false);
+            super::sti_is_a::rewrite_node(e, &sti_names);
+            super::controller_class_render::rewrite_node(e, &contracts, &none);
+        });
+    });
+    for view in &mut app.views {
+        walk_postorder(&mut view.body, &mut |e| {
+            super::attribute_aliases::rewrite_node(e, &models, false);
+            super::sti_is_a::rewrite_node(e, &sti_names);
+        });
+    }
+    for tm in &mut app.test_modules {
+        let builders = super::controller_class_render::attachment_builders(&tm.helpers);
+        if let Some(setup) = &mut tm.setup {
+            let locals = super::controller_class_render::attachment_locals(setup, &builders);
+            walk_postorder(setup, &mut |e| {
+                super::attribute_aliases::rewrite_node(e, &models, false);
+                super::job_test_only::rewrite_node(e);
+                super::test_cookie_jar::rewrite_node(e);
+                super::controller_class_render::rewrite_node(e, &contracts, &locals);
+            });
+        }
+        for t in &mut tm.tests {
+            let locals = super::controller_class_render::attachment_locals(&t.body, &builders);
+            walk_postorder(&mut t.body, &mut |e| {
+                super::attribute_aliases::rewrite_node(e, &models, false);
+                super::job_test_only::rewrite_node(e);
+                super::test_cookie_jar::rewrite_node(e);
+                super::controller_class_render::rewrite_node(e, &contracts, &locals);
+            });
+        }
+        for h in &mut tm.helpers {
+            let locals = super::controller_class_render::attachment_locals(&h.body, &builders);
+            walk_postorder(&mut h.body, &mut |e| {
+                super::attribute_aliases::rewrite_node(e, &models, false);
+                super::job_test_only::rewrite_node(e);
+                super::test_cookie_jar::rewrite_node(e);
+                super::controller_class_render::rewrite_node(e, &contracts, &locals);
+            });
+        }
+    }
+
+    for model in &mut app.models {
+        for item in &mut model.body {
+            match item {
+                crate::dialect::ModelBodyItem::Method { method, .. } => {
+                    walk_postorder(&mut method.body, &mut super::sum_symbol::rewrite_node);
+                }
+                crate::dialect::ModelBodyItem::Unknown { expr, .. } => {
+                    walk_postorder(expr, &mut super::sum_symbol::rewrite_node);
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Controller/library/model-only independent rewrites. Surfaces match

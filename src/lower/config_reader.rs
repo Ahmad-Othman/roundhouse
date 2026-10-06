@@ -117,9 +117,11 @@ fn rewrite_fused(
     if let Some(lifted) = lifted {
         unwrap_config_tap(expr);
         if rewrite_write_here(expr, lifted) {
+            super::symbolize_keys::rewrite_node(expr);
             return;
         }
         if rewrite_here(expr, lifted) {
+            super::symbolize_keys::rewrite_node(expr);
             return;
         }
     }
@@ -129,6 +131,12 @@ fn rewrite_fused(
         rewrite_cable_node(expr);
         rewrite_credentials_node(expr);
     }
+    // After `config_reader`: a lifted group reader is the receiver
+    // `symbolize_keys` keys on, and that receiver does not exist until
+    // this walk peels the `config` chain. Post-order on the parent
+    // (`hash.symbolize_keys`) sees the rewritten, typed child. Tests
+    // never ran `symbolize_keys`, so they stay on `rewrite` above.
+    super::symbolize_keys::rewrite_node(expr);
 }
 
 /// The type a reader answers: its body's, or its last statement's when

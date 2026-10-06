@@ -362,10 +362,17 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // ordering constraints.
     ("global_id_locate", &[]),
     ("assoc_pluck", &[]),
+    // Last in the fused context walk. Mints arbitrary method names from
+    // a literal symbol; those new `If`/`is_a?` children must not be
+    // walked by a later fused rewrite that keys on the minted name
+    // (`attribute_aliases` keys on `read_attribute`). Extra test
+    // constant / inner-class surfaces stay try_guard-only.
     ("try_guard", &[]),
-    // `record.read_attribute(:x)` → `record[:x]`; a rename of a name no other pass produces or consumes.
-    ("attribute_aliases", &[]),
     // After time_calendar (fused earlier): `t.all_month` becomes the Range literal this splits out.
+    // Stays sequential: rewrite plus a diagnostic walk that tracks
+    // `where`/`find_by` condition position. Fusing the rewrite would
+    // still leave the ledger walk, and the ledger must not see later
+    // fused output.
     ("where_range_split", &["time_calendar"]),
     // `Rooms::Open.count` → `Room.where(type: "Rooms::Open").count`.
     // Produces a `where` at a model Const root, which is vocabulary
@@ -382,14 +389,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `defined?(@x)` → `@x_defined`, with the flag set beside every
     // assignment to `@x`. Reads a `defined?` send no other pass
     // produces and writes an ivar name no other pass reads, so no
-    // ordering constraints.
+    // ordering constraints. Class-level collect-then-rewrite, not a
+    // simple post-order send rewrite.
     ("defined_ivar_memo", &[]),
-    // `room.is_a?(Rooms::Open)` → the inheritance-column read it stands
-    // for. Beside `sti_scope` because it asks that pass the same
-    // question (which classes are STI subclasses of which base); it
-    // reads a name that pass does not produce and writes a `type`
-    // comparison it does not consume, so no ordering constraint.
-    ("sti_is_a", &[]),
     // Folds an STI subclass's callback declarations into hook methods
     // on that subclass. Reads `unknown_calls` on a library class and
     // writes methods on the same class; no other pass produces or
@@ -397,6 +399,16 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `sti_scope` because both exist for the same reason — an STI
     // subclass is not a Model, so the model-keyed machinery skips it.
     ("sti_subclass_callbacks", &[]),
+    // Independent rewrites after the STI predecessor cluster, before
+    // `tag_builder`: one fused walk in `fused::apply_fused_pre_tag_rewrites`.
+    // `record.read_attribute(:x)` → `record[:x]`; a rename of a name no other pass produces or consumes.
+    ("attribute_aliases", &[]),
+    // `room.is_a?(Rooms::Open)` → the inheritance-column read it stands
+    // for. Beside `sti_scope` because it asks that pass the same
+    // question (which classes are STI subclasses of which base); it
+    // reads a name that pass does not produce and writes a `type`
+    // comparison it does not consume, so no ordering constraint.
+    ("sti_is_a", &[]),
     // `only: <JobClass>` → `only: ["JobClass"]` in test bodies. Reads a
     // Const literal nothing else produces and writes a String array
     // nothing else reads, so no ordering constraints.
@@ -408,13 +420,19 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("controller_class_render", &[]),
     // `sum(:col)` → block form; no ordering constraints (rewrites a
     // literal-symbol arg shape no other pass produces or consumes).
+    // Last in the fused pre-tag walk so new `to_a`/`sum` children are
+    // not fed to the other fused rewrites.
     ("sum_symbol", &[]),
     // `tag.div(…)` → the HTML string it builds. BEFORE `html_safe`
     // (whose fold would erase the `.html_safe` marker it reads on
     // content, and which must SEE the marker this pass writes so the
     // enclosing helper registers as safe) and before `capture_inline`
     // (which flattens the `capture { … }` this pass synthesizes for the
-    // block form).
+    // block form). Stays sequential: the synthesized `capture` /
+    // `.html_safe` subtrees must be walked by those later passes, and
+    // fusing with mid would skip mid rewrites on those new children.
+    // Must not move after `kwsplat` (would change kwsplat's view of
+    // argument lists).
     ("tag_builder", &[]),
     // Independent rewrites after tag_builder, before kwsplat: one fused
     // controller/library/model walk in `fused::apply_fused_narrow_rewrites`
@@ -479,7 +497,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Symbols. Runs AFTER `config_reader` because the receiver that
     // makes it fire — a lifted config group reader — does not exist
     // until that pass has rewritten the `config` chain and stamped its
-    // type.
+    // type. Folded last into that pass's hook+view walk.
     ("symbolize_keys", &["config_reader"]),
     // No runs_after: it reads the ingested enum tables and rewrites only the key argument.
     ("enum_mapping_keys", &[]),
@@ -487,6 +505,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // callee declares explicit keywords. Reads the arg count against the
     // callee's signature, so it must see the argument list as ingested —
     // before any pass that appends or drops a positional argument.
+    // Stays sequential: expanding a splat produces new keyword-arg
+    // children that `send_file` (in the late fused walk) must still
+    // see. Fusing with late would skip those. Must stay after
+    // `tag_builder` so it does not observe tag-builder-rewritten args.
     ("kwsplat", &[]),
     // Independent late send rewrites: one fused tree walk in
     // `fused::apply_fused_late_rewrites`. After `kwsplat` so argument
@@ -785,10 +807,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("webmock");
     ran!("global_id_locate");
     ran!("assoc_pluck");
-    try_guard::apply_try_guard_lowering(app);
     ran!("try_guard");
-    attribute_aliases::apply_attribute_alias_lowering(app);
-    ran!("attribute_aliases");
     diags.extend(where_range_split::apply_where_range_split(app));
     ran!("where_range_split");
     sti_scope::apply_sti_scope_lowering(app);
@@ -797,17 +816,16 @@ pub fn apply_post_analyze_lowerings(
     ran!("relation_ivar_materialize");
     defined_ivar_memo::apply_defined_ivar_memo_lowering(app);
     ran!("defined_ivar_memo");
-    sti_is_a::apply_sti_is_a_lowering(app);
-    ran!("sti_is_a");
     sti_subclass_callbacks::apply_sti_subclass_callbacks(app);
     ran!("sti_subclass_callbacks");
-    job_test_only::apply_job_test_only_lowering(app);
+    crate::timings::phase("post-analyze: fused pre-tag rewrites", || {
+        fused::apply_fused_pre_tag_rewrites(app);
+    });
+    ran!("attribute_aliases");
+    ran!("sti_is_a");
     ran!("job_test_only");
-    test_cookie_jar::apply_test_cookie_jar_lowering(app);
     ran!("test_cookie_jar");
-    controller_class_render::apply_controller_class_render(app);
     ran!("controller_class_render");
-    sum_symbol::apply_sum_symbol_lowering(app);
     ran!("sum_symbol");
     diags.extend(tag_builder::apply_tag_builder_lowering(app, registry));
     ran!("tag_builder");
@@ -840,7 +858,6 @@ pub fn apply_post_analyze_lowerings(
     ran!("has_one_builder");
     config_reader::apply_config_reader_lowering(app);
     ran!("config_reader");
-    symbolize_keys::apply_symbolize_keys_grounding(app);
     ran!("symbolize_keys");
     enum_mapping_keys::apply_enum_mapping_keys(app);
     ran!("enum_mapping_keys");
