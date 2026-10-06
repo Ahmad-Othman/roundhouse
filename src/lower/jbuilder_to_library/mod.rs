@@ -160,10 +160,14 @@ pub fn lower_jbuilder_to_library_classes(
             // both arguments reached the helper whole, so every boost's
             // `url` read `/rooms/#<Room:0x…>/messages/#<Message:0x…>`.
             // Same pass the controller and test bodies run, for the
-            // same reason and with the same idempotence.
-            method.body = crate::lower::controller_to_library::rewrites::
-                project_route_helper_ids(&method.body);
-            crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
+            // same reason and with the same idempotence. In-place + skip
+            // the follow-up type when the projection is a no-op — the
+            // cloning entry re-walked every jbuilder body twice.
+            if crate::lower::controller_to_library::rewrites::
+                project_route_helper_ids_in_place(&mut method.body)
+            {
+                crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
+            }
         }
     }
     lcs

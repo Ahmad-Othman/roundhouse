@@ -285,7 +285,7 @@ pub fn lower_test_modules_with_inner(
     // per-method loop.
     let blank_defs = crate::lower::blank::AppDefinitions::from_class_registry(&classes);
 
-    for (idx, lc) in all_lcs.iter_mut().enumerate() {
+    for (idx, mut lc) in all_lcs.into_iter().enumerate() {
         let synthesized = &synthesized_per_module[idx];
         for method in &mut lc.methods {
             // Helpers with no declared signature were typed in the lift
@@ -294,6 +294,16 @@ pub fn lower_test_modules_with_inner(
             if !synthesized.contains(&method.name) {
                 crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
             }
+            // Harvest from this first typed pass, before the rewrites.
+            // Assoc-create / route-id / assert / blank / header rewrites
+            // do not introduce ivar assignments, so the map is the same
+            // as harvesting after them — and one follow-up type then
+            // covers both rewritten nodes and ivar reads. Without the
+            // ivar seed, `@messages = ….to_a` binds nothing and
+            // `@messages.third` is a read off an untyped ivar.
+            let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
+            crate::analyze::extract_ivar_assignments(&method.body, &mut ivars);
+            ivars.retain(|_, ty| !ty.is_unknown());
             // Has-many `.create` / `.build` rewrite needs the parent
             // expression's class type — must run AFTER the typer.
             // Statement-shape pass (no outer Assign) so it pairs with
@@ -333,19 +343,7 @@ pub fn lower_test_modules_with_inner(
             // String` and takes every test behind it.
             rewritten |= crate::lower::blank::ground_body(&mut method.body, &blank_defs);
             rewritten |= lowercase_header_reads(&mut method.body);
-            if rewritten {
-                crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
-            }
-            // A test's ivars are bound in its own body — the setup is
-            // inlined ahead of every test — so they can be harvested
-            // from this one typed pass and the body re-typed with
-            // them, the way `type_inner_class` does for a stand-in
-            // class. Without it `@messages = ….to_a` binds nothing and
-            // `@messages.third` below is a read off an untyped ivar.
-            let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
-            crate::analyze::extract_ivar_assignments(&method.body, &mut ivars);
-            ivars.retain(|_, ty| !ty.is_unknown());
-            if !ivars.is_empty() {
+            if rewritten || !ivars.is_empty() {
                 crate::lower::typing::type_method_body(method, &classes, &ivars);
             }
             // `second`…`fifth` on a typed Array — type-directed, so
@@ -360,7 +358,7 @@ pub fn lower_test_modules_with_inner(
             }
         }
         out.push(LoweredTestModule {
-            test_class: lc.clone(),
+            test_class: lc,
             inner_classes: std::mem::take(&mut typed_inner_per_module[idx]),
             constants: test_modules[idx].constants.clone(),
         });
@@ -386,11 +384,13 @@ pub fn lower_test_modules_with_inner(
 ///   2. Harvest ivar types from the typed bodies — direct `@x = v`
 ///      assignments plus `self.x = v` setter calls (the latter carries
 ///      the inherited AR primary-key `id`, set via `self.id = id`).
-///   3. Re-type every body with the harvested ivar bindings (so `@id`/
-///      `@title` reads resolve to Integer/String), then lift the
-///      inferred body type into each synthesized signature's return
-///      slot. `initialize` is pinned to a nil (void) return rather than
-///      the type of its last assignment.
+///   3. If any ivar was harvested, re-type every body with those
+///      bindings (so `@id`/`@title` reads resolve to Integer/String).
+///      Then lift the inferred body type into each synthesized
+///      signature's return slot. `initialize` is pinned to a nil (void)
+///      return rather than the type of its last assignment. Skip the
+///      retype when harvest found nothing — pass 1 already typed
+///      against empty ivars.
 /// Copy a parent class's instance surface onto `info` for every name
 /// the subclass doesn't declare itself. Only the names are inherited —
 /// an override keeps its own entry, which `type_inner_class` then pins
@@ -505,9 +505,12 @@ fn type_inner_class(inner: &mut LibraryClass, classes: &HashMap<ClassId, ClassIn
     }
 
     // Pass 3 — re-type with ivars, then lift return types into the
-    // signatures we synthesized in pass 1.
+    // signatures we synthesized in pass 1. Skip the retype when harvest
+    // found nothing: pass 1 already typed against empty ivars.
     for (method, was_synthesized) in inner.methods.iter_mut().zip(synthesized) {
-        crate::lower::typing::type_method_body(method, classes, &ivars);
+        if !ivars.is_empty() {
+            crate::lower::typing::type_method_body(method, classes, &ivars);
+        }
         if !was_synthesized {
             continue;
         }

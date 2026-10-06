@@ -518,9 +518,9 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                 continue;
             }
             crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
-            // Bracket rewrite and broadcast rewrite both need the first
-            // typing pass and do not consume each other's output, so they
-            // share one walk-pair and one follow-up type when either fires.
+            // Bracket, broadcast, and arel all need the first typing
+            // pass and do not consume each other's newly-stamped types,
+            // so they share one follow-up type when any of them fires.
             let mut rewritten = self::params::rewrite_typed_bracket_to_field_in_place(
                 &mut method.body, &permitted_fields,
             );
@@ -529,18 +529,16 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
                 views_module_name(controller).as_deref(),
                 &partials,
             );
-            if rewritten {
-                crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
-            }
             let refined_across_methods = refined_result_methods.contains(&method.name);
             if let Some(schema) = schema {
-                if !refined_across_methods
-                    && crate::lower::arel::rewrite_arel_in_expr_with_assocs(
+                if !refined_across_methods {
+                    rewritten |= crate::lower::arel::rewrite_arel_in_expr_with_assocs(
                         &mut method.body, schema, &classes, assocs,
-                    )
-                {
-                    crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
+                    );
                 }
+            }
+            if rewritten {
+                crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             }
         }
         methods.extend(collect_attr_accessor_methods(controller));
