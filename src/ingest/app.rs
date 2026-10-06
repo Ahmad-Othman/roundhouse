@@ -3106,11 +3106,82 @@ fn substitute_params(
     }
 
     let span = macro_def.body.span;
+    // `options = actions.extract_options!` on the `*actions` parameter:
+    // the trailing Hash of the call is the options, everything before it
+    // the actions. Bound here because after substitution the receiver is
+    // an Array literal and `actions` below must not still hold the Hash.
+    let mut body = macro_def.body.clone();
+    let mut extracted: Vec<(crate::ident::Symbol, crate::expr::Expr)> = Vec::new();
+    if let (ExprNode::Seq { exprs }, Some((rest_index, rest))) = (
+        &mut *body.node,
+        macro_def.params.iter().enumerate().find(|(_, p)| p.rest),
+    ) {
+        let taken = match exprs.first().map(|e| &*e.node) {
+            Some(ExprNode::Assign {
+                target: crate::expr::LValue::Var { name, .. },
+                value,
+            }) => match &*value.node {
+                ExprNode::Send { recv: Some(r), method, args: a, block: None, .. }
+                    if method.as_str() == "extract_options!"
+                        && a.is_empty()
+                        && matches!(&*r.node, ExprNode::Var { name: n, .. } if n == &rest.name) =>
+                {
+                    Some(name.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        // `*%i[a b]` spreads its elements; any other splat's actions are
+        // unknown here, so the statement stays and the macro is refused
+        // rather than expanded with those actions missing.
+        let spread: Option<Vec<crate::expr::Expr>> = args
+            .get(rest_index..)
+            .unwrap_or(&[])
+            .iter()
+            .map(|a| match &*a.node {
+                ExprNode::Splat { value } => match &*value.node {
+                    ExprNode::Array { elements, .. } => Some(elements.clone()),
+                    _ => None,
+                },
+                _ => Some(vec![a.clone()]),
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(|groups| groups.concat());
+        if let (Some(options_name), Some(mut positional)) = (taken, spread) {
+            exprs.remove(0);
+            let options = match positional.last().map(|a| match &*a.node {
+                ExprNode::KeywordSplat { value } => matches!(&*value.node, ExprNode::Hash { .. }),
+                ExprNode::Hash { .. } => true,
+                _ => false,
+            }) {
+                Some(true) => {
+                    let last = positional.pop().expect("checked");
+                    match &*last.node {
+                        ExprNode::KeywordSplat { value } => value.clone(),
+                        _ => last,
+                    }
+                }
+                _ => crate::expr::Expr::new(span, ExprNode::Hash { entries: vec![], kwargs: false }),
+            };
+            extracted.push((options_name, options));
+            extracted.push((
+                rest.name.clone(),
+                crate::expr::Expr::new(
+                    span,
+                    ExprNode::Array { elements: positional, style: Default::default() },
+                ),
+            ));
+        }
+    }
     let bindings: Vec<(crate::ident::Symbol, crate::expr::Expr)> = macro_def
         .params
         .iter()
         .enumerate()
         .map(|(i, p)| {
+            if let Some((_, v)) = extracted.iter().find(|(n, _)| n == &p.name) {
+                return (p.name.clone(), v.clone());
+            }
             let value = match args.get(i) {
                 Some(a) => match &*a.node {
                     ExprNode::KeywordSplat { value } => value.clone(),
@@ -3129,9 +3200,43 @@ fn substitute_params(
             (p.name.clone(), value)
         })
         .collect();
-    let mut body = macro_def.body.clone();
+    let mut bindings = bindings;
+    let extra: Vec<_> = extracted
+        .into_iter()
+        .filter(|(n, _)| !bindings.iter().any(|(b, _)| b == n))
+        .collect();
+    bindings.extend(extra);
     replace(&mut body, &bindings);
+    fold_literal_hash_reads(&mut body);
     body
+}
+
+/// `{only: [:a]}[:if]` → the value, or nil for an absent key — what the
+/// read means once `options` is bound to the call's literal Hash.
+fn fold_literal_hash_reads(expr: &mut crate::expr::Expr) {
+    use crate::expr::{ExprNode, Literal};
+    expr.node.for_each_child_mut(&mut |c| fold_literal_hash_reads(c));
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*expr.node else {
+        return;
+    };
+    let (ExprNode::Hash { entries, .. }, [key]) = (&*r.node, args.as_slice()) else { return };
+    let ExprNode::Lit { value: Literal::Sym { value: k } } = &*key.node else { return };
+    if method.as_str() != "[]" {
+        return;
+    }
+    // A computed or `**` key might be this one: leave the read, and the
+    // filter it feeds is refused instead of losing its guard.
+    if entries.iter().any(|(ek, _)| !matches!(&*ek.node, ExprNode::Lit { .. })) {
+        return;
+    }
+    // A repeated key reads its last value, as in Ruby.
+    let found = entries.iter().rev().find_map(|(ek, ev)| match &*ek.node {
+        ExprNode::Lit { value: Literal::Sym { value } } if value == k => Some(ev.clone()),
+        _ => None,
+    });
+    *expr = found.unwrap_or_else(|| {
+        crate::expr::Expr::new(expr.span, ExprNode::Lit { value: Literal::Nil })
+    });
 }
 
 /// Every filter the macro body declares, or None if any statement in it
@@ -3178,10 +3283,18 @@ fn filter_from_send(
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
         _ => None,
     };
-    let sym_list = |e: &crate::expr::Expr| -> Vec<crate::ident::Symbol> {
+    // `only:` / `except:` actions, a Symbol or String each as Rails takes
+    // them. None when any is something else: dropping it would narrow
+    // the list, or empty it into an unscoped filter.
+    let action_of = |e: &crate::expr::Expr| match &*e.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(crate::ident::Symbol::from(value.as_str())),
+        _ => None,
+    };
+    let sym_list = |e: &crate::expr::Expr| -> Option<Vec<crate::ident::Symbol>> {
         match &*e.node {
-            ExprNode::Array { elements, .. } => elements.iter().filter_map(&sym_of).collect(),
-            _ => sym_of(e).into_iter().collect(),
+            ExprNode::Array { elements, .. } => elements.iter().map(&action_of).collect(),
+            _ => action_of(e).map(|a| vec![a]),
         }
     };
 
@@ -3207,13 +3320,17 @@ fn filter_from_send(
         };
         for (key, value) in entries {
             match sym_of(key).as_ref().map(|k| k.as_str().to_string()).as_deref() {
-                Some("only") => only = sym_list(value),
-                Some("except") => except = sym_list(value),
+                Some("only") => only = sym_list(value)?,
+                Some("except") => except = sym_list(value)?,
                 // if:/unless: guards on a macro-expanded filter would
                 // need the predicate to resolve in the INCLUDER; not
                 // modeled, and silently dropping a guard changes when a
                 // filter fires.
-                Some("if") | Some("unless") => return None,
+                Some("if") | Some("unless")
+                    if !matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) =>
+                {
+                    return None
+                }
                 _ => {}
             }
         }
