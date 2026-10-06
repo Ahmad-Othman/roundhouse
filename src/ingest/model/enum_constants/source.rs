@@ -1,7 +1,9 @@
 //! Prism declaration collection and lexical traversal. Use-context syntax is
 //! classified separately; only policy interprets the resulting typed facts.
 
-use super::super::super::util::{constant_id_str, flatten_statements, string_value};
+use super::super::super::util::{
+    constant_id_str, flatten_statements, string_value, symbol_or_string_value,
+};
 use super::super::super::{expr, library_class, prism};
 use super::{
     EnumConstant, EnumConstants, ScopedName, SourceFact, SurfaceUse, ValueContext, context,
@@ -260,13 +262,16 @@ impl EnumConstants {
                 }
                 _ => Some(value),
             };
+            // `%w[…]` strings and `%i[…]` / `[:A, :B]` symbols — same
+            // label list `enum_label_values` admits for class-local consts.
             let labels = literal.filter(|_| direct).and_then(|node| {
                 node.as_array_node()?
                     .elements()
                     .iter()
                     .enumerate()
                     .map(|(i, el)| {
-                        string_value(&el).map(|label| (label, Literal::Int { value: i as i64 }))
+                        symbol_or_string_value(&el)
+                            .map(|label| (label, Literal::Int { value: i as i64 }))
                     })
                     .collect()
             });

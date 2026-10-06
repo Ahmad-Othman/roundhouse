@@ -278,6 +278,36 @@ fn frozen_and_string_array_types_constants_ingest() {
     }
 }
 
+/// Concern-module `%i[…]` constant — EnumConstants must fold symbols
+/// the same way class-local `enum_label_values` does for `%w` / `%i`.
+#[test]
+fn concern_percent_i_types_constant_ingests() {
+    let app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        (
+            "app/models/entryable.rb",
+            "module Entryable\n  extend ActiveSupport::Concern\n  TYPES = %i[Message Comment]\n  included do\n    has_one :entry, as: :entryable\n  end\nend\n",
+        ),
+        (
+            "app/models/entry.rb",
+            "class Entry < ApplicationRecord\n  delegated_type :entryable, types: Entryable::TYPES, dependent: :destroy\nend\n",
+        ),
+        (
+            "app/models/message.rb",
+            "class Message < ApplicationRecord\n  include Entryable\nend\n",
+        ),
+        (
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord\n  include Entryable\nend\n",
+        ),
+    ]))
+    .expect("ingest");
+    let inst = instance_names(&app, "Entry");
+    for name in ["message?", "comment?", "destroy_entryable"] {
+        assert!(inst.iter().any(|n| n == name), "{name} missing from {inst:?}");
+    }
+}
+
 /// Concern-module constant `types: Leafable::TYPES` — Writebook's spelling
 /// as a general Rails pattern, not a product fork.
 #[test]
