@@ -1038,6 +1038,23 @@ module Db
     current_conn.qc_end
   end
 
+  # The request read snapshot and background checkpoints are
+  # implemented in the CRuby shim (db_cruby.rb) only so far. Here they
+  # are accepted and do nothing, so the shared dispatcher and test
+  # harness call them unconditionally; this lane still reads in
+  # autocommit and checkpoints inside COMMIT.
+  def self.read_snapshot_begin
+    nil
+  end
+
+  def self.read_snapshot_end
+    nil
+  end
+
+  def self.checkpoint_in_background!
+    nil
+  end
+
   def self.exec(sql)
     record_query(sql)
     conn = current_conn

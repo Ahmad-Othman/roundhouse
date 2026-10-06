@@ -1790,10 +1790,26 @@ module RequestDispatch
     # yielder forwarded through a second yielder types its block value
     # once for every site (matz/spinel#4495), and campfire's web-push
     # handler already wraps with a block of another type.
+    #
+    # A GET/HEAD reads through one snapshot, as the dispatcher serves it,
+    # so the suite exercises the same transaction shape production does.
+    snapshot = method == "GET" || method == "HEAD"
     if Db.in_lease?
-      controller.process_action(matched.action)
+      Db.read_snapshot_begin if snapshot
+      begin
+        controller.process_action(matched.action)
+      ensure
+        Db.read_snapshot_end if snapshot
+      end
     else
-      Db.with_connection { controller.process_action(matched.action) }
+      Db.with_connection do
+        Db.read_snapshot_begin if snapshot
+        begin
+          controller.process_action(matched.action)
+        ensure
+          Db.read_snapshot_end if snapshot
+        end
+      end
     end
     @__flash = controller.flash
     # Fold this response's Set-Cookie writes back into the browser.

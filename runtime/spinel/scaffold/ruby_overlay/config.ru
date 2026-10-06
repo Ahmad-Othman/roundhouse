@@ -17,6 +17,11 @@ require_relative "runtime/gzip_cache"
 
 Main.configure_default_adapter!
 
+# Serving, so WAL checkpoints move off the request path: each process
+# that serves runs them on a background thread instead of inside some
+# request's COMMIT (Db.checkpoint_in_background!).
+Db.checkpoint_in_background!
+
 # Register the Cable registry as the broadcasts transport: every
 # `Broadcasts.record` call from model callbacks now also fans out
 # the rendered `<turbo-stream>` to every WS connection subscribed

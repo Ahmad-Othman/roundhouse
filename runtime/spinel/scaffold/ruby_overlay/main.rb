@@ -65,9 +65,15 @@ module Main
     # invalidates. The CRuby Db shim implements the same discipline
     # (fiber-local, so Puma threads don't share entries).
     Db.query_cache_begin
+    # A GET/HEAD reads through one SQLite snapshot (Db.read_snapshot_begin).
+    # Any write still works: the shim ends the snapshot before it.
+    method = env["REQUEST_METHOD"]
+    snapshot = method == "GET" || method == "HEAD"
+    Db.read_snapshot_begin if snapshot
     begin
       dispatch_core_inner(env, stdin)
     ensure
+      Db.read_snapshot_end if snapshot
       Db.query_cache_end
     end
   end
