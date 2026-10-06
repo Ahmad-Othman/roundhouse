@@ -459,15 +459,9 @@ module ActiveRecord
 
     # Same builder as `page` under the `paginate` spelling. A
     # positional page number, or `page:` / `per_page:` keywords.
+    # `per(nil)` is a no-op (`per` only applies a numeric string).
     def paginate(num = nil, page: nil, per_page: nil)
-      n = page
-      n = num if n.nil?
-      rel = self.page(n)
-      if per_page.nil?
-        rel
-      else
-        rel.per(per_page)
-      end
+      self.page(page || num).per(per_page)
     end
 
     # `per(n)`: the same page at `n` rows. A nil, blank or negative `n`
