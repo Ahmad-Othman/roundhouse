@@ -241,13 +241,18 @@ pub fn lower_test_modules_with_inner(
     // return, and BEFORE the test bodies are typed against the
     // registry. A body the typer cannot name keeps the nil default
     // rather than gaining `untyped`; a test method is never a helper.
+    let synthesized_per_module: Vec<std::collections::HashSet<Symbol>> = test_modules
+        .iter()
+        .map(|tm| {
+            tm.helpers
+                .iter()
+                .filter(|h| h.signature.is_none())
+                .map(|h| h.name.clone())
+                .collect()
+        })
+        .collect();
     for (idx, lc) in all_lcs.iter_mut().enumerate() {
-        let synthesized: std::collections::HashSet<Symbol> = test_modules[idx]
-            .helpers
-            .iter()
-            .filter(|h| h.signature.is_none())
-            .map(|h| h.name.clone())
-            .collect();
+        let synthesized = &synthesized_per_module[idx];
         if synthesized.is_empty() {
             continue;
         }
@@ -281,8 +286,14 @@ pub fn lower_test_modules_with_inner(
     let blank_defs = crate::lower::blank::AppDefinitions::from_class_registry(&classes);
 
     for (idx, lc) in all_lcs.iter_mut().enumerate() {
+        let synthesized = &synthesized_per_module[idx];
         for method in &mut lc.methods {
-            crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
+            // Helpers with no declared signature were typed in the lift
+            // pass above. Skip that first empty-ivar type so a helper
+            // whose later rewrites are no-ops is not typed 3–4 times.
+            if !synthesized.contains(&method.name) {
+                crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
+            }
             // Has-many `.create` / `.build` rewrite needs the parent
             // expression's class type — must run AFTER the typer.
             // Statement-shape pass (no outer Assign) so it pairs with
@@ -291,7 +302,8 @@ pub fn lower_test_modules_with_inner(
             // freshly-synthesized Sends/Hash entries get a `ty` —
             // `lowered_real_blog_typing_residual` enforces a
             // 0-untyped ceiling.
-            method.body = crate::lower::seeds_to_library::rewrite_assoc_create_with_models(&method.body, models);
+            let mut rewritten = crate::lower::seeds_to_library::
+                rewrite_assoc_create_with_models_in_place(&mut method.body, models);
             // A record standing where a route helper wants an id.
             // Type-directed, so it must be here and not back where the
             // `RouteHelpers.` receiver was added: at THAT point a test
@@ -300,8 +312,8 @@ pub fn lower_test_modules_with_inner(
             // a chain — neither is a shape the receiver-adding pass can
             // recognize, and both asserted a redirect to
             // `/rooms/#<Room:0x000000012339eda0>`.
-            method.body = crate::lower::controller_to_library::rewrites::
-                project_route_helper_ids(&method.body);
+            rewritten |= crate::lower::controller_to_library::rewrites::
+                project_route_helper_ids_in_place(&mut method.body);
             // Inline assert_*/refute_* sends — replaces vacuous
             // Minitest dispatch with real `raise` so spinel's
             // assertion-correctness signal is non-fake. See
@@ -310,7 +322,7 @@ pub fn lower_test_modules_with_inner(
             // ExprNode::Raise as its native halt-with-message (Ruby
             // `raise`, Crystal `raise`, TS `throw`, …) — see the
             // issue's "Cross-target benefits" table.
-            method.body = inline_assertions::inline_assertions(&method.body);
+            rewritten |= inline_assertions::inline_assertions_in_place(&mut method.body);
             // Ground `blank?`/`present?`/`presence` by receiver type,
             // AFTER the assertion inlining that wraps them in a `raise
             // … if !(…)` and BEFORE the re-type that stamps the result.
@@ -319,9 +331,11 @@ pub fn lower_test_modules_with_inner(
             // controller test files; on a strict target the dynamic
             // send is `undefined method 'present?' for an instance of
             // String` and takes every test behind it.
-            crate::lower::blank::ground_body(&mut method.body, &blank_defs);
-            lowercase_header_reads(&mut method.body);
-            crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
+            rewritten |= crate::lower::blank::ground_body(&mut method.body, &blank_defs);
+            rewritten |= lowercase_header_reads(&mut method.body);
+            if rewritten {
+                crate::lower::typing::type_method_body(method, &classes, &empty_ivars);
+            }
             // A test's ivars are bound in its own body — the setup is
             // inlined ahead of every test — so they can be harvested
             // from this one typed pass and the body re-typed with
@@ -336,12 +350,14 @@ pub fn lower_test_modules_with_inner(
             }
             // `second`…`fifth` on a typed Array — type-directed, so
             // here and not in the pre-typing pass over `app.test_modules`.
-            crate::lower::array_ordinal::rewrite_body(&mut method.body);
+            let mut ordinal = crate::lower::array_ordinal::rewrite_body(&mut method.body);
             // `squish` on a typed String receiver — type-directed for
             // the same reason, and after the ordinal rewrite for no
             // reason but that the two are one re-type apart.
-            crate::lower::enumerable_ext::rewrite_body(&mut method.body);
-            crate::lower::typing::type_method_body(method, &classes, &ivars);
+            ordinal |= crate::lower::enumerable_ext::rewrite_body(&mut method.body);
+            if ordinal {
+                crate::lower::typing::type_method_body(method, &classes, &ivars);
+            }
         }
         out.push(LoweredTestModule {
             test_class: lc.clone(),
@@ -1028,19 +1044,29 @@ fn insert_minitest_test_baseline(classes: &mut HashMap<ClassId, ClassInfo>) {
 /// the lookup Rails performs is the same for every spelling. Reads
 /// only, and only in test bodies; the controller's own
 /// `headers["X-Thing"] = …` writes are the app's.
-fn lowercase_header_reads(expr: &mut Expr) {
-    expr.node.for_each_child_mut(&mut lowercase_header_reads);
+fn lowercase_header_reads(expr: &mut Expr) -> bool {
+    let mut changed = false;
+    expr.node.for_each_child_mut(&mut |c| {
+        if lowercase_header_reads(c) {
+            changed = true;
+        }
+    });
     let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &mut *expr.node else {
-        return;
+        return changed;
     };
     if method.as_str() != "[]" || args.len() != 1 {
-        return;
+        return changed;
     }
-    let ExprNode::Send { method: inner, args: inner_args, .. } = &*recv.node else { return };
+    let ExprNode::Send { method: inner, args: inner_args, .. } = &*recv.node else { return changed };
     if inner.as_str() != "headers" || !inner_args.is_empty() {
-        return;
+        return changed;
     }
     if let ExprNode::Lit { value: crate::expr::Literal::Str { value } } = &mut *args[0].node {
-        *value = value.to_ascii_lowercase();
+        let lower = value.to_ascii_lowercase();
+        if lower != *value {
+            *value = lower;
+            return true;
+        }
     }
+    changed
 }
