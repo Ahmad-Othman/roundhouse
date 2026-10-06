@@ -527,9 +527,11 @@ pub(super) fn bindings(def: &MethodDef, args: &[Expr]) -> Option<HashMap<Symbol,
         } else {
             positional.next()?.clone()
         };
-        // Interned names are immutable: replacing their reads cannot
-        // change capture identity or turn a shared mutable value into a
-        // fresh allocation on each method call.
+        // Symbols are interned, so substituting a bound Symbol as a
+        // value keeps capture identity. String literals are interned
+        // names only — a value read of a String binding declines
+        // (`string_binding_read_as_value`), because substitution would
+        // allocate a fresh unfrozen string on each call.
         interned_name(&value)?;
         out.insert(param.name.clone(), value);
     }
@@ -562,6 +564,9 @@ fn expand_define_methods(
     sources: &[SourceFile],
 ) -> Option<Vec<MethodDef>> {
     let bindings = bindings(def, args)?;
+    if string_binding_read_as_value(&def.body, &bindings) {
+        return None;
+    }
     let statements = match &*def.body.node {
         ExprNode::Seq { exprs } => exprs.as_slice(),
         _ => std::slice::from_ref(&def.body),
@@ -753,6 +758,54 @@ fn substitute(mut expr: Expr, bindings: &HashMap<Symbol, Expr>) -> Option<Expr> 
         _ => return None,
     }
     Some(expr)
+}
+
+fn is_string_lit(expr: &Expr) -> bool {
+    matches!(&*expr.node, ExprNode::Lit { value: Literal::Str { .. } })
+}
+
+/// A bound String used as a *value* (`define_method(:x) { field }` with
+/// `field` a String) would replace one captured object with a fresh
+/// literal. Name slots (`define_method(field)`, `send(field)`) are fine.
+fn string_binding_read_as_value(expr: &Expr, bindings: &HashMap<Symbol, Expr>) -> bool {
+    match &*expr.node {
+        ExprNode::Var { name, .. } => bindings.get(name).is_some_and(is_string_lit),
+        ExprNode::Send {
+            method,
+            args,
+            recv,
+            block,
+            ..
+        } => {
+            let first_is_name =
+                matches!(method.as_str(), "define_method" | "send" | "__send__" | "public_send");
+            recv.iter().any(|r| string_binding_read_as_value(r, bindings))
+                || args.iter().enumerate().any(|(i, a)| {
+                    if first_is_name && i == 0 {
+                        match &*a.node {
+                            ExprNode::Var { name, .. }
+                                if bindings.get(name).is_some_and(is_string_lit) =>
+                            {
+                                false
+                            }
+                            _ => string_binding_read_as_value(a, bindings),
+                        }
+                    } else {
+                        string_binding_read_as_value(a, bindings)
+                    }
+                })
+                || block
+                    .iter()
+                    .any(|b| string_binding_read_as_value(b, bindings))
+        }
+        _ => {
+            let mut found = false;
+            expr.node.for_each_child(&mut |child| {
+                found |= string_binding_read_as_value(child, bindings);
+            });
+            found
+        }
+    }
 }
 
 /// `send(:title)` / `send("title")` / `__send__` with a literal first

@@ -263,6 +263,29 @@ end
     assert!(unexpanded(&app, "labeled"));
 }
 
+/// A String binding read as a value would lose capture identity.
+/// Name slots (`send(field)`) still expand; this body does not.
+#[test]
+fn string_binding_read_as_value_is_not_expanded() {
+    let concern = r#"module Labeled
+  extend ActiveSupport::Concern
+  class_methods do
+    def labeled(field)
+      define_method :label_of do
+        field
+      end
+    end
+  end
+end
+"#;
+    survey::activate();
+    let app = ingest_app_from_tree(tiny_overlay(concern, "Labeled", "labeled \"title\""))
+        .expect("survey ingest");
+    survey::drain();
+    assert!(unexpanded(&app, "labeled"));
+    assert!(post(&app).methods().all(|m| m.name.as_str() != "label_of"));
+}
+
 /// String-name `define_method` plus collapsed `send` on the blog overlay
 /// is the support claim: zero check errors and the emitted program runs.
 #[test]
