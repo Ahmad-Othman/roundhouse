@@ -693,20 +693,23 @@ fn json_value_arg_for_string_param(arg: &Expr) -> bool {
 }
 
 /// `.as_str()` needs an owned `Value`. HashMap#get rust-emits
-/// `Option<&Value>`; materialize Null-on-miss first.
+/// `Option<&Value>`; Hash#fetch(k, nil) peepholes to the same
+/// `get().cloned()` Option. Materialize Null-on-miss first.
 fn json_value_as_str(raw: String, arg: &Expr) -> String {
     let inner = if let ExprNode::Cast { value, .. } = &*arg.node {
         value
     } else {
         arg
     };
-    let owned = if let ExprNode::Send { method, recv, .. } = &*inner.node {
-        if method.as_str() == "get"
-            && matches!(
-                recv.as_ref().and_then(|r| r.ty.as_ref()).map(peel_nil),
-                Some(crate::ty::Ty::Hash { .. })
-            )
-        {
+    let owned = if let ExprNode::Send { method, recv, args, .. } = &*inner.node {
+        let hash_recv = matches!(
+            recv.as_ref().and_then(|r| r.ty.as_ref()).map(peel_nil),
+            Some(crate::ty::Ty::Hash { .. })
+        );
+        let fetch_nil = method.as_str() == "fetch"
+            && args.len() == 2
+            && matches!(&*args[1].node, ExprNode::Lit { value: Literal::Nil });
+        if hash_recv && (method.as_str() == "get" || fetch_nil) {
             format!("{raw}.cloned().unwrap_or(serde_json::Value::Null)")
         } else {
             raw

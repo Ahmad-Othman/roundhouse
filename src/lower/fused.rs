@@ -8,10 +8,9 @@
 //!
 //! Surfaces stay the same as the original per-pass walks: every rewrite
 //! runs on hook bodies; view/test coverage matches the pass it came from.
-//! The fused set is the independent send/op rewrites whose method names
-//! (or node kinds) do not consume each other's output. Passes that need
-//! extra app-level context, diagnostics, or a later predecessor stay
-//! sequential.
+//! Most fused rewrites match disjoint method names. The mid-group
+//! `route_format_suffix` wrap (`call + ".ext"`) is the exception:
+//! position/host follow-ups still run on that inner helper.
 //!
 //! Six walks, split by ordering constraints: the early group runs
 //! before any pass that mutates argument lists; the context group sits
@@ -23,7 +22,7 @@
 //! depends on).
 
 use crate::app::App;
-use crate::expr::Expr;
+use crate::expr::{Expr, ExprNode, InterpPart, Literal};
 use crate::ident::Symbol;
 use std::collections::{BTreeSet, HashSet};
 
@@ -370,10 +369,16 @@ fn rewrite_mid_node(
 ) {
     if !helpers.is_empty() {
         super::route_format_suffix::rewrite_node(e, helpers);
-        if position_path {
-            super::route_url_options::rewrite_position_node(e, path_params);
+        // Format suffix can wrap a helper as `<call> + ".ext"`. Sequential
+        // walks still visit that inner `recv: None` send; a fused callback
+        // would otherwise only see `+` and skip position/host rewrites.
+        if is_format_suffix_wrap(e, helpers) {
+            if let ExprNode::Send { recv: Some(inner), .. } = &mut *e.node {
+                apply_route_url_followups(inner, position_path, path_params, helpers);
+            }
+        } else {
+            apply_route_url_followups(e, position_path, path_params, helpers);
         }
-        super::route_url_options::rewrite_node(e, helpers);
     }
     if !enum_map.is_empty() {
         super::enum_symbols::rewrite_node(e, enum_map);
@@ -382,6 +387,40 @@ fn rewrite_mid_node(
         super::has_json::rewrite_node(e, json_map);
     }
     super::assoc_loaded::rewrite_node(e, enclosing, sole_includer, by_model, readers);
+}
+
+fn apply_route_url_followups(
+    target: &mut Expr,
+    position_path: bool,
+    path_params: &std::collections::HashMap<String, Vec<String>>,
+    helpers: &std::collections::HashSet<String>,
+) {
+    if position_path {
+        super::route_url_options::rewrite_position_node(target, path_params);
+    }
+    super::route_url_options::rewrite_node(target, helpers);
+}
+
+/// True when `route_format_suffix` just replaced a helper with concat.
+fn is_format_suffix_wrap(e: &Expr, helpers: &HashSet<String>) -> bool {
+    let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node else {
+        return false;
+    };
+    if method.as_str() != "+" || args.len() != 1 {
+        return false;
+    }
+    let looks_like_ext = match &*args[0].node {
+        ExprNode::Lit { value: Literal::Str { value } } => value.starts_with('.'),
+        ExprNode::StringInterp { parts } => {
+            matches!(parts.first(), Some(InterpPart::Text { value }) if value == ".")
+        }
+        _ => false,
+    };
+    looks_like_ext
+        && matches!(
+            &*r.node,
+            ExprNode::Send { recv: None, method: m, .. } if helpers.contains(m.as_str())
+        )
 }
 
 fn rewrite_hook_node(

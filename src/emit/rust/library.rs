@@ -905,3 +905,64 @@ mod op_assign_tests {
         assert!(out.contains("let mut s"), "`+=` local not declared mut:\n{out}");
     }
 }
+
+#[cfg(test)]
+mod value_union_emit_tests {
+    use super::emit_library_class;
+
+    fn emit(ruby: &str, rbs: &str) -> String {
+        let classes = crate::runtime_src::parse_library_with_rbs(ruby.as_bytes(), rbs, "value_union.rb")
+            .expect("snippet parses and types");
+        crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
+            classes.iter().map(|c| emit_library_class(c).expect("emits")).collect()
+        })
+    }
+
+    /// Heterogeneous RBS unions rust-emit as `serde_json::Value`. Display
+    /// JSON-quotes strings; interpolation must use `ruby_to_s`.
+    #[test]
+    fn value_shaped_interpolation_uses_ruby_to_s() {
+        let out = emit(
+            r#"module ValueUnion
+  def self.wrap(value)
+    "[#{value}]"
+  end
+end
+"#,
+            r#"module ValueUnion
+  def self.wrap: (String | Integer | Float | bool | nil value) -> String
+end
+"#,
+        );
+        assert!(
+            out.contains("ruby_to_s()"),
+            "Value-shaped interp must not use Display JSON quotes:\n{out}"
+        );
+    }
+
+    /// Hash#fetch(k, nil) peepholes to `Option<Value>`. A stringish param
+    /// must materialize Null-on-miss before `.as_str()`.
+    #[test]
+    fn fetch_nil_at_string_param_materializes_owned_value() {
+        let out = emit(
+            r#"module ValueUnion
+  def self.take_str(s)
+    s
+  end
+  def self.escape_fetch(opts)
+    take_str(opts.fetch(:title, nil))
+  end
+end
+"#,
+            r#"module ValueUnion
+  def self.take_str: (String s) -> String
+  def self.escape_fetch: (Hash[Symbol, untyped] opts) -> String
+end
+"#,
+        );
+        assert!(
+            out.contains("unwrap_or(serde_json::Value::Null)") && out.contains("as_str()"),
+            "fetch-nil at a String param must not call as_str on Option:\n{out}"
+        );
+    }
+}
