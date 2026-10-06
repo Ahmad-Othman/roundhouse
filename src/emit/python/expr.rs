@@ -1431,6 +1431,11 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
         "downcase" if no_args && is_str => format!("{recv}.lower()"),
         "start_with?" if one_arg && is_str => format!("{recv}.startswith({})", args_s[0]),
         "end_with?" if one_arg && is_str => format!("{recv}.endswith({})", args_s[0]),
+        // Ruby `String#tr(from, to)` — 1:1 character translation.
+        // Python's `str.maketrans` + `translate` is the direct map.
+        "tr" if args_s.len() == 2 && is_str => {
+            format!("{recv}.translate(str.maketrans({}, {}))", args_s[0], args_s[1])
+        }
         // Ruby `coll.include?(x)` → Python membership `x in coll`. Works
         // for Array (element), Hash (key), and String (substring). Wrapped
         // in parens since `in` is a comparison-precedence operator and may

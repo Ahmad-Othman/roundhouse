@@ -1247,7 +1247,13 @@ fn swift_format_import(_name: &str, _source: &str) -> String {
 
 /// Top-level `let NAME = VALUE` (Swift allows file-level constants).
 fn swift_format_constant(name: &str, value: &Expr) -> String {
-    format!("let {name} = {}", crate::emit::swift::emit_constant_for_runtime(value))
+    // Arrays mutated via index assign (`FORGERY_SLOT[0] = …`) need `var`;
+    // `let` arrays reject subscript assignment.
+    let kw = match &*value.node {
+        crate::expr::ExprNode::Array { .. } => "var",
+        _ => "let",
+    };
+    format!("{kw} {name} = {}", crate::emit::swift::emit_constant_for_runtime(value))
 }
 
 /// Single flat module; no namespace blocks.

@@ -571,9 +571,16 @@ pub(super) fn begin_method(body: &Expr) {
                 // Prefer the nullable nil-first type (a `result` assigned
                 // `null` then `Article` should hoist as `Article?`, not
                 // `object?`), so the eventual `return result` type-checks.
-                let ty = NIL_TYPES
-                    .with(|t| t.borrow().get(n).cloned())
-                    .unwrap_or_else(|| ty.clone());
+                // Do NOT widen primitives: `found = false` is `bool`, and
+                // `count_assigns` tags every first assign with `?` for the
+                // nil-first path — applying that here makes `if (found)`
+                // fail CS0266 (`bool?` → `bool`).
+                let ty = match ty.as_str() {
+                    "bool" | "long" | "int" | "double" | "string" => ty.clone(),
+                    _ => NIL_TYPES
+                        .with(|t| t.borrow().get(n).cloned())
+                        .unwrap_or_else(|| ty.clone()),
+                };
                 format!("{ty} {n} = {};", cs_default(&ty))
             })
             .collect();
