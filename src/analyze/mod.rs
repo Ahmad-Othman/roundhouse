@@ -903,6 +903,10 @@ impl Analyzer {
         // source typing; inferred returns converge in the same registry as
         // ordinary application methods.
         test_module::register(&mut classes, app);
+        for declaration in &app.library_classes {
+            if let Some(info) = classes.get_mut(&declaration.name) { info.is_module = declaration.is_module; }
+        }
+
 
         assert!(
             !app.source_index_required || !app.sources.is_empty(),
@@ -972,6 +976,51 @@ impl Analyzer {
     /// the refined registry. Iterates to a fixed point (capped; see
     /// `FIXPOINT_CAP`) using a structural registry snapshot to detect convergence.
     pub fn analyze(&mut self, app: &mut App) {
+        // An unresolvable include is a load-time error, not an open method
+        // surface. Keep it in the class-body ledger even when no method is called.
+        for class in &mut app.library_classes {
+            for included in &class.includes {
+                let known = self.classes.contains_key(included)
+                    || body::lexical_class(included, class.name.0.as_str(), &self.classes).is_some()
+                    || body::RUBY_TOP_LEVEL.contains(&included.0.as_str());
+                if known { continue; }
+                let detail = format!("{} includes unresolved {}", class.name.0, included.0);
+                if class.unknown_calls.iter().any(|call| matches!(&call.diagnostic,
+                    Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, detail: old, .. })
+                    if construct.as_str() == "include" && old == &detail)) { continue; }
+                let mut refusal = crate::expr::Expr::new(crate::span::Span::synthetic(),
+                    crate::expr::ExprNode::Lit { value: crate::expr::Literal::Nil });
+                refusal.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                    target: None, construct: Symbol::from("include"), detail,
+                });
+                class.unknown_calls.push(refusal);
+            }
+        }
+        for model in &mut app.models {
+            for item in &mut model.body {
+                let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+                let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+                if method.as_str() != "include" { continue; }
+                if matches!(&expr.diagnostic, Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == "include") {
+                    expr.diagnostic = None;
+                }
+                let missing: Vec<_> = args.iter().filter_map(|arg| {
+                    let ExprNode::Const { path } = &*arg.node else { return None };
+                    let name = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+                    let id = ClassId(Symbol::from(name.as_str()));
+                    let known = self.classes.contains_key(&id)
+                        || body::lexical_class(&id, model.name.0.as_str(), &self.classes).is_some()
+                        || body::RUBY_TOP_LEVEL.contains(&name.as_str());
+                    (!known).then_some(name)
+                }).collect();
+                if !missing.is_empty() {
+                    expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None, construct: Symbol::from("include"),
+                        detail: format!("{} includes unresolved {}", model.name.0, missing.join(", ")),
+                    });
+                }
+            }
+        }
         const FIXPOINT_CAP: usize = 12;
         // View-name and dynamic-render ivar sets are invariant across
         // fixpoint rounds — they read source views, not the registry.
@@ -1399,6 +1448,7 @@ impl Analyzer {
                 self_ty: None,
                 ivar_bindings: HashMap::new(),
                 local_bindings,
+                class_objects: Default::default(),
                 constants: Default::default(),
                 annotate_self_dispatch: false,
                 in_view: false, class_side: false,
@@ -1607,6 +1657,7 @@ impl Analyzer {
                     self_ty: Some(self_ty.clone()),
                     ivar_bindings: HashMap::new(),
                     local_bindings: HashMap::new(),
+                    class_objects: Default::default(),
                     constants: shared.clone(),
                     annotate_self_dispatch: false,
                     in_view: false, class_side: false,
@@ -1820,6 +1871,7 @@ impl Analyzer {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
                 ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
+                class_objects: Default::default(),
                 constants: global_constants.clone(),
                 annotate_self_dispatch: false, in_view: false, class_side: false,
             };
@@ -1835,6 +1887,7 @@ impl Analyzer {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
                 ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
+                class_objects: Default::default(),
                 constants: class_constants.clone(),
                 annotate_self_dispatch: false, in_view: false, class_side: false,
             };
@@ -1894,6 +1947,7 @@ impl Analyzer {
                     self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
+                    class_objects: Default::default(),
                     constants: class_constants.clone(),
                     annotate_self_dispatch: false, in_view: false, class_side: false,
                 };
@@ -1933,6 +1987,7 @@ impl Analyzer {
                 self_ty: Some(self_ty.clone()),
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
+                class_objects: Default::default(),
                 constants: global_constants.clone(),
                 annotate_self_dispatch: false, in_view: false, class_side: false,
             };
@@ -1950,6 +2005,7 @@ impl Analyzer {
                 self_ty: Some(self_ty.clone()),
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
+                class_objects: Default::default(),
                 constants: class_constants.clone(),
                 annotate_self_dispatch: false, in_view: false, class_side: false,
             };
@@ -2421,6 +2477,7 @@ impl Analyzer {
                             self_ty: Some(meta.self_ty.clone()),
                             ivar_bindings: seed,
                             local_bindings: HashMap::new(),
+                            class_objects: Default::default(),
                             constants: meta.class_constants.clone(),
                             annotate_self_dispatch: false, in_view: false, class_side: false,
                         };
@@ -2907,6 +2964,7 @@ impl Analyzer {
                         self_ty: Some(self_ty.clone()),
                         ivar_bindings: seed,
                         local_bindings: HashMap::new(),
+                        class_objects: Default::default(),
                         constants: class_constants.clone(),
                         annotate_self_dispatch: false,
                         in_view: false, class_side: false,
@@ -3048,6 +3106,7 @@ impl Analyzer {
                 self_ty: Some(Ty::Class { id: self_id, args: vec![] }),
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
+                class_objects: Default::default(),
                 constants: Default::default(), annotate_self_dispatch: false, in_view: false, class_side: false,
             };
 
@@ -3186,6 +3245,7 @@ impl Analyzer {
                     self_ty: class_ctx.self_ty.clone(),
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
+                    class_objects: Default::default(),
                     constants: Default::default(), annotate_self_dispatch: false, in_view: false, class_side: false,
                 };
                 for method in &mut lc.methods {
@@ -3602,6 +3662,15 @@ impl Analyzer {
             );
             if let Some(ty) = ty {
                 ctx.local_bindings.insert(param.name.clone(), ty);
+            }
+        }
+        // An indexed module's Ruby callback gets its host as a Module object,
+        // even when the hook is dormant and no explicit call site supplies types.
+        if ctx.class_side && self.classes.get(class_id).is_some_and(|c| c.is_module)
+            && matches!(method.name.as_str(), "included" | "prepended" | "append_features" | "prepend_features")
+        {
+            if let Some(param) = method.params.first().filter(|p| !p.keyword && !p.rest) {
+                ctx.class_objects.insert(param.name.clone());
             }
         }
         if let Some(bp) = &method.block_param {

@@ -39,15 +39,9 @@ pub fn is_gradual_operand(t: Option<&Ty>) -> bool {
     }
 }
 
-/// A receiver whose class owns the operator: `Money - Money`,
-/// `MoneyBag + MoneyBag`, `Gem::Version < Gem::Version`, `Duration * 2`.
-/// Ruby dispatches a binary operator as a method call on the lhs, so for
-/// any class-typed lhs the question is "does that class define it", which
-/// the operand types alone cannot answer — the builtin value types
-/// (`Int`, `Float`, `Str`, `Array`, `Hash`) are their own `Ty` variants and
-/// never reach here. `Set` is the one class the classifiers model.
-pub fn is_user_operator_receiver(t: Option<&Ty>) -> bool {
-    matches!(t, Some(Ty::Class { id, .. }) if id.0.as_str() != "Set")
+/// Admission comes from the operator's defining method, never the class label.
+pub fn is_user_operator_receiver(receiver: &crate::expr::Expr) -> bool {
+    receiver.decisions & crate::expr::RESOLVED_OPERATOR_RECEIVER != 0
 }
 
 /// An ordered number: `Int`, `Float`, `Numeric`/`BigDecimal`/`Rational`, or
