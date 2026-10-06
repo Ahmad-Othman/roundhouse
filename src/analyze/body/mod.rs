@@ -636,26 +636,35 @@ impl<'a> BodyTyper<'a> {
                         }
                     }
                     Some(Some(ResolvedConstant::Value { declaration, name, runtime })) => {
-                        // Value constants: `name` is the FULL declaration
-                        // (`DnsTestHelper::WEB_PUSH_PUBLIC_TEST_IP`). Expanding
-                        // a bare path via `qualify_resolved_path` would rebuild
-                        // that qualification. Test-helper splice unqualifies to
-                        // a bare name on the test class and never emits the
-                        // helper module — re-expanding (esp. from lower's
-                        // `type_method_body`, which has an empty ConstScope)
-                        // is a NameError at load (campfire push-subscription
-                        // floor: 375/405 vs 392). Keep bare paths bare; when
-                        // the class owns the leaf, strip a qualified write too.
-                        // Namespace (class) refs still qualify above.
+                        // Concern splices retain the resolved value owner.
+                        // Test-helper splice lifts a foreign module's
+                        // constant onto the test class as a bare name
+                        // (`DnsTestHelper::WEB_PUSH_PUBLIC_TEST_IP` →
+                        // `WEB_PUSH_PUBLIC_TEST_IP`) and never emits the
+                        // helper module — re-qualifying to the foreign
+                        // owner is a NameError at load. Skip qualify only
+                        // when the class owns the leaf AND the declaration
+                        // owner differs from `self` (Widget::MIN_PRICE still
+                        // expands so unsupported diagnostics keep the
+                        // qualified spelling).
                         let leaf = path.last().cloned();
                         let locally_owned = leaf
                             .as_ref()
                             .is_some_and(|n| ctx.constants.get_own(n).is_some());
-                        if path.len() == 1 {
-                            // already bare — do not expand
-                        } else if locally_owned {
+                        let enclosing = match &ctx.self_ty {
+                            Some(Ty::Class { id, .. }) => Some(id.0.as_str()),
+                            _ => None,
+                        };
+                        let decl_owner = name.0.as_str().rsplit_once("::").map(|(o, _)| o);
+                        let spliced_foreign = locally_owned
+                            && enclosing
+                                .zip(decl_owner)
+                                .is_some_and(|(enc, owner)| enc != owner);
+                        if spliced_foreign {
                             if let Some(n) = leaf {
-                                *path = vec![n];
+                                if path.len() != 1 {
+                                    *path = vec![n];
+                                }
                             }
                         } else {
                             qualify_resolved_path(path, name);
