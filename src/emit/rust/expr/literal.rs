@@ -341,7 +341,14 @@ pub(super) fn string_interp_fmt_and_args(parts: &[InterpPart]) -> (String, Vec<S
                     Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Record { .. }) => {
                         args.push(format!("({arg}).ruby_to_s()"));
                     }
-                    Some(ty) if super::super::ty::rust_value_shaped(ty) => {
+                    Some(ty)
+                        if super::super::ty::rust_value_shaped(ty)
+                            && matches!(
+                                &*expr.node,
+                                crate::expr::ExprNode::Var { .. }
+                                    | crate::expr::ExprNode::Ivar { .. }
+                            ) =>
+                    {
                         args.push(format!(
                             "<serde_json::Value as crate::http::RubyToS>::ruby_to_s(&({arg}))"
                         ));
@@ -385,7 +392,18 @@ fn expr_recv_is_value(expr: &Expr) -> bool {
 /// floating-typed when the value has no fractional part.
 pub(crate) fn emit_literal(lit: &Literal) -> String {
     match lit {
-        Literal::Nil => "None".to_string(),
+        Literal::Nil => {
+            // Tail `nil` in an untyped/Value-returning method is
+            // `Value::Null`, not Option::None (`request_for_csrf`).
+            if in_return_tail() {
+                if let Some(ty) = current_return_ty() {
+                    if super::super::ty::rust_value_shaped(&ty) {
+                        return "serde_json::Value::Null".to_string();
+                    }
+                }
+            }
+            "None".to_string()
+        }
         Literal::Bool { value } => value.to_string(),
         Literal::Int { value } => format!("{value}_i64"),
         Literal::Float { value } => {

@@ -244,6 +244,29 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
         Ok::<(), String>(())
     })));
     body_result?;
+    if name == "Base"
+        && class
+            .methods
+            .iter()
+            .any(|m| m.name.as_str() == "render")
+    {
+        // 2-arg `self.render(body, opts)` rewrites to `render_with`.
+        // Controller subclasses get that shim from rust.rs; Base
+        // itself must unpack opts onto its 4-arg `render`.
+        writeln!(out).unwrap();
+        writeln!(
+            out,
+            "    pub fn render_with(&mut self, content: &str, opts: std::collections::HashMap<String, serde_json::Value>) {{"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "        let status = opts.get(\"status\").and_then(|v| v.as_str()).unwrap_or(\"ok\");"
+        )
+        .unwrap();
+        writeln!(out, "        self.render(content, status, None, None);").unwrap();
+        writeln!(out, "    }}").unwrap();
+    }
     out.push_str("}\n");
     Ok(out)
 }
@@ -585,6 +608,17 @@ fn unify_ivar_tys(tys: &[Ty]) -> Ty {
                     let v = !matches!(**value, Ty::Untyped);
                     (k as u8) + (v as u8)
                 }
+                // Empty `[]` seeds Array[Untyped]; a later `ivar << s`
+                // (HeaderStore `@keys << key`) is Array[String]. Prefer
+                // the concrete elem so rust emits `Vec<String>` not
+                // `Vec<Value>`.
+                Ty::Array { elem } => {
+                    if matches!(elem.as_ref(), Ty::Untyped) {
+                        1
+                    } else {
+                        2
+                    }
+                }
                 _ => 0,
             })
             .cloned()
@@ -637,6 +671,23 @@ fn walk_collect_ivars(
         // `@flash` is the typed `Flash` struct, not a HashMap) would
         // be misread as a Hash assignment and widen the ivar type
         // away from the concrete struct.
+        ExprNode::Send { recv: Some(recv), method, args, .. }
+            if method.as_str() == "<<" && args.len() == 1 =>
+        {
+            if let ExprNode::Ivar { name } = &*recv.node {
+                let elem = args[0].ty.clone().unwrap_or(Ty::Untyped);
+                record(
+                    name.as_str(),
+                    Ty::Array {
+                        elem: Box::new(elem),
+                    },
+                    order,
+                    observed,
+                );
+            }
+            walk_collect_ivars(recv, order, observed);
+            args.iter().for_each(|a| walk_collect_ivars(a, order, observed));
+        }
         ExprNode::Send { recv: Some(recv), method, args, .. }
             if method.as_str() == "[]=" && args.len() == 2 =>
         {
@@ -824,8 +875,8 @@ fn format_array_constant(name: &str, elements: &[Expr]) -> String {
     let items: Vec<String> = elements.iter().map(render_constant_value).collect();
     let items_s = items.join(", ");
     format!(
-        "static {name}: std::sync::LazyLock<Vec<{elem_ty}>> = \
-         std::sync::LazyLock::new(|| vec![{items_s}]);"
+        "static {name}: std::sync::LazyLock<std::sync::Mutex<Vec<{elem_ty}>>> = \
+         std::sync::LazyLock::new(|| std::sync::Mutex::new(vec![{items_s}]));"
     )
 }
 
@@ -983,6 +1034,23 @@ end
         })
     }
 
+    fn emit_action_controller() -> String {
+        let ruby = include_str!("../../../runtime/ruby/action_controller/base.rb");
+        let rbs = include_str!("../../../runtime/ruby/action_controller/base.rbs");
+        let classes = crate::runtime_src::parse_library_with_rbs(
+            ruby.as_bytes(),
+            rbs,
+            "action_controller/base.rb",
+        )
+        .expect("action_controller/base parses and types");
+        crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
+            classes
+                .iter()
+                .map(|c| emit_library_class(c).expect("emits"))
+                .collect()
+        })
+    }
+
     fn method_body<'a>(src: &'a str, name: &str) -> &'a str {
         let needle = format!("pub fn {name}(");
         let start = src.find(&needle).unwrap_or_else(|| panic!("missing {name}:\n{src}"));
@@ -1001,7 +1069,7 @@ end
         let src = emit_view_helpers();
         let body = method_body(&src, "form_with");
         assert!(
-            body.contains("method_override_input") && body.contains("ruby_to_s()"),
+            body.contains("method_override_input") && body.contains("ruby_to_s"),
             "form_with must stringify the Hash fetch:\n{body}"
         );
         assert!(
@@ -1075,6 +1143,43 @@ end
         assert!(
             body.contains("serde_json::Value::from") && body.contains("articles"),
             "string arg to String|Array union must wrap Value::from:\n{body}"
+        );
+    }
+
+    /// Runtime emit uses an empty EmitCtx, so ActionController Const
+    /// helpers must coerce from `external_class_method_param_tys`.
+    /// HeaderStore `[]=` takes `Option<String>`, not Value.
+    #[test]
+    fn action_controller_runtime_emit_typechecks_hotspots() {
+        let src = emit_action_controller();
+        let set_index = method_body(&src, "set_index");
+        assert!(
+            set_index.contains("header_key_ok_pred(Some("),
+            "header_key_ok? takes String?, wrap &str:\n{set_index}"
+        );
+        let val_at = method_body(&src, "val_at");
+        assert!(
+            val_at.contains("unwrap_or_default()"),
+            "vals[i].to_s on Option must unwrap_or_default:\n{val_at}"
+        );
+        let render = method_body(&src, "render");
+        assert!(
+            render.contains("sanitize_location(&("),
+            "sanitize_location takes &str, borrow the unwrapped String:\n{render}"
+        );
+        let send_data = method_body(&src, "send_data");
+        assert!(
+            send_data.contains("set_index(") && send_data.contains("Some("),
+            "HeaderStore []= must wrap Option<String>, not Value::from:\n{send_data}"
+        );
+        assert!(
+            !send_data.contains("Value::from"),
+            "HeaderStore []= must not coerce through Value:\n{send_data}"
+        );
+        let csrf = method_body(&src, "request_for_csrf");
+        assert!(
+            csrf.contains("serde_json::Value::Null"),
+            "untyped nil tail is Value::Null:\n{csrf}"
         );
     }
 }

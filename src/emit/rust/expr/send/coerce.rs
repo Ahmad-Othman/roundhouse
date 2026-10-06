@@ -183,6 +183,31 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
                 return format!("Some({payload})");
             }
         }
+        // Class-method / Const-recv sites the lowerer registry can
+        // miss (`ActionController.header_key_ok?(key)` with String
+        // vs `String?`). Rust-only; do not lift Option wrapping into
+        // the shared lowerer.
+        if !matches!(&*arg.node, ExprNode::Cast { .. })
+            && !arg.ty.as_ref().is_some_and(is_option_ty)
+        {
+            let inner = peel_nil(param_ty);
+            if inner.is_stringish() {
+                let needs_to_string = matches!(
+                    &*arg.node,
+                    ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+                ) && !super::super::has_str_coercion(arg);
+                let payload = if needs_to_string {
+                    format!("{raw}.to_string()")
+                } else if matches!(arg_ty_peeled, Some(Ty::Str | Ty::Sym))
+                    || matches!(&*arg.node, ExprNode::Var { .. } | ExprNode::Send { .. })
+                {
+                    format!("({raw}).to_string()")
+                } else {
+                    raw.clone()
+                };
+                return format!("Some({payload})");
+            }
+        }
     }
 
     // Family 1 — Hash widening to `HashMap<String, serde_json::Value>`.

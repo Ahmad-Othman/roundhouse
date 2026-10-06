@@ -244,12 +244,12 @@ pub(super) fn try_array_push(
         return None;
     }
     let r = recv?;
-    let ivar_fallback = match &*r.node {
-        ExprNode::Ivar { name } if r.ty.is_none() => ivar_field_ty(name.as_str()),
+    let ivar_ty = match &*r.node {
+        ExprNode::Ivar { name } => ivar_field_ty(name.as_str()),
         _ => None,
     };
     let Some(crate::ty::Ty::Array { elem }) =
-        r.ty.as_ref().or(ivar_fallback.as_ref()).map(peel_nil)
+        ivar_ty.as_ref().or(r.ty.as_ref()).map(peel_nil)
     else {
         return None;
     };
