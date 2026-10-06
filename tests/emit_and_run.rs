@@ -1547,6 +1547,64 @@ puts "ok"
         .assert_passes();
 }
 
+/// `cached: true` on a collection render is one store read of the
+/// concatenated partials. A second render of the same records must not
+/// run the inner fragment bodies.
+#[test]
+fn cached_true_collection_skips_partial_bodies_on_hit() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+  def self.render_count
+    @render_count || 0
+  end
+  def self.reset_render_count
+    @render_count = 0
+  end
+  def self.bump_render
+    @render_count = render_count + 1
+  end
+  def bump_render
+    Article.bump_render
+    title
+  end
+"#,
+        )
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "  def index\n    @articles = Article.includes(:comments).order(created_at: :desc)\n  end\n",
+            "  def index\n    @articles = Article.includes(:comments).order(created_at: :desc)\n  end\n\n  def probe\n    @articles = Article.order(:title)\n  end\n",
+        )
+        .write(
+            "app/views/articles/_probe_row.html.erb",
+            "<% probe_row.bump_render %><i><%= probe_row.title %></i>\n",
+        )
+        .write(
+            "app/views/articles/probe.html.erb",
+            "<%= render partial: \"articles/probe_row\", collection: @articles, cached: true %>\n",
+        )
+        .run_ruby(
+            r#"
+Article.delete_all
+Article.create!(title: "one", body: "long enough body")
+Article.create!(title: "two", body: "long enough body")
+rows = ActiveRecord::Relation.new(Article).to_a.sort_by { |a| a.title }
+Article.reset_render_count
+a = Views::Articles.probe(rows)
+raise "first #{Article.render_count}: #{a}" unless Article.render_count == 2
+Article.reset_render_count
+b = Views::Articles.probe(rows)
+raise "second #{Article.render_count}: #{b}" unless Article.render_count == 0
+raise "html drifted #{a.inspect} vs #{b.inspect}" unless a == b
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
 /// `rel.more_than?(n)` is `SELECT 1 LIMIT 1 OFFSET n` with the same
 /// FROM/JOIN/WHERE as COUNT, and the relation is not mutated. Campfire's
 /// `Message.paged?` is `count > PAGE_SIZE` rewritten to this method.
@@ -6100,18 +6158,87 @@ raise "empty CSRF ran: #{controller.status}" unless controller.status == 422
 
 controller = WidgetsController.new
 ActionController::Current.controller = controller
+req = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example", "REQUEST_METHOD" => "GET")
+controller.request = req
+ActionController::Current.request = req
+controller.request_method = "GET"
+masked = ActionView::ViewHelpers.form_authenticity_token
+secret = controller.session[:_csrf_token].to_s
+raise "session secret not minted: #{secret.inspect}" if secret.empty?
+raise "token was the raw secret: #{masked.inspect}" if masked == secret
+raise "masked token did not verify" unless ActionController::AuthenticityToken.valid?(masked, secret)
+
+controller = WidgetsController.new
+ActionController::Current.controller = controller
 req = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example", "REQUEST_METHOD" => "POST")
 controller.request = req
 ActionController::Current.request = req
 controller.request_method = "POST"
-controller.session[:_csrf_token] = "tok"
-controller.params = { "authenticity_token" => "tok" }
+controller.session[:_csrf_token] = secret
+controller.params = { "authenticity_token" => masked }
 controller.process_action(:touch)
-raise "matching CSRF failed: #{controller.status} #{controller.body}" unless controller.status == 200 && controller.body == "ok"
+raise "matching masked CSRF failed: #{controller.status} #{controller.body}" unless controller.status == 200 && controller.body == "ok"
 
-token = ActionView::ViewHelpers.form_authenticity_token
-raise "parked session token not read: #{token.inspect}" unless token == "tok"
+controller = WidgetsController.new
+ActionController::Current.controller = controller
+req = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example", "REQUEST_METHOD" => "POST")
+controller.request = req
+ActionController::Current.request = req
+controller.request_method = "POST"
+controller.session[:_csrf_token] = secret
+controller.params = { "authenticity_token" => secret }
+controller.process_action(:touch)
+raise "unmasked session token failed: #{controller.status}" unless controller.status == 200
+
+controller = WidgetsController.new
+ActionController::Current.controller = controller
+req = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example", "REQUEST_METHOD" => "POST", "HTTP_X_CSRF_TOKEN" => masked)
+controller.request = req
+ActionController::Current.request = req
+controller.request_method = "POST"
+controller.session[:_csrf_token] = secret
+controller.params = {}
+controller.process_action(:touch)
+raise "X-CSRF-Token header failed: #{controller.status}" unless controller.status == 200 && controller.body == "ok"
 puts "csrf passed"
+"#)
+        .assert_passes();
+}
+
+#[test]
+fn csrf_implicit_default_and_skip_before_action_run() {
+    emit_and_run::empty_app()
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  post \"/touch\", to: \"widgets#touch\"\n  post \"/open\", to: \"open#touch\"\nend\n")
+        .write("app/controllers/widgets_controller.rb", "class WidgetsController < ApplicationController\n  def touch\n    render plain: \"ok\"\n  end\nend\n")
+        .write("app/controllers/open_controller.rb", "class OpenController < ApplicationController\n  skip_before_action :verify_authenticity_token\n  def touch\n    render plain: \"open\"\n  end\nend\n")
+        .run_ruby(r#"
+require_relative "app/controllers/widgets_controller"
+require_relative "app/controllers/open_controller"
+ActionController::Base.allow_forgery_protection = true
+controller = WidgetsController.new
+ActionController::Current.controller = controller
+req = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example", "REQUEST_METHOD" => "POST")
+controller.request = req
+ActionController::Current.request = req
+controller.request_method = "POST"
+controller.params = {}
+controller.process_action(:touch)
+raise "implicit CSRF ran: #{controller.status}" unless controller.status == 422
+
+controller = OpenController.new
+ActionController::Current.controller = controller
+req = ActionDispatch::TestRequest.create("HTTP_HOST" => "app.example", "REQUEST_METHOD" => "POST")
+controller.request = req
+ActionController::Current.request = req
+controller.request_method = "POST"
+controller.params = {}
+controller.process_action(:touch)
+raise "skip_before_action did not skip: #{controller.status} #{controller.body}" unless controller.status == 200 && controller.body == "open"
+puts "csrf skip passed"
 "#)
         .assert_passes();
 }

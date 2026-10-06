@@ -32,6 +32,7 @@ pub mod current_attributes;
 pub mod delegate;
 pub mod thread_mattr;
 pub mod model;
+mod delegated_type;
 mod model_macros;
 pub mod on_load_reopen;
 pub mod prism;
