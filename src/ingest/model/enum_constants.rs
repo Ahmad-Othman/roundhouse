@@ -80,6 +80,15 @@ pub(in crate::ingest) struct EnumConstants {
 }
 
 impl EnumConstants {
+    /// True when any lexical owner defines a `JSON` constant that would
+    /// win bare `JSON` lookup inside that nest (e.g. `Admin::JSON` for
+    /// `module Admin; class Article`).
+    pub(in crate::ingest) fn shadows_bare_json(&self, lexical_owners: &[String]) -> bool {
+        lexical_owners
+            .iter()
+            .any(|owner| self.values.contains_key(&format!("{owner}::JSON")))
+    }
+
     /// Only already-consumed original Ruby can add mutation facts here.
     /// Declaration admission remains the prepass's input roots. Revalidate
     /// enum declarations only: no model replacement or unrelated diagnostics.

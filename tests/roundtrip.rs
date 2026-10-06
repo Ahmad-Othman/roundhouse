@@ -60,6 +60,7 @@ fn tiny_blog_round_trips() {
         enums: Default::default(),
         enum_defaults: Default::default(),
         class_attr_defaults: Default::default(),
+        lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
         span: Span::synthetic(),
     };

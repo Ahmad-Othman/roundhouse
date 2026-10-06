@@ -197,6 +197,32 @@ fn serialize_json_shadowed_by_local_const_stays_unclaimed() {
 }
 
 #[test]
+fn serialize_json_string_assignment_round_trips() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.text \"payload\"",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy\n  serialize :payload, coder: JSON\n",
+        )
+        .run_ruby(
+            r#"
+a = Article.create!(title: "S", body: "A body long enough to validate.", payload: "true")
+raise "assigned string" unless Article.find(a.id).payload == "true"
+a.payload = { "k" => 1 }
+a.save!
+raise "hash after string" unless Article.find(a.id).payload == { "k" => 1 }
+puts "serialize_string_ok"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
 fn serialize_json_shadow_detection_is_scope_aware() {
     // Unrelated Foo::JSON must not unclaim bare coder: JSON.
     let app = ingest_app_from_tree(article_app(
@@ -248,6 +274,75 @@ fn serialize_json_shadow_detection_is_scope_aware() {
             "nested `{nested}` shadows bare JSON"
         );
     }
+}
+
+#[test]
+fn serialize_json_enclosing_module_const_stays_unclaimed() {
+    let app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table :articles do |t|\n    t.string :title\n    t.text :payload\n  end\nend\n",
+        ),
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        ),
+        (
+            "app/models/article.rb",
+            r#"module Admin
+  JSON = Object
+  class Article < ApplicationRecord
+    serialize :payload, coder: JSON
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    let article = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Admin::Article")
+        .expect("Admin::Article");
+    assert!(
+        article.lexical_json_shadow,
+        "Admin::JSON must set lexical_json_shadow"
+    );
+    assert!(
+        roundhouse::lower::serialize::serialize_decls(article).is_empty(),
+        "enclosing Admin::JSON must not claim bare coder: JSON"
+    );
+    // Absolute ::JSON still claims under the same nest.
+    let app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table :articles do |t|\n    t.string :title\n    t.text :payload\n  end\nend\n",
+        ),
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        ),
+        (
+            "app/models/article.rb",
+            r#"module Admin
+  JSON = Object
+  class Article < ApplicationRecord
+    serialize :payload, coder: ::JSON
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    let article = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Admin::Article")
+        .unwrap();
+    assert_eq!(
+        roundhouse::lower::serialize::serialize_decls(article).len(),
+        1
+    );
 }
 
 #[test]

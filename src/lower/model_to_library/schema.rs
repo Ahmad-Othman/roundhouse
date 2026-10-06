@@ -101,6 +101,11 @@ pub(super) fn push_schema_methods(
             methods.push(synth_before_type_cast(owner, col));
             methods.push(synth_enum_storage_writer(owner, col));
         }
+        if is_generic_json_col(col, model) {
+            // Hydration writes stored JSON text without dump; the public
+            // `<col>=` writer always goes through JsonColumn.dump.
+            methods.push(synth_json_storage_writer(owner, col));
+        }
         if is_temporal_col(col) {
             methods.push(synth_raw_reader(owner, col));
             // Rails-parity Time-accepting writer (lobsters' ban flow:
@@ -768,11 +773,14 @@ fn col_storage_setter(col: &Column) -> Symbol {
     Symbol::from(format!("{}=", col_storage_name(col).as_str()))
 }
 
-/// Hydration is a storage write, not a user enum assignment. Unknown stored
-/// values remain intact and the enum reader answers nil for them.
+/// Hydration is a storage write, not a user enum / JSON assignment.
+/// Unknown stored enum values remain intact; JSON text skips dump so
+/// already-serialized DB bytes are not double-encoded.
 fn hydration_setter(model: &Model, col: &Column) -> Symbol {
     if model.enums.contains_key(&col.name) {
         enum_storage_writer(col)
+    } else if is_generic_json_col(col, model) {
+        json_storage_writer(col)
     } else {
         col_storage_setter(col)
     }
@@ -780,6 +788,10 @@ fn hydration_setter(model: &Model, col: &Column) -> Symbol {
 
 pub(crate) fn enum_storage_writer(col: &Column) -> Symbol {
     Symbol::from(format!("_write_{}_raw", col.name.as_str()))
+}
+
+fn json_storage_writer(col: &Column) -> Symbol {
+    Symbol::from(format!("_write_{}_json_raw", col.name.as_str()))
 }
 
 /// Fixture omissions are schema row data, not enum DSL defaults for `new`.
@@ -1294,8 +1306,8 @@ fn synth_attr_writer(owner: &ClassId, col: &Column, model: &Model) -> MethodDef 
     // Writers normally take the STORAGE type and write the storage ivar:
     // `<col>=` / `@<col>` in general, `<col>_raw=` / `@<col>_raw` (Str)
     // for a temporal column. Schema-less JSON is the exception: its public
-    // writer takes the decoded value and serializes it into the String slot;
-    // hydration's already-serialized String passes through unchanged.
+    // writer takes the decoded value and serializes it into the String slot.
+    // Hydration uses `_write_<col>_json_raw` so DB text never goes through dump.
     let col_ty = super::ty_of_column_slot(col);
     let value_ty = if is_generic_json_col(col, model) { Ty::Untyped } else { col_ty.clone() };
     let value = with_ty(var_ref(value_param.clone()), value_ty.clone());
@@ -1351,6 +1363,37 @@ fn synth_enum_storage_writer(owner: &ClassId, col: &Column) -> MethodDef {
         has_anonymous_block: false,
         name_span: Span::synthetic(),
         name: enum_storage_writer(col),
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(value.clone())],
+        body: seq(vec![assign, nil_lit()]),
+        signature: Some(fn_sig(vec![(value, slot_ty)], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    }
+}
+
+/// Internal JSON hydration writes already-serialized DB text into the
+/// String slot without `JsonColumn.dump` (which would double-encode).
+fn synth_json_storage_writer(owner: &ClassId, col: &Column) -> MethodDef {
+    let value = Symbol::from("value");
+    let slot_ty = super::ty_of_column_slot(col);
+    let assign = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Ivar { name: col_storage_name(col) },
+            value: with_ty(var_ref(value.clone()), slot_ty.clone()),
+        },
+    );
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: Span::synthetic(),
+        name: json_storage_writer(col),
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(value.clone())],
         body: seq(vec![assign, nil_lit()]),

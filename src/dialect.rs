@@ -92,6 +92,12 @@ pub struct Model {
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub class_attr_defaults: IndexMap<Symbol, crate::expr::Expr>,
 
+    /// An enclosing module (via EnumConstants nesting) defines a `JSON`
+    /// constant that would shadow bare `JSON` in `serialize` coder
+    /// resolution. Fail closed: claim only `::JSON` when set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lexical_json_shadow: bool,
+
     /// STI subclass class-ids whose rows live in THIS model's table
     /// (stamped by `lower::sti_scope`, which already derives the
     /// subclass->base map for scoping and `becomes!`). Non-empty turns

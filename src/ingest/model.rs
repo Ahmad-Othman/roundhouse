@@ -419,6 +419,7 @@ pub(super) fn ingest_model_with_enum_constants(
         enums,
         enum_defaults,
         class_attr_defaults,
+        lexical_json_shadow: enum_constants.shadows_bare_json(&enum_owners),
         span: Span {
             file: super::sources::file_id(file),
             start: class_loc.start_offset() as u32,

@@ -22,7 +22,8 @@ pub struct SerializeDecl {
 
 /// Every claimed JSON `serialize` in a model body.
 pub fn serialize_decls(model: &Model) -> Vec<SerializeDecl> {
-    let json_shadowed = body_defines_json_const(&model.body, model.name.0.as_str());
+    let json_shadowed = model.lexical_json_shadow
+        || body_defines_json_const(&model.body, model.name.0.as_str());
     let mut out = Vec::new();
     for item in &model.body {
         let ModelBodyItem::Unknown { expr, .. } = item else { continue };

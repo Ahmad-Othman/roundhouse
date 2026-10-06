@@ -268,6 +268,7 @@ mod tests {
             enums: indexmap::IndexMap::new(),
             enum_defaults: indexmap::IndexMap::new(),
             class_attr_defaults: indexmap::IndexMap::new(),
+            lexical_json_shadow: false,
             sti_subclass_names: Vec::new(),
             span: crate::span::Span::synthetic(),
         }
