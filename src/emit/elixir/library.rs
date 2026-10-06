@@ -546,6 +546,14 @@ pub(super) fn references_var(e: &Expr, name: &str) -> bool {
 /// operators `[]`/`[]=` (illegal as Elixir function names) become
 /// `get`/`put`; a writer `foo=` becomes `set_foo`.
 pub(super) fn elixir_fn_name(name: &str) -> String {
+    // Indexing operators and their while→recursion helpers (`[]__loop`,
+    // `[]=__loop`) are illegal Elixir identifiers — map to get/put.
+    if let Some(rest) = name.strip_prefix("[]=__") {
+        return format!("put__{rest}");
+    }
+    if let Some(rest) = name.strip_prefix("[]__") {
+        return format!("get__{rest}");
+    }
     match name {
         "[]" => return "get".to_string(),
         "[]=" => return "put".to_string(),

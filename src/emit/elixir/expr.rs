@@ -1565,7 +1565,7 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                     format!("{fname}(record, {})", arg_strs.join(", "))
                 };
             }
-            format!("{}({})", method, arg_strs.join(", "))
+            format!("{fname}({})", arg_strs.join(", "))
         }
         Some(r) => {
             let r_s = emit_expr(r);

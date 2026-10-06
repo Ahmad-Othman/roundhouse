@@ -1026,8 +1026,35 @@ fn emit_literal(lit: &Literal) -> String {
         Literal::Str { value } => format!("\"{}\"", escape_str(value)),
         // No symbol type in Kotlin → string.
         Literal::Sym { value } => format!("\"{}\"", escape_str(value.as_str())),
-        Literal::Regex { pattern, .. } => format!("Regex(\"{}\")", escape_str(pattern)),
+        Literal::Regex { pattern, .. } => {
+            // Ruby `/[\r\n\0\t]/` carries a backslash-zero NUL escape.
+            // Java `Pattern` rejects `\0` (octal needs more digits); use
+            // `\u0000` which both Kotlin's string literal and Pattern accept.
+            let normalized = normalize_java_regex_nul(pattern);
+            format!("Regex(\"{}\")", escape_str(&normalized))
+        }
     }
+}
+
+/// Rewrite Ruby/PCRE `\0` (NUL) escapes to Java `\u0000` before string
+/// escaping. Leaves other backslash sequences alone.
+fn normalize_java_regex_nul(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek() {
+                Some('0') => {
+                    chars.next();
+                    out.push_str("\\u0000");
+                }
+                _ => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn escape_str(s: &str) -> String {
