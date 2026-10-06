@@ -3124,10 +3124,24 @@ fn substitute_params(
             },
             _ => None,
         };
-        if let Some(options_name) = taken {
+        // `*%i[a b]` spreads its elements; any other splat's actions are
+        // unknown here, so the statement stays and the macro is refused
+        // rather than expanded with those actions missing.
+        let spread: Option<Vec<crate::expr::Expr>> = args
+            .get(rest_index..)
+            .unwrap_or(&[])
+            .iter()
+            .map(|a| match &*a.node {
+                ExprNode::Splat { value } => match &*value.node {
+                    ExprNode::Array { elements, .. } => Some(elements.clone()),
+                    _ => None,
+                },
+                _ => Some(vec![a.clone()]),
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(|groups| groups.concat());
+        if let (Some(options_name), Some(mut positional)) = (taken, spread) {
             exprs.remove(0);
-            let mut positional: Vec<crate::expr::Expr> =
-                args.get(rest_index..).unwrap_or(&[]).to_vec();
             let options = match positional.last().map(|a| match &*a.node {
                 ExprNode::KeywordSplat { value } => matches!(&*value.node, ExprNode::Hash { .. }),
                 ExprNode::Hash { .. } => true,
@@ -3202,7 +3216,13 @@ fn fold_literal_hash_reads(expr: &mut crate::expr::Expr) {
     if method.as_str() != "[]" {
         return;
     }
-    let found = entries.iter().find_map(|(ek, ev)| match &*ek.node {
+    // A computed or `**` key might be this one: leave the read, and the
+    // filter it feeds is refused instead of losing its guard.
+    if entries.iter().any(|(ek, _)| !matches!(&*ek.node, ExprNode::Lit { .. })) {
+        return;
+    }
+    // A repeated key reads its last value, as in Ruby.
+    let found = entries.iter().rev().find_map(|(ek, ev)| match &*ek.node {
         ExprNode::Lit { value: Literal::Sym { value } } if value == k => Some(ev.clone()),
         _ => None,
     });
