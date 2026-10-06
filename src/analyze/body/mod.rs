@@ -1393,7 +1393,15 @@ impl<'a> BodyTyper<'a> {
                     && (recv.is_some() || (ctx.self_ty.is_some() && send::is_module_protocol(method)))
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
                     let class_object = class_object_receiver;
-                    if send::is_module_protocol(method) && !class_object
+                    // `include?` is Module's ancestor check AND String/Enumerable
+                    // membership. Refuse Module protocol only for true Module-only
+                    // names, or for `include?` on a nominal class *instance* (where
+                    // Module#include? would be the wrong answer). Untyped /
+                    // String / Array receivers fall through to membership → Bool.
+                    let module_only = send::is_module_protocol(method)
+                        && (method.as_str() != "include?"
+                            || matches!(recv_ty, Some(Ty::Class { .. })));
+                    if module_only && !class_object
                         && !self.owns_operator(recv_ty.as_ref(), method, false) {
                         expr.diagnostic = Some(crate::diagnostic::DiagnosticKind::Unsupported {
                             target: None,
@@ -1414,7 +1422,17 @@ impl<'a> BodyTyper<'a> {
                         Some(Ty::Str) if matches!(method.as_str(), "to_date" | "to_time" | "to_datetime" | "in_time_zone" | "to_d" | "as_json") => Some("String extension"),
                         Some(Ty::Hash { .. }) if method.as_str() == "to_sentence" => Some("Hash extension"),
                         _ if method.as_str() == "not_nil!" => Some("not_nil!"),
-                        _ if matches!(method.as_str(), "to_query" | "instance_values" | "acts_like?" | "to_param" | "presence_in" | "as_json" | "with_options" | "pretty_inspect") => Some("Object extension"),
+                        // `to_param` on Untyped goes through ActiveSupport.to_param
+                        // (residue lowering + runtime). Refuse only on a nominal
+                        // class with no modeled/synthesized reader (e.g. a plain
+                        // PORO). Untyped helper params (campfire AvatarsHelper)
+                        // must not hard-fail.
+                        _ if method.as_str() == "to_param"
+                            && matches!(recv_ty, Some(Ty::Class { .. })) =>
+                        {
+                            Some("Object extension")
+                        }
+                        _ if matches!(method.as_str(), "to_query" | "instance_values" | "acts_like?" | "presence_in" | "as_json" | "with_options" | "pretty_inspect") => Some("Object extension"),
                         _ => None,
                     };
                     if let Some(owner) = gap.filter(|_| expr.diagnostic.is_none()) {
@@ -4105,8 +4123,11 @@ fn is_ivar_params_rooted(e: &crate::expr::Expr, locals: &HashMap<Symbol, Ty>) ->
 /// the `nil` an empty collection would give. `[x, LIMIT].min` is the
 /// clamp idiom; typing it `T?` (as `Enumerable#min` does for an arbitrary
 /// array) makes every `MAX - [x, LIMIT].min` look like arithmetic on nil.
-/// A nil element cannot survive either: comparing it raises in Ruby, so
-/// the nil arm is dropped from the element type too.
+///
+/// Nil is stripped from the element type only when some element excludes
+/// Nil: comparing nil with a non-nil value raises, so a nil result cannot
+/// occur. A single nilable element (`[maybe].min`) or an all-nilable
+/// literal can still return nil without a comparison error.
 fn literal_extremum_ty(recv: Option<&Expr>, recv_ty: &Ty, method: &Symbol, args: &[Expr]) -> Option<Ty> {
     if !matches!(method.as_str(), "min" | "max") || !args.is_empty() {
         return None;
@@ -4117,6 +4138,16 @@ fn literal_extremum_ty(recv: Option<&Expr>, recv_ty: &Ty, method: &Symbol, args:
         return None;
     }
     let Ty::Array { elem } = recv_ty else { return None };
+    // A nil result needs every element to be nilable. One non-nilable
+    // element makes a nil result raise instead of returning nil.
+    let some_non_nil = elements.iter().any(|e| match e.ty.as_ref() {
+        Some(Ty::Nil) | None => false,
+        Some(Ty::Union { variants }) => !variants.iter().any(|v| matches!(v, Ty::Nil)),
+        Some(_) => true,
+    });
+    if !some_non_nil {
+        return None;
+    }
     Some(match &**elem {
         Ty::Union { variants } => {
             let kept: Vec<Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).cloned().collect();

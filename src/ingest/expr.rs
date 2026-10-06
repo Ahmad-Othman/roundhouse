@@ -378,13 +378,22 @@ fn takes_trailing_ascription(node: &Node<'_>) -> bool {
 }
 
 fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
-    let expr = ingest_expr_node(node, file)?;
     if !takes_trailing_ascription(node) {
+        return ingest_expr_node(node, file);
+    }
+    // `x || y #: T`: both `y` and the OrNode share the same end offset.
+    // Only the outermost eligible expression may consume the comment.
+    let end = node.location().end_offset();
+    let outermost = super::type_ascription::push_trailing_ascription_claim(end);
+    let expr = ingest_expr_node(node, file);
+    super::type_ascription::pop_trailing_ascription_claim();
+    let expr = expr?;
+    if !outermost {
         return Ok(expr);
     }
     Ok(super::type_ascription::ascribe_trailing(
         expr,
-        super::type_ascription::trailing_ascription(file, node.location().end_offset()),
+        super::type_ascription::trailing_ascription(file, end),
     ))
 }
 
