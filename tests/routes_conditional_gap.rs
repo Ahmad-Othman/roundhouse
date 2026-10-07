@@ -1,18 +1,18 @@
-//! Conditionals in a `config/routes.rb` draw block (#145). A route
-//! body like `if Rails.env.development? … end` is an `IfNode`, not a
-//! call, and `ingest_route_stmts` skipped every non-call statement with
-//! a bare `continue`: each route inside the conditional vanished from
-//! the table with no ledger entry, strict or survey. The predicate is
-//! still not evaluated; these pin that the drop is now LOUD — strict
-//! ingest fails, survey mode records a gap naming the construct and its
-//! line, and the sibling routes still ingest.
+//! Conditionals in a `config/routes.rb` draw block (#145).
+//!
+//! `if` / `unless`, including modifier `if`, are walked: both arms stay
+//! in the table so every environment's helpers exist. The predicate is
+//! not evaluated. A `case` / `case in` is still not a call and is not
+//! walked; it used to vanish on a bare `continue`. Strict ingest fails,
+//! survey mode records a gap naming the construct and its line, and the
+//! sibling routes still ingest.
 
 use std::collections::HashMap;
 
-use roundhouse::App;
 use roundhouse::ingest::routes::ingest_routes_with_draws;
-use roundhouse::ingest::{IngestError, survey};
+use roundhouse::ingest::{survey, IngestError};
 use roundhouse::lower::flatten_routes;
+use roundhouse::App;
 
 const IF_BLOCK: &[u8] = b"Rails.application.routes.draw do\n  root \"pages#home\"\n  if Rails.env.development?\n    get \"/debug\", to: \"debug#show\"\n  end\nend\n";
 
@@ -23,14 +23,18 @@ fn ingest(source: &[u8]) -> Result<roundhouse::dialect::RouteTable, IngestError>
     result
 }
 
+fn paths_of(table: roundhouse::dialect::RouteTable) -> Vec<String> {
+    let mut app = App::default();
+    app.routes = table;
+    flatten_routes(&app).into_iter().map(|r| r.path).collect()
+}
+
 /// Survey-mode ingest of `source`: the flattened paths and the gaps.
 fn survey_ingest(source: &[u8]) -> (Vec<String>, Vec<IngestError>) {
     survey::activate();
     let result = ingest(source);
     let gaps = survey::drain();
-    let mut app = App::default();
-    app.routes = result.expect("survey mode recovers the sibling routes");
-    let paths = flatten_routes(&app).into_iter().map(|r| r.path).collect();
+    let paths = paths_of(result.expect("survey mode recovers the sibling routes"));
     (paths, gaps)
 }
 
@@ -39,60 +43,47 @@ fn gap_messages(gaps: &[IngestError]) -> Vec<String> {
 }
 
 #[test]
-fn a_conditional_route_block_fails_loud_in_strict_mode() {
-    let err =
-        ingest(IF_BLOCK).expect_err("a conditional route block must fail loud in strict mode");
-    assert!(
-        matches!(err, IngestError::Unsupported { .. }),
-        "unexpected error kind: {err:?}"
-    );
-}
-
-#[test]
-fn a_conditional_route_block_is_ledgered_in_survey_mode() {
-    let (paths, gaps) = survey_ingest(IF_BLOCK);
+fn an_if_route_block_keeps_both_arms() {
+    let paths = paths_of(ingest(IF_BLOCK).expect("an if block is walked, not dropped"));
     assert!(
         paths.iter().any(|p| p == "/"),
-        "the sibling `root` route survives: {paths:?}"
+        "the sibling root stays: {paths:?}"
     );
     assert!(
-        !paths.iter().any(|p| p == "/debug"),
-        "the predicate is not evaluated: {paths:?}"
+        paths.iter().any(|p| p == "/debug"),
+        "the route inside the if stays, predicate unevaluated: {paths:?}"
+    );
+
+    let (paths, gaps) = survey_ingest(IF_BLOCK);
+    assert!(
+        paths.iter().any(|p| p == "/debug"),
+        "survey keeps the if arm: {paths:?}"
     );
     let messages = gap_messages(&gaps);
     assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("conditional `if` block") && m.contains("line 3")),
-        "the dropped `if` block is ledgered with its line: {messages:?}"
+        !messages.iter().any(|m| m.contains("conditional")),
+        "a walked if is not a gap: {messages:?}"
     );
 }
 
 #[test]
-fn an_unless_block_and_a_modifier_if_route_are_each_ledgered() {
+fn an_unless_block_and_a_modifier_if_route_are_kept() {
     let source = b"Rails.application.routes.draw do\n  root \"pages#home\"\n  unless ENV[\"FEATURE_OFF\"]\n    get \"/feature\", to: \"feature#show\"\n  end\n  get \"/beta\", to: \"beta#show\" if ENV[\"BETA\"]\nend\n";
+    let paths = paths_of(ingest(source).expect("unless and modifier if are walked"));
     assert!(
-        ingest(source).is_err(),
-        "strict ingest fails loud on the first conditional"
+        paths.iter().any(|p| p == "/feature") && paths.iter().any(|p| p == "/beta"),
+        "both arms stay: {paths:?}"
     );
 
     let (paths, gaps) = survey_ingest(source);
     assert!(
-        paths.iter().any(|p| p == "/"),
-        "the sibling `root` route survives: {paths:?}"
+        paths.iter().any(|p| p == "/feature") && paths.iter().any(|p| p == "/beta"),
+        "survey keeps both arms: {paths:?}"
     );
     let messages = gap_messages(&gaps);
     assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("conditional `unless` block") && m.contains("line 3")),
-        "the `unless` block is ledgered with its line: {messages:?}"
-    );
-    assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("conditional `if` block") && m.contains("line 6")),
-        "the modifier `if` route is ledgered with its line: {messages:?}"
+        !messages.iter().any(|m| m.contains("conditional")),
+        "walked conditionals are not gaps: {messages:?}"
     );
 }
 

@@ -223,7 +223,8 @@ module Rails
       k = key.to_s
       return nil unless @entries.key?(k)
       due = @expires_at[k]
-      return @entries[k] if due == 0 || due > Time.now.to_i
+      return @entries[k] if due == 0
+      return @entries[k] if due > Time.now.to_i
       forget(k)
       nil
     end
@@ -481,6 +482,22 @@ module Rails
       []
     end
 
+    # `config.active_storage.video_preview_arguments` — ffmpeg argv
+    # after `-i`. Default is the select/keyframe/scene filter the
+    # poster reopen has always drawn with; campfire's initializer
+    # adds `gte(t,5)` and ingest overrides this one method.
+    # `ActiveStorage.video_preview_vf_filter` peels `-vf` from here.
+    def active_storage_video_preview_arguments
+      "-vf 'select=eq(n\\,0)+eq(key\\,1)+gt(scene\\,0.015),loop=loop=-1:size=2,trim=start_frame=1' -frames:v 1 -f image2"
+    end
+
+    # `config.active_storage.previewers` — default video previewer.
+    # A VideoPreviewer → replacement Const map is synthesized onto
+    # the Application reopen at ingest (where the app Const resolves).
+    def active_storage_previewers
+      [ActiveStorage::Previewer::VideoPreviewer]
+    end
+
     # `Vips.block_untrusted(true)` / `Vips.block("<op>", true)` in an
     # initializer: libvips' loader policy, which an app that stores
     # user uploads sets before any image is decoded. Lifted at ingest
@@ -497,11 +514,11 @@ module Rails
       []
     end
 
-    # `config.default_per_page = N` inside `Kaminari.configure` in an
-    # initializer: the page size `Relation#page` applies. Lifted at
-    # ingest onto the reopen like the settings above; Kaminari's own
-    # default when the app configures none.
-    def kaminari_default_per_page
+    # Default page size for `Relation#page`. Ingest lifts a literal
+    # `config.default_per_page = N` from a `Kaminari.configure` block
+    # (one input spelling) onto this reopen; 25 when the app configures
+    # none.
+    def default_per_page
       25
     end
   end
