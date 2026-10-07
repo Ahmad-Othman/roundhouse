@@ -214,17 +214,23 @@ fn checkpoint_flock_is_exclusive_across_processes() {
 path = Db.instance_variable_get(:@path)
 lock_path = Db.checkpoint_lock_path(path)
 held = Db.try_checkpoint_lock(lock_path)
-check("first holder acquired", !held.nil?)
+check("first holder acquired", held.is_a?(File))
 pid = fork do
   other = Db.try_checkpoint_lock(lock_path)
-  exit(other.nil? ? 0 : 1)
+  exit(other == :busy ? 0 : 1)
 end
 _pid, status = Process.wait2(pid)
-check("sibling failed to take the flock", status.exitstatus == 0)
+check("sibling saw :busy", status.exitstatus == 0)
 Db.release_checkpoint_lock(held)
 again = Db.try_checkpoint_lock(lock_path)
-check("lock free after release", !again.nil?)
+check("lock free after release", again.is_a?(File))
 Db.release_checkpoint_lock(again)
+# mkdir_p fails when the parent is a file — that is setup failure, not
+# contention; the loop must still checkpoint (nil, not :busy).
+parent = File.join(File.dirname(path), "not-a-dir")
+File.write(parent, "x")
+got = Db.try_checkpoint_lock(File.join(parent, "x.lock"))
+check("setup failure is nil so checkpoint still runs", got.nil?)
 "#,
     );
 }

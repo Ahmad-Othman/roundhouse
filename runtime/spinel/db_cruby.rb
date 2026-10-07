@@ -587,16 +587,22 @@ module Db
     File.join(File.dirname(path), ".#{File.basename(path)}.wal_checkpoint.lock")
   end
 
+  # File on acquire, `:busy` when another process holds the flock, `nil`
+  # when the lock file cannot be used (mkdir/open/flock error). Callers
+  # skip only on `:busy`; `nil` still checkpoints so a broken lock path
+  # cannot disable WAL copy after `wal_autocheckpoint=0`.
   def self.try_checkpoint_lock(lock_path)
+    file = nil
     FileUtils.mkdir_p(File.dirname(lock_path))
     file = File.open(lock_path, File::RDWR | File::CREAT, 0644)
-    if file.flock(File::LOCK_EX | File::LOCK_NB)
-      file
-    else
-      file.close
-      nil
-    end
+    return file if file.flock(File::LOCK_EX | File::LOCK_NB)
+    file.close
+    :busy
   rescue StandardError
+    begin
+      file.close if file && !file.closed?
+    rescue StandardError
+    end
     nil
   end
 
@@ -615,24 +621,33 @@ module Db
     conn.busy_handler_timeout = 100
     lock_path = checkpoint_lock_path(path)
     loop do
-      sleep CHECKPOINT_INTERVAL
+      # Hold the flock for the whole inner loop (Campfire #319), not
+      # per tick: releasing every 250ms lets a sibling overlap a
+      # PASSIVE with ours. Losers sleep and retry; a dead winner
+      # drops the flock so another worker takes over.
       lock = try_checkpoint_lock(lock_path)
-      next if lock.nil?
+      if lock == :busy
+        sleep CHECKPOINT_INTERVAL
+        next
+      end
       begin
-        row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)")[0]
-        log_frames = row.nil? ? 0 : row[1].to_i
-        if log_frames >= CHECKPOINT_RESTART_FRAMES
-          if acquire_permit
-            begin
-              conn.execute("PRAGMA wal_checkpoint(RESTART)")
-            ensure
-              release_permit
+        loop do
+          sleep CHECKPOINT_INTERVAL
+          row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)")[0]
+          log_frames = row.nil? ? 0 : row[1].to_i
+          if log_frames >= CHECKPOINT_RESTART_FRAMES
+            if acquire_permit
+              begin
+                conn.execute("PRAGMA wal_checkpoint(RESTART)")
+              ensure
+                release_permit
+              end
             end
           end
         end
       rescue StandardError
-        # A busy or failed checkpoint is retried on the next tick; the
-        # log only grows meanwhile.
+        # A busy or failed checkpoint is retried on the next outer
+        # pass; the log only grows meanwhile.
       ensure
         release_checkpoint_lock(lock)
       end
