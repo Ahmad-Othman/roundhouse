@@ -319,6 +319,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("find_signed", nilable(class_ty(&blob_id))),
             ("create_and_upload!", class_ty(&blob_id)),
             ("from_attachable", nilable(class_ty(&blob_id))),
+            ("from_io_hash", nilable(class_ty(&blob_id))),
             ("generate_key", Ty::Str),
         ] {
             blob.class_methods.insert(Symbol::from(m), ty);
@@ -425,6 +426,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             storage.class_methods.insert(Symbol::from(m), Ty::Array { elem: Box::new(Ty::Str) });
         }
         storage.class_methods.insert(Symbol::from("variable_content_type?"), Ty::Bool);
+        storage.class_methods.insert(Symbol::from("content_type_for_format"), Ty::Str);
+        storage.class_methods.insert(Symbol::from("content_type_for_filename"), Ty::Str);
         storage.class_methods.insert(Symbol::from("url_filename"), Ty::Str);
         classes.insert(ClassId(Symbol::from("ActiveStorage")), storage);
     }
