@@ -205,6 +205,9 @@ require_relative "runtime/active_job"
 # Per-request state per THREAD -- reopens Current, the view slots, the
 # broadcast log, the job queue and the store memo (see the file).
 require_relative "runtime/thread_state"
+# A drain thread per serving process, registered by config.ru. After
+# thread_state: it wraps that file's locked queue methods.
+require_relative "runtime/active_job_cruby"
 # `Turbo::StreamsChannel` — the channel a `<turbo-cable-stream-source>`
 # names, AND the `broadcast_*_to` class methods a model's after_commit
 # reaches (and an app's own tests mock). One constant, both halves, the
