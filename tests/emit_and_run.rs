@@ -225,6 +225,33 @@ fn scope_free_model_query_builders_run_on_spinel() {
     }
 }
 
+/// The runtime-provided cable mount survives strict analysis and Rack dispatch.
+#[test]
+fn builtin_cable_mount_runs_with_supported_sibling_routes() {
+    emit_and_run::real_blog()
+        .write("app/channels/application_cable/connection.rb", "module ApplicationCable\n  class Connection < ActionCable::Connection::Base\n    def connect\n      reject_unauthorized_connection\n    end\n  end\nend\n")
+        .write("app/controllers/widgets_controller.rb", "class WidgetsController < ActionController::Base\n  def index\n    render plain: 'widgets'\n  end\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  get '/widgets', to: 'widgets#index'\n  mount ActionCable.server => '/cable'\nend\n")
+        .run_ruby(r##"
+require "rack"
+require "rack/mock"
+# As in overlay_cable_identity, leave the unused reactor dependencies empty.
+# The actual app authorization must refuse before any reactor API is called.
+%w[nio websocket/driver].each { |feature| $LOADED_FEATURES << "#{feature}.rb" }
+module NIO; end
+module WebSocket; end
+builder = Rack::Builder.new
+builder.instance_eval(File.read("config.ru"), "config.ru")
+client = Rack::MockRequest.new(builder.to_app)
+widgets = client.get("/widgets")
+raise "sibling route failed: #{widgets.status} #{widgets.body}" unless widgets.status == 200 && widgets.body == "widgets"
+cable = client.get("/cable", "HTTP_HOST" => "example.test", "HTTP_ORIGIN" => "http://example.test")
+raise "cable endpoint disappeared: #{cable.status} #{cable.body}" unless cable.status == 401 && cable.body == "Unauthorized\n"
+puts "runtime cable endpoint preserved"
+"##)
+        .assert_passes();
+}
+
 #[test]
 fn finite_concern_class_configuration_runs_without_replaying_rails() {
     for (overlay, assertions) in [

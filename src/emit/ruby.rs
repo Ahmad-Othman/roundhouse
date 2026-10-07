@@ -225,6 +225,7 @@ pub(crate) fn materialize_models(
         &params_specs,
         &assoc_scopes,
         materialization,
+        crate::lower::model_to_library::FinderInputs::Request,
     ).0;
     (lcs, params_specs)
 }
@@ -549,7 +550,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth) -> Vec
     // + class_info_from_library_class) because the former returns
     // ClassInfo with `table` set — the Arel pass needs `info.table`
     // to map a Const recv to a TableRef when recognizing chains.
-    let (_, model_registry) = crate::lower::lower_models_with_registry(
+    let (_, model_registry) = crate::lower::model_to_library::lower_models_with_request_finders(
         &app.models,
         &app.schema,
         Vec::new(),
@@ -1001,7 +1002,7 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
         // counted twice, which is worse than not knowing.
         let (model_registry, _dup_diags) = crate::emit::diagnostics::scope(|| {
             let (_, reg) =
-                crate::lower::lower_models_with_registry(&app.models, &app.schema, Vec::new());
+                crate::lower::model_to_library::lower_models_with_request_finders(&app.models, &app.schema, Vec::new());
             reg
         });
         let fixture_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> = fixture_lcs

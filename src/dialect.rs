@@ -1457,6 +1457,10 @@ pub struct RouteTable {
     /// writes by hand when it wants the same thing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redirects: Vec<RedirectRoute>,
+    /// Recovered route omissions stay errors in the normal diagnostic stream,
+    /// so callers can inspect supported siblings without claiming full support.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<crate::diagnostic::Diagnostic>,
 }
 
 /// One `to: redirect(...)` route, as the action synthesized for it.
