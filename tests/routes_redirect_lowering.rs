@@ -238,7 +238,7 @@ fn a_path_option_redirect_is_the_same_location_as_a_positional_string() {
         "a path-only options redirect is served; got:\n{emitted}"
     );
     assert!(
-        emitted.contains("q = request.query_string"),
+        emitted.contains("q = query_string"),
         "a path option keeps the request query; a positional redirect does not; got:\n{emitted}"
     );
     assert!(
@@ -270,7 +270,7 @@ fn a_path_option_replaces_a_positional_location() {
     // The query goes ahead of a fragment, split off at compile time:
     // `/login#step` plus `x=1` is `/login?x=1#step`.
     assert!(
-        emitted.contains("q = request.query_string")
+        emitted.contains("q = query_string")
             && emitted.contains("\"/login?\" + q + \"#step\""),
         "the options form keeps the query and puts it before a fragment; got:\n{emitted}"
     );

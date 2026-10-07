@@ -331,6 +331,10 @@ module ActionController
     end
 
     attr_accessor :params, :session, :flash, :request_method, :request_path, :request_format
+    # Raw query string (no leading `?`), as the request carried it. Path-
+    # option redirects that keep the query read this; dispatchers set it
+    # alongside `request_path` so every target sees the same value.
+    attr_accessor :query_string
     # True when the request's Accept is a bare `*/*` — an
     # XMLHttpRequest or fetch that set none. Rails reads that as "any
     # format", so an action with no html template renders the template
@@ -369,6 +373,7 @@ module ActionController
       @request_method = +""
       @request_path = +""
       @request_format = :html
+      @query_string = +""
       @accepts_any_format = false
       @content_type = "text/html; charset=utf-8"
       @headers = ActionController::HeaderStore.new

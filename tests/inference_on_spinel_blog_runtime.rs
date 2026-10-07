@@ -280,7 +280,11 @@ fn untyped_subexpressions_baseline() {
     // All seven added sites are IntegerKeyCast#parse's unseeded Float
     // guard/input reads and comparisons; no existing site changes.
     // Its RBS-paired method still has the separate zero-residual assertion.
-    const CEILING: usize = 512;
+    // TokenFor (#450) on the same collector: 512 -> 519, MEASURED on
+    // pristine upstream/main after #450+#438. The seven new sites are
+    // ActiveRecord::TokenFor helpers under the spinel-blog runtime
+    // probe; the Float ceiling was never re-measured against TokenFor.
+    const CEILING: usize = 519;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ceiling of {CEILING}.\n\

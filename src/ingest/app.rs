@@ -4989,10 +4989,11 @@ fn synthesize_redirect_controller(
                 redirect.location.clone()
             } else if redirect.keep_query {
                 // The options form keeps the request query, read off the
-                // action's own `request`. An empty query leaves the
-                // location unchanged; a path that already has a `?` is
-                // joined with `&`; the query goes ahead of a fragment, so
-                // `/login#step` plus `x=1` is `/login?x=1#step`.
+                // action's own `query_string` (set by every target's
+                // dispatcher from the raw request query). An empty query
+                // leaves the location unchanged; a path that already has a
+                // `?` is joined with `&`; the query goes ahead of a
+                // fragment, so `/login#step` plus `x=1` is `/login?x=1#step`.
                 //
                 // A deliberate divergence from Rails, which appends
                 // `"?" + query` and nothing else (MEASURED, 8.1.4 and
@@ -5008,6 +5009,10 @@ fn synthesize_redirect_controller(
                 // string literal, so the separator and the fragment are
                 // decided here. A `%{name}` cannot bring a `?` or `#` of
                 // its own: `redirect_location_source` path-escapes it.
+                // Uses the controller attribute rather than
+                // `request.query_string` so C# and Elixir (which do not
+                // yet wire a full Request receiver) still preserve the
+                // query.
                 let (path, fragment) = redirect.location.split_once('#').unwrap_or((&redirect.location, ""));
                 let separator = if path.contains('?') { '&' } else { '?' };
                 let fragment = if fragment.is_empty() {
@@ -5016,7 +5021,7 @@ fn synthesize_redirect_controller(
                     format!(" + {}", redirect_location_source(&format!("#{fragment}")))
                 };
                 format!(
-                    "q = request.query_string\n    q == \"\" ? {} : {} + q{fragment}",
+                    "q = query_string\n    q == \"\" ? {} : {} + q{fragment}",
                     redirect_location_source(&redirect.location),
                     redirect_location_source(&format!("{path}{separator}")),
                 )
@@ -5088,7 +5093,7 @@ fn synthesize_redirect_controller(
 /// path parameters, path-escaped as Rails does
 /// (`Journey::Router::Utils.escape_path`), so the placeholder becomes
 /// `#{ActionDispatch::Router.escape_path(params[:name].to_s)}`. The
-/// router decodes a capture (`Router.decode_segment`), so a `#` or `?`
+/// router decodes a capture (`Router.decode_capture`), so a `#` or `?`
 /// in it is escaped back and stays in the path.
 fn redirect_location_source(location: &str) -> String {
     let mut out = String::from("\"");

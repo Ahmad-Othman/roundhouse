@@ -55,7 +55,7 @@ public static class Server
 
         var reqMethod = ctx.Request.Method;
         // The raw request target, still percent-encoded, minus its query:
-        // the shared router decodes each capture (`Router.decode_segment`),
+        // the shared router decodes each capture (`Router.decode_captures`),
         // as Rails' does. `Request.Path` is ASP.NET's decoded form (all but
         // `%2F`), which the router would decode a second time. An
         // absolute-form target (`GET http://host/articles`, as sent to a
@@ -143,6 +143,12 @@ public static class Server
         controller.RequestFormat = format;
         controller.RequestMethod = method;
         controller.RequestPath = path;
+        // Raw query without leading `?` — path-option redirects that keep
+        // the query read `QueryString` on the controller.
+        var qs = ctx.Request.QueryString.HasValue
+            ? ctx.Request.QueryString.Value!.TrimStart('?')
+            : "";
+        controller.QueryString = qs;
         // Reload the flash carried from the previous request so views render it;
         // the constructor snapshots it as *_was so ToPersisted can drop it
         // after one display.

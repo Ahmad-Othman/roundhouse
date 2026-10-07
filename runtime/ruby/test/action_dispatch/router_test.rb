@@ -379,27 +379,24 @@ class RouterTest < Minitest::Test
     assert_equal "jpg", m.path_params["format"]
     assert_nil ActionDispatch::Router.match("GET", "/rails/active_storage/disk/abc", table)
   end
-  # A capture is percent-decoded the way Rails' router decodes path
-  # parameters: `%20` a space, `%2F`/`%2f` a slash, `%25` a percent,
-  # a `+` left a `+`, and a `%` without two hex digits left as sent.
-  # A non-ASCII or control sequence stays encoded (printable ASCII only).
+  # Direct decode_capture checks (match goes through decode_captures).
+  # UTF-8 sequences decode; malformed `%` syntax stays literal.
   def test_a_capture_is_percent_decoded
-    assert_equal "a b+c", ActionDispatch::Router.decode_segment("a%20b+c")
-    assert_equal "a/b?#", ActionDispatch::Router.decode_segment("a%2fb%3F%23")
-    assert_equal "100%", ActionDispatch::Router.decode_segment("100%25")
-    assert_equal "bad%zz%2", ActionDispatch::Router.decode_segment("bad%zz%2")
-    assert_equal "jos%C3%A9", ActionDispatch::Router.decode_segment("jos%C3%A9")
-    assert_equal "plain", ActionDispatch::Router.decode_segment("plain")
+    assert_equal "a b+c", ActionDispatch::Router.decode_capture("a%20b+c")
+    assert_equal "a/b?#", ActionDispatch::Router.decode_capture("a%2fb%3F%23")
+    assert_equal "100%", ActionDispatch::Router.decode_capture("100%25")
+    assert_equal "bad%zz%2", ActionDispatch::Router.decode_capture("bad%zz%2")
+    assert_equal "josé", ActionDispatch::Router.decode_capture("jos%C3%A9")
+    assert_equal "plain", ActionDispatch::Router.decode_capture("plain")
   end
 
   # The inverse a routing redirect's `%{name}` needs: Rails' PATH set
-  # escaped, `/` `:` `@` and the sub-delims kept, and a sequence
-  # `decode_segment` left encoded not escaped a second time.
+  # escaped over the decoded capture (including UTF-8 bytes as `%XX`).
   def test_escape_path_reverses_a_decoded_capture
     assert_equal "a%23top%3Fx%20y/b:c@d!e%5Bf%5D", ActionDispatch::Router.escape_path("a#top?x y/b:c@d!e[f]")
     assert_equal "100%25", ActionDispatch::Router.escape_path("100%")
-    assert_equal "jos%C3%A9", ActionDispatch::Router.escape_path("jos%C3%A9")
-    assert_equal "x%0Ay", ActionDispatch::Router.escape_path("x%0Ay")
+    assert_equal "jos%C3%A9", ActionDispatch::Router.escape_path("josé")
+    assert_equal "x%0Ay", ActionDispatch::Router.escape_path("x\ny")
     assert_equal "a/b~", ActionDispatch::Router.escape_path("a/b~")
   end
 end

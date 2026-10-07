@@ -1701,7 +1701,7 @@ fn router_v2_shape() {
     assert!(text.contains("for i < int64(len("), "while loop missing for-emit:\n{text}");
     assert!(text.contains("i = i + 1"), "i += 1 missing reassign emit:\n{text}");
     assert!(
-        text.contains("name := pp[1:]") && text.contains("params[name] = ActionDispatchRouter_decode_segment(seg)"),
+        text.contains("name := pp[1:]") && text.contains("params[name] = ap"),
         "[]= missing index-assign emit:\n{text}",
     );
 
