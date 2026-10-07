@@ -88,13 +88,32 @@ fn io_and_filename_without_content_type_uses_the_filename() {
 end
 "#,
     );
+    let body = method_body(&src, "put_named");
     assert!(
-        src.contains("content_type_for_filename"),
-        "missing content_type must be the filename's type:\n{src}"
+        body.contains("content_type_for_filename"),
+        "missing content_type must be the filename's type:\n{body}"
     );
     assert!(
-        src.contains("attach(\"bytes\"") || src.contains("attach(\"bytes\","),
-        "io must still be grounded to bytes:\n{src}"
+        body.contains("attach(\"bytes\"") || body.contains("attach(\"bytes\","),
+        "io must still be grounded to bytes:\n{body}"
+    );
+}
+
+#[test]
+fn nil_content_type_is_treated_as_absent() {
+    let src = emitted_model(
+        r#"class Doc < ApplicationRecord
+  has_one_attached :file
+  def put_nil_type
+    file.attach(io: StringIO.new("bytes"), filename: "a.png", content_type: nil)
+  end
+end
+"#,
+    );
+    let body = method_body(&src, "put_nil_type");
+    assert!(
+        body.contains("content_type_for_filename"),
+        "nil content_type must fall back to the filename:\n{body}"
     );
 }
 

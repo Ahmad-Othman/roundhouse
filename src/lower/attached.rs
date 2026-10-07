@@ -142,7 +142,10 @@ fn rewrite_attach(e: &mut Expr) {
     if let Some((io, filename, content_type)) = attach_io_hash(&args[0]) {
         let mut data = ground_io(io);
         data.ty = Some(Ty::Str);
-        let content_type = content_type.unwrap_or_else(|| content_type_from_filename(&filename));
+        let content_type = match content_type {
+            Some(ct) if !expr_is_nil(&ct) => ct,
+            _ => content_type_from_filename(&filename),
+        };
         e.diagnostic = None;
         *args = vec![data, filename, content_type];
         return;
@@ -183,7 +186,8 @@ fn attach_blob_from_attachable(recv: Expr, attachable: Expr) -> ExprNode {
         e.ty = Some(ty);
         e
     };
-    let blob = Symbol::from("blob");
+    // Underscored so a caller's `blob` local is not shadowed.
+    let blob = Symbol::from("_attachable_blob");
     let blob_ty = Ty::Union {
         variants: vec![
             Ty::Class {
@@ -373,6 +377,10 @@ fn ty_is_attached(ty: &Ty) -> bool {
 
 fn expr_is_hash(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Hash { .. }) || e.ty.as_ref().is_some_and(ty_is_hash)
+}
+
+fn expr_is_nil(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
 }
 
 fn ty_is_hash(ty: &Ty) -> bool {

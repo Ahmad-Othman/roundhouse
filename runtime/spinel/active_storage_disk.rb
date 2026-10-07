@@ -87,8 +87,14 @@ module ActiveStorage
     # a value (a yielded bag, a local) rather than a literal the
     # lowerer already grounded. `io` that is already bytes is kept;
     # anything else is read. Missing `content_type` uses the filename
-    # extension, as Marcel's filename half does.
+    # extension. Keys beyond `io` / `filename` / `content_type` are
+    # unsupported here (`identify:`, `key:`) — decline rather than
+    # attach with a silently dropped option.
     def self.from_io_hash(value)
+      value.each_key do |key|
+        name = key.to_s
+        return nil unless name == "io" || name == "filename" || name == "content_type"
+      end
       io = value[:io]
       io = value["io"] if io.nil?
       raw_name = value[:filename]
