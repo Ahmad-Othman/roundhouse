@@ -250,7 +250,8 @@ puts "ALL OK"
 #[test]
 fn overlay_memory_store_shards_match_spinel_and_survive_races() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let script = r#"
+    // r## so Ruby `"#{…}"` interpolations do not terminate the raw string.
+    let script = r##"
 require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/rails_cache"
 
 raise "shard count" unless Rails::MemoryStore::SHARD_COUNT == 32
@@ -347,7 +348,7 @@ raise "clear left str" unless store.read_str("views/rooms/show/messages/0-ts").n
 raise "clear left rate" unless store.read_str("rate-0").nil?
 
 puts "ALL OK"
-"#;
+"##;
     let out = Command::new("ruby")
         .arg("-e")
         .arg(script)
