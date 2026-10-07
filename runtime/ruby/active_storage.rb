@@ -124,6 +124,14 @@ module ActiveStorage
     dot.nil? || dot == 0 ? filename : filename[0, dot].to_s
   end
 
+  # Marcel's filename half when `attach(io:, filename:)` omits
+  # `content_type:` — the extension's registered type, or the same
+  # octet-stream `content_type_for_format` uses for an unknown format.
+  # Byte sniffing stays with `ImageAnalyzer` after the bytes exist.
+  def self.content_type_for_filename(filename)
+    content_type_for_format(Filename.new(filename).extension_without_delimiter)
+  end
+
   # Where the blob's file lives, keyed by the blob's `key` column.
   #
   # Every method RAISES: no storage service is modeled in the shared

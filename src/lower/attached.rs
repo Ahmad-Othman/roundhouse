@@ -74,12 +74,12 @@ fn attached_class() -> ClassId {
 /// tripped the ceiling gate. Reading the bytes here keeps every
 /// parameter a String.
 ///
-/// This lowerer supports only a literal keyword hash with all three
-/// fields. Rails also accepts a forwarded `{ io:, filename: }` Hash;
-/// that contract remains unsupported here. It needs a typed IO/attachable
-/// seam and Rails' byte-based MIME identification when content_type is
-/// absent, not a permissive RBS parameter or a filename-only guess.
-/// Other single-argument attachables are also left alone.
+/// A literal hash needs `io:` and `filename:`; `content_type:` is
+/// optional and grounded through `ActiveStorage.content_type_for_filename`
+/// when absent. A Hash that is a *value* (a yielded bag, a local) and
+/// the other one-argument attachables (blob, signed id, uploaded file)
+/// become `attach_blob(Blob.from_attachable(…))` at the call site.
+/// The ruby family unpacks `io:` hashes in `from_attachable`.
 pub fn apply_attach_lowering(app: &mut crate::app::App) {
     super::for_each_hook_body(app, &mut rewrite_attach);
     // Test bodies too: every `attach` in the corpus today is written by
@@ -127,60 +127,184 @@ fn rewrite_inline_transformation(e: &mut Expr) {
 
 fn rewrite_attach(e: &mut Expr) {
     e.node.for_each_child_mut(&mut rewrite_attach);
-    let ExprNode::Send { method, args, .. } = &mut *e.node else { return };
+    let ExprNode::Send { recv, method, args, .. } = &mut *e.node else { return };
     // `Blob.create_and_upload!(io:, filename:, content_type:)` is the
     // same three keywords for the same reason (campfire's webhook
     // stores a bot's attachment reply through it), and grounds the
     // same way.
-    if (method.as_str() != "attach" && method.as_str() != "create_and_upload!") || args.len() != 1
-    {
+    let name = method.as_str();
+    if name != "attach" && name != "create_and_upload!" {
         return;
     }
-    let ExprNode::Hash { entries, kwargs: true } = &*args[0].node else { return };
+    if args.len() != 1 {
+        return;
+    }
+    if let Some((io, filename, content_type)) = attach_io_hash(&args[0]) {
+        let mut data = ground_io(io);
+        data.ty = Some(Ty::Str);
+        let content_type = content_type.unwrap_or_else(|| content_type_from_filename(&filename));
+        e.diagnostic = None;
+        *args = vec![data, filename, content_type];
+        return;
+    }
+    // A Hash bag that is not a literal `io:`/`filename:` shape, or
+    // any other one-argument attachable on the proxy: Rails' attach
+    // goes through `from_attachable`. `create_and_upload!` of a Hash
+    // is that same coercion (it already creates the blob).
+    if name == "create_and_upload!" {
+        if expr_is_hash(&args[0]) {
+            e.diagnostic = None;
+            *method = Symbol::from("from_attachable");
+        }
+        return;
+    }
+    if !(recv_is_attached(recv) || expr_is_hash(&args[0])) {
+        return;
+    }
+    let Some(recv_expr) = recv.clone() else { return };
+    let attachable = args[0].clone();
+    // Analyze stamped `SendDispatchFailed` on the one-arg Hash form
+    // against the three-String `attach` signature; the rewrite is the
+    // supported shape, so drop that annotation with the call.
+    e.diagnostic = None;
+    e.ty = Some(Ty::Nil);
+    *e.node = attach_blob_from_attachable(recv_expr, attachable);
+}
+
+fn attach_blob_from_attachable(recv: Expr, attachable: Expr) -> ExprNode {
+    let span = recv.span;
+    let syn = |node: ExprNode| {
+        let mut e = Expr::new(span, node);
+        e.ty = Some(Ty::Nil);
+        e
+    };
+    let typed = |node: ExprNode, ty: Ty| {
+        let mut e = Expr::new(span, node);
+        e.ty = Some(ty);
+        e
+    };
+    let blob = Symbol::from("blob");
+    let blob_ty = Ty::Union {
+        variants: vec![
+            Ty::Class {
+                id: ClassId(Symbol::from("ActiveStorage::Blob")),
+                args: vec![],
+            },
+            Ty::Nil,
+        ],
+    };
+    let var = || typed(
+        ExprNode::Var { id: crate::ident::VarId(0), name: blob.clone() },
+        blob_ty.clone(),
+    );
+    let coerce = typed(
+        ExprNode::Send {
+            recv: Some(typed(
+                ExprNode::Const {
+                    path: vec![Symbol::from("ActiveStorage"), Symbol::from("Blob")],
+                },
+                Ty::Class {
+                    id: ClassId(Symbol::from("ActiveStorage::Blob")),
+                    args: vec![],
+                },
+            )),
+            method: Symbol::from("from_attachable"),
+            args: vec![attachable],
+            block: None,
+            parenthesized: true,
+        },
+        blob_ty.clone(),
+    );
+    ExprNode::Seq {
+        exprs: vec![
+            syn(ExprNode::Assign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: blob.clone() },
+                value: coerce,
+            }),
+            typed(
+                ExprNode::If {
+                    cond: typed(
+                        ExprNode::Send {
+                            recv: Some(var()),
+                            method: Symbol::from("nil?"),
+                            args: vec![],
+                            block: None,
+                            parenthesized: false,
+                        },
+                        Ty::Bool,
+                    ),
+                    then_branch: syn(ExprNode::Lit { value: Literal::Nil }),
+                    else_branch: syn(ExprNode::Send {
+                        recv: Some(recv),
+                        method: Symbol::from("attach_blob"),
+                        args: vec![var()],
+                        block: None,
+                        parenthesized: true,
+                    }),
+                },
+                Ty::Nil,
+            ),
+        ],
+    }
+}
+
+fn attach_io_hash(arg: &Expr) -> Option<(Expr, Expr, Option<Expr>)> {
+    let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
     let pick = |name: &str| -> Option<Expr> {
         entries
             .iter()
             .find(|(k, _)| {
                 matches!(&*k.node,
                     ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == name)
+                    || matches!(&*k.node,
+                    ExprNode::Lit { value: Literal::Str { value } } if value == name)
             })
             .map(|(_, v)| v.clone())
     };
-    // All three, and nothing else: an attach carrying an option this
-    // does not reproduce is left to fail by name rather than silently
-    // dropped.
-    let (Some(io), Some(filename), Some(content_type)) =
-        (pick("io"), pick("filename"), pick("content_type"))
-    else {
-        return;
-    };
-    if entries.len() != 3 {
-        return;
+    // `io:` and `filename:` required. Extra keys (`identify:`, `key:`)
+    // are not reproduced here — those hashes take the attachable path
+    // so a dropped option is not silent.
+    for (k, _) in entries {
+        let known = match &*k.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => {
+                matches!(value.as_str(), "io" | "filename" | "content_type")
+            }
+            ExprNode::Lit { value: Literal::Str { value } } => {
+                matches!(value.as_str(), "io" | "filename" | "content_type")
+            }
+            _ => false,
+        };
+        if !known {
+            return None;
+        }
     }
+    let (Some(io), Some(filename)) = (pick("io"), pick("filename")) else {
+        return None;
+    };
+    Some((io, filename, pick("content_type")))
+}
+
+fn ground_io(io: Expr) -> Expr {
     let span = io.span;
     // `StringIO.new(bytes).read` is `bytes`: the wrapper exists only to
     // give Rails an io, and reading it back through StringIO would put
     // that class on every target's plate for nothing.
-    let unwrapped = match &*io.node {
-        ExprNode::Send { recv: Some(recv), method, args, .. }
-            if method.as_str() == "new"
-                && args.len() == 1
-                && matches!(&*recv.node, ExprNode::Const { path }
-                    if path.len() == 1 && path[0].as_str() == "StringIO") =>
+    if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*io.node {
+        if method.as_str() == "new"
+            && args.len() == 1
+            && matches!(&*recv.node, ExprNode::Const { path }
+                if path.len() == 1 && path[0].as_str() == "StringIO")
         {
-            Some(args[0].clone())
+            return args[0].clone();
         }
-        _ => None,
-    };
+    }
     // `file_fixture("moon.jpg").open` is a Pathname opened for reading;
     // `File.binread(path.to_s)` is the same bytes without an IO in the
     // middle (spinel's blockless `Pathname#open` has no value to read
     // from — it yields).
-    let unwrapped = unwrapped.or_else(|| match &*io.node {
-        ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
-            if method.as_str() == "open" && args.is_empty() =>
-        {
-            Some(Expr::new(
+    if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*io.node {
+        if method.as_str() == "open" && args.is_empty() {
+            return Expr::new(
                 span,
                 ExprNode::Send {
                     recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("File")] })),
@@ -198,25 +322,65 @@ fn rewrite_attach(e: &mut Expr) {
                     block: None,
                     parenthesized: true,
                 },
-            ))
+            );
         }
-        _ => None,
-    });
-    let mut data = match unwrapped {
-        Some(bytes) => bytes,
-        None => Expr::new(
-            span,
-            ExprNode::Send {
-                recv: Some(io),
-                method: Symbol::from("read"),
-                args: Vec::new(),
-                block: None,
-                parenthesized: false,
-            },
-        ),
-    };
-    data.ty = Some(Ty::Str);
-    *args = vec![data, filename, content_type];
+    }
+    Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(io),
+            method: Symbol::from("read"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    )
+}
+
+fn content_type_from_filename(filename: &Expr) -> Expr {
+    let span = filename.span;
+    let mut expr = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                span,
+                ExprNode::Const { path: vec![Symbol::from("ActiveStorage")] },
+            )),
+            method: Symbol::from("content_type_for_filename"),
+            args: vec![filename.clone()],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    expr.ty = Some(Ty::Str);
+    expr
+}
+
+fn recv_is_attached(recv: &Option<Expr>) -> bool {
+    recv.as_ref().and_then(|r| r.ty.as_ref()).is_some_and(ty_is_attached)
+}
+
+fn ty_is_attached(ty: &Ty) -> bool {
+    match ty {
+        Ty::Class { id, .. } => {
+            let name = id.0.as_str();
+            name == "ActiveStorage::Attached" || name == "Attached"
+        }
+        Ty::Union { variants } => variants.iter().any(ty_is_attached),
+        _ => false,
+    }
+}
+
+fn expr_is_hash(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Hash { .. }) || e.ty.as_ref().is_some_and(ty_is_hash)
+}
+
+fn ty_is_hash(ty: &Ty) -> bool {
+    match ty {
+        Ty::Hash { .. } => true,
+        Ty::Union { variants } => variants.iter().any(ty_is_hash),
+        _ => false,
+    }
 }
 
 pub fn attached_attrs(model: &Model) -> Vec<(Span, Symbol)> {

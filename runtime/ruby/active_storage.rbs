@@ -10,6 +10,7 @@ module ActiveStorage
   def self.content_type_for_format: (String format) -> String
   def self.format_for_content_type: (String content_type) -> String
   def self.filename_base: (String filename) -> String
+  def self.content_type_for_filename: (String filename) -> String
   def self.url_filename: (String filename) -> String
 
   class Service
