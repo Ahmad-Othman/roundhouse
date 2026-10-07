@@ -706,3 +706,75 @@ puts "ALL OK"
     assert!(out.status.success(), "driver exited {:?}", out.status.code());
     eprintln!("{stdout}");
 }
+
+/// Short glue that carries a recorded CSRF token must not fold into the
+/// next fragment piece (CodeRabbit on #546): each token change would miss
+/// the piece cache and re-deflate glue+fragment. Token-bearing glue stays
+/// on splice_text; fragments deflate once across requests.
+#[test]
+fn token_bearing_short_glue_does_not_fold_into_fragment_piece() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = r##"
+require "securerandom"
+require "base64"
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/gzip_cache"
+raise "splice unavailable" unless GzipCache::SPLICE_OK
+
+tmpl = lambda { |i|
+  b = +"<turbo-frame id=\"message_#{i}\" class=\"message\">"
+  40.times { |p|
+    b << "<p class=\"message__body\">Paragraph #{p} of message #{i}: shared markup.</p>\n"
+  }
+  (b << "</turbo-frame>\n").freeze
+}
+a = tmpl.call(1)
+b = tmpl.call(2)
+raise "glue budget" unless a.bytesize >= GzipCache::SPLICE_MIN
+
+fragment_deflates = 0
+orig = GzipCache.method(:raw_deflate)
+GzipCache.define_singleton_method(:raw_deflate) do |d, dict, lv|
+  if lv == Zlib::DEFAULT_COMPRESSION && d.include?("turbo-frame")
+    fragment_deflates += 1
+  end
+  orig.call(d, dict, lv)
+end
+
+4.times do
+  tok = Base64.urlsafe_encode64(SecureRandom.random_bytes(32), padding: false)
+  raise "token longer than MAX_GLUE" unless tok.bytesize <= GzipCache::MAX_GLUE
+  # Token alone is the entire short glue between two fragments.
+  body = a + tok + b
+  gz = GzipCache.splice(body, [a, b], [tok])
+  raise "nil splice" if gz.nil?
+  raise "round trip" unless Zlib.gunzip(gz) == body.b
+end
+raise "fragment deflated #{fragment_deflates}x (want 2 — once each, not per token)" unless fragment_deflates == 2
+
+# Control: token-free short glue still folds (second fragment uses a dict).
+dicts = 0
+GzipCache.define_singleton_method(:raw_deflate) do |d, dict, lv|
+  dicts += 1 if lv == Zlib::DEFAULT_COMPRESSION && !dict.nil? && d.include?("turbo-frame")
+  orig.call(d, dict, lv)
+end
+c = tmpl.call(3)
+d = tmpl.call(4)
+gz = GzipCache.splice(c + "\n" + d, [c, d])
+raise "fold rt" unless Zlib.gunzip(gz) == (c + "\n" + d).b
+raise "token-free glue did not fold (dicts=#{dicts})" unless dicts >= 1
+puts "ALL OK"
+"##;
+    let out = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .current_dir(root)
+        .output()
+        .expect("ruby is on PATH");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("ALL OK"),
+        "token-bearing glue fold failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+    assert!(out.status.success(), "driver exited {:?}", out.status.code());
+}

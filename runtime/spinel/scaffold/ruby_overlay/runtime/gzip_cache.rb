@@ -41,7 +41,8 @@
 #     (by identity) and the same glue precede it, so a wrong-body hit is
 #     refused even when CSRF in the layout varies;
 #   * short glue (≤ MAX_GLUE) between consecutive fragments travels with
-#     the second; longer gaps are layout text and start a new run;
+#     the second when it holds no recorded request token; token-bearing
+#     or longer gaps go through splice_text and start a new run;
 #   * per request only the text between runs is deflated, at BEST_SPEED,
 #     with the real preceding 32 KB as its dictionary;
 #   * the pieces are framed as one gzip member: header, pieces, a final
@@ -275,7 +276,12 @@ module GzipCache
     while k < frags.length
       text = texts[k]
       frag = frags[k]
-      if k > 0 && text.bytesize <= MAX_GLUE
+      # Fold short glue into the next fragment only when it holds no
+      # recorded request token. A token in the glue would be part of the
+      # piece key, so every CSRF change would miss and re-deflate the
+      # whole glue+fragment (and burn a PIECES_PER_FRAGMENT slot). Leave
+      # token-bearing glue on splice_text (stored block) instead.
+      if k > 0 && text.bytesize <= MAX_GLUE && token_cuts(text, tokens).nil?
         piece, piece_crc = fragment_piece(frag, text, found, k, run_start, pos, raw)
         out << piece
         crc = Zlib.crc32_combine(crc, piece_crc, text.bytesize + frag.bytesize)
