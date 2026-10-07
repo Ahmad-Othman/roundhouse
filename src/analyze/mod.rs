@@ -495,7 +495,7 @@ impl Analyzer {
             register_has_secure_password(&model.body, &mut cls.instance_methods, &mut cls.class_methods, &self_ty);
             // `generates_token_for :purpose` — the token round-trip
             // Rails 7.1 added (the guide's unsubscribe link).
-            register_generates_token_for(&model.body, &mut cls.instance_methods, &mut cls.class_methods, &self_ty);
+            register_generates_token_for(model, &mut cls.instance_methods, &mut cls.class_methods, &self_ty);
             // `has_rich_text :body` generates the reader/predicate/
             // writer and the scoped has_one behind them.
             register_has_rich_text(model, &mut cls.instance_methods);
@@ -7615,19 +7615,19 @@ fn register_has_secure_password(
 /// Register the methods `generates_token_for :purpose` (Rails 7.1)
 /// generates: `record.generate_token_for(:purpose)` answers a signed
 /// String, `Model.find_by_token_for(:purpose, token)` the record or
-/// nil, and the bang form the record (raising). One declaration is
-/// enough — the purpose is an argument, not part of the method name.
+/// nil, and the bang form the record (raising). One claimed
+/// declaration is enough — the purpose is an argument, not part of the
+/// method name.
 fn register_generates_token_for(
-    body: &[ModelBodyItem],
+    model: &crate::dialect::Model,
     methods: &mut HashMap<Symbol, Ty>,
     class_methods: &mut HashMap<Symbol, Ty>,
     self_ty: &Ty,
 ) {
-    let declared = body.iter().any(|item| {
-        let ModelBodyItem::Unknown { expr, .. } = item else { return false };
-        matches!(&*expr.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "generates_token_for")
-    });
-    if !declared {
+    // Only the declarations lower::generates_token_for expands: typing
+    // one it leaves unclaimed would quiet `check` over a method nothing
+    // defines.
+    if crate::lower::generates_token_for::token_for_decls(model).is_empty() {
         return;
     }
     methods.entry(Symbol::from("generate_token_for")).or_insert(Ty::Str);
