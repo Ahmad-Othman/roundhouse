@@ -7,6 +7,9 @@ module ActiveStorage
   def self.default_variable_content_types: () -> Array[String]
   def self.variable_content_types: () -> Array[String]
   def self.variable_content_type?: (String content_type) -> bool
+  def self.video_preview_arguments: () -> String
+  def self.video_preview_vf_filter: () -> String
+  def self.previewers: () -> Array[untyped]
   def self.content_type_for_format: (String format) -> String
   def self.format_for_content_type: (String content_type) -> String
   def self.filename_base: (String filename) -> String
