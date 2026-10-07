@@ -154,11 +154,15 @@ The recognizer covers the verb shortcuts (`get`/`post`/…), `match`,
 split files under `config/routes/`, and options like `defaults:`,
 `on:`, and `via:` — `src/ingest/routes.rs` is the authority on the
 current surface. Literal `redirect("/path")` targets on a verb or `root`
-are synthesized into controller actions. Dynamic targets, including block
-redirects, remain a separate known gap: they are dropped and reported only
-in survey mode. The mount diagnostic change does not broaden that existing
-boundary; recognizing or diagnosing dynamic route expressions needs its own
-regressions.
+are synthesized into controller actions. Some block redirects are synthesized
+too: `redirect_block` accepts bodies that pass its string-expression check,
+including string literals and interpolations, conditionals whose branches
+pass the check, sequences whose final expression passes it, and selected
+method calls. It checks for at most two required block parameters, named
+`_`, `params`, `request`, or `req`. Other dynamic targets outside this
+recognizer remain a separate known gap: they are dropped and reported only
+in survey mode. The mount diagnostic change does not broaden that boundary;
+recognizing or diagnosing those targets needs its own regressions.
 
 Engine/Rack `mount` entries are omitted with a located error diagnostic
 carried on `RouteTable`, so normal analysis can report them beside other
