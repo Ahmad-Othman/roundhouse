@@ -535,8 +535,10 @@ module ActiveRecord
     end
 
     # Model Hash finders use the relation's NULL / IN predicates too.
+    # `.to_h` matches `where` above: Hash is a no-op (nil / Array values
+    # survive); non-Hash inputs raise rather than reach Relation's SQL path.
     def self.find_by(conditions)
-      ActiveRecord::Relation.new(self).find_by(conditions)
+      ActiveRecord::Relation.new(self).find_by(conditions.to_h)
     end
 
     # Rails-shape `all` fallback, same story as `where` above: a lazy
