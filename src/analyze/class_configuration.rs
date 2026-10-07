@@ -155,7 +155,9 @@ impl Analyzer {
                                 self.body_typer().analyze_expr(default, &ctx);
                             }
                         }
-                        ctx = self.seed_method_params(&ctx, &controller.name, method);
+                        // Controllers are not DSL-macro hosts (`has_markdown`
+                        // templates live on models and library concerns).
+                        ctx = self.seed_method_params(&ctx, &controller.name, method, false);
                     }
                     ClassConfigurationRole::Writer => {
                         ctx.ivar_bindings.insert(
