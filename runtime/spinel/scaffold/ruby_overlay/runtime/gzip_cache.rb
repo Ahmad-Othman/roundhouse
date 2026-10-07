@@ -45,6 +45,16 @@
 # not an offset in the body. A fragment nested inside a later one (a
 # collection miss writes its members, then the collection) is found in
 # order and the container skipped. No fragment found: the paths above.
+#
+# The text between fragments is mostly the layout, the same bytes on every
+# request except for the masked CSRF tokens in it (a fresh pad each
+# render): 20-30 KB of text deflated per request for 86-byte differences.
+# So each token the request minted is noted too (TokenRecorder), the text
+# is cut at the tokens, and each constant run between them is deflated once
+# and cached by its bytes, like a fragment. A token goes out as a stored
+# block: random base64 does not compress. Correctness never depends on
+# finding every token: a run is looked up by its bytes, so a run holding
+# an unnoticed token just misses and is deflated, as before.
 require "zlib"
 
 module GzipCache
@@ -61,17 +71,21 @@ module GzipCache
 
   def self.call(app, env)
     prev = Thread.current[:rh_gzip_fragments]
+    prev_tokens = Thread.current[:rh_gzip_tokens]
     Thread.current[:rh_gzip_fragments] = []
+    Thread.current[:rh_gzip_tokens] = []
     begin
       status, headers, body = app.call(env)
       fragments = Thread.current[:rh_gzip_fragments]
+      tokens = Thread.current[:rh_gzip_tokens]
     ensure
       Thread.current[:rh_gzip_fragments] = prev
+      Thread.current[:rh_gzip_tokens] = prev_tokens
     end
-    maybe_gzip(env, status, headers, body, fragments)
+    maybe_gzip(env, status, headers, body, fragments, tokens)
   end
 
-  def self.maybe_gzip(env, status, headers, body, fragments = nil)
+  def self.maybe_gzip(env, status, headers, body, fragments = nil, tokens = nil)
     return [status, headers, body] if status < 200 || status == 204 || status == 304
     return [status, headers, body] if env["REQUEST_METHOD"] == "HEAD"
     accept = env["HTTP_ACCEPT_ENCODING"].to_s
@@ -80,7 +94,7 @@ module GzipCache
     raw = join_body(body)
     return [status, headers, [raw]] if raw.bytesize < 64
     return [status, headers, [raw]] if binary?(header(headers, "content-type"))
-    gz = compress(raw, fragments)
+    gz = compress(raw, fragments, tokens)
     headers = headers.dup
     headers["content-encoding"] = "gzip"
     vary = header(headers, "vary")
@@ -93,15 +107,17 @@ module GzipCache
     [status, headers, [gz]]
   end
 
-  def self.compress(raw, fragments = nil)
+  def self.compress(raw, fragments = nil, tokens = nil)
     @mutex.synchronize do
       lr = @last_raw
       if !lr.nil? && lr.bytesize == raw.bytesize && lr == raw
         return @last_gz
       end
     end
-    if !fragments.nil? && !fragments.empty?
-      spliced = splice(raw, fragments)
+    has_frags = !fragments.nil? && !fragments.empty?
+    has_tokens = !tokens.nil? && !tokens.empty?
+    if has_frags || has_tokens
+      spliced = splice(raw, has_frags ? fragments : [], has_tokens ? tokens : nil)
       return spliced unless spliced.nil?
     end
     dig = [raw.hash, raw.bytesize, Zlib.crc32(raw)]
@@ -159,6 +175,16 @@ module GzipCache
   # with one comparison. byteindex of a whole ~400 KB fragment was the top
   # frame of a spliced request.
   PROBE_CHARS = 64
+  # Constant text runs (between tokens) deflated once: bytes -> [the
+  # run's canonical frozen copy, {predecessor => {gap => piece}}]. Keyed by
+  # content, so a run is only ever reused for the same bytes; cleared when
+  # full rather than tracked (a layout has a handful).
+  @runs = {}
+  RUN_ENTRIES = 256
+  # Pieces kept per run, across predecessors and gaps.
+  RUN_VARIANTS = 16
+  # Runs shorter than this go out stored: a lookup hashes the run.
+  RUN_MIN = 32
 
   # Called by the cache store for each fragment it hands to a view.
   def self.note_fragment(fragment)
@@ -169,7 +195,7 @@ module GzipCache
   end
 
   # One gzip member for `raw`, or nil when no recorded fragment is in it.
-  def self.splice(raw, fragments)
+  def self.splice(raw, fragments, tokens = nil)
     return nil unless SPLICE_OK
     found = []
     pos = 0
@@ -179,7 +205,8 @@ module GzipCache
       found << at << frag
       pos = at + frag.bytesize
     end
-    return nil if found.empty?
+    # Tokens alone are worth splicing only if one is in the body.
+    return nil if found.empty? && token_cuts(raw, tokens).nil?
 
     # The text between fragments, as slices of `raw` (shared, not copied).
     texts = []
@@ -211,7 +238,7 @@ module GzipCache
     crc = 0
     pos = 0
     texts.each_with_index do |text, k|
-      crc = splice_text(out, raw, pos, text, crc) unless text.empty?
+      crc = splice_text(out, raw, pos, text, crc, tokens) unless text.empty?
       pos += text.bytesize
       frag = frags[k]
       next if frag.nil?
@@ -253,18 +280,124 @@ module GzipCache
 
   # The per-request text `data`, starting at byte `pos`: fastest level, with the
   # body's real preceding bytes (up to the window) as its dictionary.
-  def self.splice_text(out, raw, pos, data, crc)
+  def self.splice_text(out, raw, pos, data, crc, tokens = nil)
+    cuts = data.bytesize < STORE_MAX ? nil : token_cuts(data, tokens)
     if data.bytesize < STORE_MAX
-      # A stored block: BFINAL 0, BTYPE 00, padded to the byte boundary the
-      # previous piece's SYNC_FLUSH left, then LEN, ~LEN and the bytes.
-      n = data.bytesize
-      out << [0, n, n ^ 0xffff].pack("Cvv") << data.b
-    else
+      stored(out, data)
+    elsif cuts.nil?
       start = pos > WINDOW ? pos - WINDOW : 0
       dict = pos.zero? ? nil : raw.byteslice(start, pos - start)
       out << raw_deflate(data, dict, Zlib::BEST_SPEED)
+    else
+      at = 0
+      i = 0
+      prev = nil
+      gap = 0
+      while i < cuts.length
+        s = cuts[i]
+        n = cuts[i + 1]
+        prev, gap = constant_run(out, data.byteslice(at, s - at), prev, gap) if s > at
+        stored(out, data.byteslice(s, n))
+        gap += n
+        at = s + n
+        i += 2
+      end
+      constant_run(out, data.byteslice(at, data.bytesize - at), prev, gap) if at < data.bytesize
     end
     Zlib.crc32_combine(crc, Zlib.crc32(data), data.bytesize)
+  end
+
+  # A stored block: BFINAL 0, BTYPE 00, padded to the byte boundary the
+  # previous piece's SYNC_FLUSH left, then LEN, ~LEN and the bytes.
+  def self.stored(out, data)
+    n = data.bytesize
+    out << [0, n, n ^ 0xffff].pack("Cvv") << data.b
+  end
+
+  # Where the request's tokens sit in `data`, as a flat sorted
+  # [start, length, ...] of non-overlapping spans, or nil for none.
+  def self.token_cuts(data, tokens)
+    return nil if tokens.nil?
+    spans = []
+    tokens.each do |tok|
+      at = data.byteindex(tok)
+      until at.nil?
+        spans << [at, tok.bytesize]
+        at = data.byteindex(tok, at + tok.bytesize)
+      end
+    end
+    return nil if spans.empty?
+    spans.sort_by!(&:first)
+    cuts = []
+    last_end = 0
+    spans.each do |s, n|
+      next if s < last_end
+      cuts << s << n
+      last_end = s + n
+    end
+    cuts
+  rescue ArgumentError, IndexError, Encoding::CompatibilityError
+    nil
+  end
+
+  # A run of text with no token in it, deflated once per (run, predecessor,
+  # gap) and reused by its bytes. Answers [predecessor, gap] for the next
+  # run: this run's canonical copy and 0, or, for a run short enough to go
+  # out stored, the predecessor kept and the gap grown by the run.
+  #
+  # The dictionary is the previous constant run followed by `gap` NULs:
+  # the decompressor's window holds that run and then the gap's real bytes
+  # (a token, which varies), so back-references into the run land at the
+  # right distance. A reference into the gap would copy NULs, and a match
+  # can only copy bytes the run itself holds, so a NUL-free run can never
+  # refer into it; a run with a NUL, or a gap past the window, gets no
+  # dictionary. Same bytes always come out of the same (run, predecessor,
+  # gap), so the piece is reused for exactly those.
+  def self.constant_run(out, run, prev = nil, gap = 0)
+    if run.bytesize < RUN_MIN
+      stored(out, run)
+      return [prev, gap + run.bytesize]
+    end
+    prev = nil if gap >= WINDOW / 2 || run.include?("\0")
+    entry = nil
+    piece = nil
+    @pieces_mutex.synchronize do
+      entry = @runs[run]
+      unless entry.nil?
+        by_gap = entry[1][prev.nil? ? NO_PREV : prev]
+        piece = by_gap[gap] unless by_gap.nil?
+      end
+    end
+    if piece.nil?
+      dict = nil
+      unless prev.nil?
+        keep = WINDOW - gap
+        tail = prev.bytesize > keep ? prev.byteslice(prev.bytesize - keep, keep) : prev
+        dict = tail.b + ("\0" * gap).b
+      end
+      piece = raw_deflate(run, dict, Zlib::DEFAULT_COMPRESSION).freeze
+      @pieces_mutex.synchronize do
+        entry = @runs[run]
+        if entry.nil?
+          @runs.clear if @runs.size >= RUN_ENTRIES
+          entry = [run.dup.freeze, {}.compare_by_identity]
+          @runs[entry[0]] = entry
+        end
+        variants = entry[1]
+        variants.clear if variants.size >= RUN_VARIANTS
+        (variants[prev.nil? ? NO_PREV : prev] ||= {})[gap] = piece
+      end
+    end
+    out << piece
+    [entry[0], 0]
+  end
+  NO_PREV = Object.new.freeze
+
+  # Called with each masked CSRF token a request mints.
+  def self.note_token(token)
+    list = Thread.current[:rh_gzip_tokens]
+    return if list.nil? || !token.is_a?(String) || token.empty?
+    list << token
   end
 
   # A fragment's piece and CRC-32, deflated the first time it is seen.
@@ -363,3 +496,16 @@ module GzipCache
 end
 
 Rails::MemoryStore.prepend(GzipCache::Recorder) if defined?(Rails::MemoryStore)
+
+if defined?(ActionController::AuthenticityToken)
+  module GzipCache
+    module TokenRecorder
+      def masked
+        tok = super
+        GzipCache.note_token(tok)
+        tok
+      end
+    end
+  end
+  ActionController::AuthenticityToken.singleton_class.prepend(GzipCache::TokenRecorder)
+end
