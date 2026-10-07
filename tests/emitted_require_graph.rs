@@ -484,8 +484,8 @@ end
             roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
                 if construct.as_str() == "ruby_family_runtime_constant"
         ) && d.message.contains("ActionView::MissingTemplate")).collect();
-        assert!(!gaps.is_empty(), "{target:?}: expected MissingTemplate ledger, got {diags:?}");
-        assert!(gaps.iter().all(|g| !g.span.is_synthetic()), "{gaps:?}");
+        assert_eq!(gaps.len(), 1, "{target:?}: expected one MissingTemplate ledger, got {diags:?}");
+        assert!(!gaps[0].span.is_synthetic(), "{gaps:?}");
     }
 }
 

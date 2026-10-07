@@ -3994,11 +3994,49 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
     Some("bundled_constant")
 }
 
+/// True when the app already defines `id` as a class/module value, so
+/// the availability gate must not ledger it as a missing runtime stub.
+fn app_defines_class(app: &App, id: &crate::ident::ClassId) -> bool {
+    app.library_classes.iter().any(|class| class.name == *id)
+        || app.models.iter().any(|model| model.name == *id)
+        || app.controllers.iter().any(|controller| controller.name == *id)
+        || app.rails_application.as_ref().is_some_and(|class| class.name == *id)
+        || app.test_modules.iter().any(|module| {
+            module.inner_classes.iter().any(|class| class.name == *id)
+        })
+}
+
+/// Ledger a Const / superclass name that is unavailable on `target`
+/// (bundled library object or ruby-family runtime exception stub).
+fn report_unavailable_class_value(
+    app: &App,
+    target: &str,
+    name: &str,
+    span: crate::span::Span,
+) {
+    if span.is_synthetic() {
+        return;
+    }
+    let id = crate::ident::ClassId(crate::ident::Symbol::from(name));
+    if let Some(construct) = unavailable_class_module_construct(name, target)
+        && !app_defines_class(app, &id)
+    {
+        emit::diagnostics::report_unsupported(
+            span,
+            target,
+            construct,
+            format!("{name} is not available as a class/module value on {target}"),
+        );
+    }
+}
+
 /// Most of these class objects are supplied by Ruby/Spinel's bundled
 /// libraries, not by the transpiled runtimes. The others are exception
 /// classes that only the ruby-family runtime defines. Recognizing them
 /// during inference must not turn a missing target implementation into
-/// a clean emit.
+/// a clean emit. Also ledgers superclass Consts (via `parent_span`) and
+/// lowers-added exception Consts surveyed from a throwaway controller
+/// lower (emit still lowers controllers after this gate today).
 fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Spinel | BuildTarget::Roda) {
         return;
@@ -4006,22 +4044,7 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     fn visit(expr: &crate::expr::Expr, app: &App, target: &str) {
         if matches!(&*expr.node, crate::expr::ExprNode::Const { .. }) {
             if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
-                let name = id.0.as_str();
-                if let Some(construct) = unavailable_class_module_construct(name, target)
-                    && !expr.span.is_synthetic()
-                    && !app.library_classes.iter().any(|class| class.name == *id)
-                    && !app.models.iter().any(|model| model.name == *id)
-                    && !app.controllers.iter().any(|controller| controller.name == *id)
-                    && !app.rails_application.as_ref().is_some_and(|class| class.name == *id)
-                    && !app.test_modules.iter().any(|module| module.inner_classes.iter().any(|class| class.name == *id))
-                {
-                    emit::diagnostics::report_unsupported(
-                        expr.span,
-                        target,
-                        construct,
-                        format!("{name} is not available as a class/module value on {target}"),
-                    );
-                }
+                report_unavailable_class_value(app, target, id.0.as_str(), expr.span);
             }
         }
         // A mapped JSON call does not emit a Ruby module object. Skip
@@ -4050,7 +4073,7 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     // Controller `render` → `MissingTemplate` rewriting lives in
     // `controller_to_library`, which runs at emit time after this gate.
     // Survey a throwaway lower so lowers-added exception Consts (now
-    // typed) are still ledgered on strict targets.
+    // typed) are still ledgered on strict targets (Thomas 2B).
     let lowered_controllers =
         crate::lower::controller_to_library::lower_controllers_with_arel_and_views(
             &app.controllers,
@@ -4168,44 +4191,32 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     // Exprs in a method body — visit them explicitly so
     // `class X < ActionController::RoutingError` is ledgered.
     let target = target.as_str();
-    let report_parent = |name: &str, span: crate::span::Span| {
-        if span.is_synthetic() {
-            return;
-        }
-        let id = crate::ident::ClassId(crate::ident::Symbol::from(name));
-        if let Some(construct) = unavailable_class_module_construct(name, target)
-            && !app.library_classes.iter().any(|class| class.name == id)
-            && !app.models.iter().any(|model| model.name == id)
-            && !app.controllers.iter().any(|controller| controller.name == id)
-            && !app.rails_application.as_ref().is_some_and(|class| class.name == id)
-            && !app.test_modules.iter().any(|module| {
-                module.inner_classes.iter().any(|class| class.name == id)
-            })
-        {
-            emit::diagnostics::report_unsupported(
-                span,
-                target,
-                construct,
-                format!("{name} is not available as a class/module value on {target}"),
-            );
-        }
-    };
     for model in &app.models {
         if let Some(parent) = &model.parent {
-            report_parent(parent.0.as_str(), model.parent_span);
+            report_unavailable_class_value(app, target, parent.0.as_str(), model.parent_span);
         }
     }
     for controller in &app.controllers {
         if let Some(parent) = &controller.parent {
-            report_parent(parent.0.as_str(), controller.parent_span);
+            report_unavailable_class_value(
+                app,
+                target,
+                parent.0.as_str(),
+                controller.parent_span,
+            );
         }
         for sibling in &controller.sibling_classes {
-            report_parent(sibling.parent.as_str(), sibling.parent_span);
+            report_unavailable_class_value(
+                app,
+                target,
+                sibling.parent.as_str(),
+                sibling.parent_span,
+            );
         }
     }
     for class in app.library_classes.iter().chain(app.rails_application.iter()) {
         if let Some(parent) = &class.parent {
-            report_parent(parent.0.as_str(), class.parent_span);
+            report_unavailable_class_value(app, target, parent.0.as_str(), class.parent_span);
         }
     }
 }
