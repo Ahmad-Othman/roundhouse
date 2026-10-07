@@ -162,6 +162,8 @@ require_relative "runtime/active_storage_previewer"
 # String-identity case, and this overlay's polymorphic is_a? version
 # must redefine it for CRuby's residual dynamic sites.
 require_relative "runtime/action_view_safe_buffer"
+# Set lookup, one regexp scan and appends for the attribute helpers.
+require_relative "runtime/action_view_helpers_cruby"
 # `sanitize` / `strip_tags` / `auto_link` on the REAL rails-html-sanitizer
 # (guarded — an app that never sanitizes boots without the gem, and the
 # shared runtime's scanner stands). AFTER the safe buffer: these return
