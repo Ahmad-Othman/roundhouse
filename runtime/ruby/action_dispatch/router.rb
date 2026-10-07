@@ -310,28 +310,30 @@ module ActionDispatch
     # target lowers alike. A control byte or a non-ASCII sequence
     # (`%C3%A9`) stays encoded, as is a `%` not followed by two hex
     # digits. Its own method, one `while`, for the Elixir lowering.
-    # No early `return unless`: Elixir lowers a trailing `while` to a
-    # recursive `__loop` that takes `i`, and an `i = 0` after an early
-    # return is then unused under `--warnings-as-errors`. Keep `i` and
-    # the loop inside the `%`-present branch.
+    # Canonical Elixir while (`while_to_recursion`): trailing `i += 1`
+    # only. A `%XX` decode advances by three source bytes via a carried
+    # `skip` (consume the two hex digits on the next two iterations) —
+    # branching `i += 3` inside the loop body is outside the pass's
+    # scope. No `%` still works — every byte copies through.
     def self.decode_segment(s)
-      if s.include?("%")
-        out = ""
-        i = 0
-        while i < s.length
+      out = ""
+      i = 0
+      skip = 0
+      while i < s.length
+        if skip > 0
+          skip = skip - 1
+        else
           code = escaped_byte(s, i)
           if printable_byte(code)
             out = out + printable[code - 32, 1].to_s
-            i += 3
+            skip = 2
           else
             out = out + s[i, 1].to_s
-            i += 1
           end
         end
-        out
-      else
-        s
+        i += 1
       end
+      out
     end
 
     # A decoded capture path-escaped again, for a routing redirect's
