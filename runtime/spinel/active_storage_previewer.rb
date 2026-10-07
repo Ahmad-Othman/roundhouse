@@ -1,8 +1,9 @@
 # `ActiveStorage::Previewer.poster` over ffmpeg — the ruby family's
 # reopen of the shared definition (runtime/ruby/active_storage.rb),
-# which raises. Rails' `Previewer::VideoPreviewer` draws the poster
-# with this exact command; campfire's own Dockerfile installs ffmpeg
-# for it, and so does the archive's.
+# which raises. Rails' nested `Previewer::VideoPreviewer` is the
+# inheritance target apps subclass; drawing still goes through this
+# class-side `poster` with the same ffmpeg command Rails uses.
+# Campfire's Dockerfile installs ffmpeg for it, and so does the archive's.
 #
 # The filter is Rails' verbatim (actionstorage's `video_preview.rb`):
 # the first frame, or the first keyframe, or the first scene change

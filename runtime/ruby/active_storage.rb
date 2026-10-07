@@ -195,11 +195,21 @@ module ActiveStorage
     end
   end
 
-  # The video previewer's swap point — Rails' `Previewer::VideoPreviewer`,
-  # which draws a poster frame with ffmpeg. The shared definition raises,
-  # as `Processor` does: nothing here can run a program, and answering
+  # Rails' `ActiveStorage::PreviewError` — raised when a previewer cannot
+  # draw a poster (ffmpeg failed, timed out, …). Apps and railties rescue
+  # or raise it; campfire's `TimeLimitedVideoPreviewer` raises it when
+  # the wall-clock limit trips.
+  class PreviewError < StandardError
+  end
+
+  # The video previewer's swap point. Drawing is the class-side
+  # `Previewer.poster` (ffmpeg on the ruby family); Rails' instance API
+  # lives under the nested `VideoPreviewer` so an app can subclass it
+  # (`TimeLimitedVideoPreviewer < ActiveStorage::Previewer::VideoPreviewer`)
+  # without a NameError at boot. The shared `poster` raises, as
+  # `Processor` does: nothing here can run a program, and answering
   # the video's own bytes as its poster would put them in an `<img>`.
-  # The ruby family reopens it over ffmpeg
+  # The ruby family reopens `poster` over ffmpeg
   # (`runtime/spinel/active_storage_previewer.rb`), the same command
   # Rails runs; a tree without ffmpeg raises there the way Rails does.
   class Previewer
@@ -208,6 +218,14 @@ module ActiveStorage
       raise NotImplementedError,
             "ActiveStorage::Previewer.poster: no previewer on this target — " \
             "a video poster needs ffmpeg"
+    end
+
+    # Rails' `ActiveStorage::Previewer::VideoPreviewer`. This base class
+    # exists so `class TimeLimitedVideoPreviewer < …::VideoPreviewer`
+    # (and `config.active_storage.previewers` identity checks against
+    # that constant) resolve. Poster drawing on this runtime goes
+    # through `Previewer.poster`, not the Rails instance `capture` path.
+    class VideoPreviewer < Previewer
     end
   end
 
