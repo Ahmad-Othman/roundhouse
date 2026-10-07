@@ -292,10 +292,17 @@ module ActiveRecord
       cast.valid ? cast.value : nil
     end
 
-    # Reject nil before a key-typed adapter can coerce it; cast request
-    # values so Spinel never sees String at an Integer adapter slot.
+    # Reject nil before a key-typed adapter can coerce it. Generated
+    # models override `_exists_primary_key_input` with schema-selected
+    # dispatch (same split as find) so Spinel never compiles String into
+    # an Integer adapter slot.
     def self.exists?(id)
       return false if id.nil?
+      _exists_primary_key_input(id)
+    end
+
+    # Fallback for hand-written subclasses using the generic adapter.
+    def self._exists_primary_key_input(id)
       key = _cast_primary_key(id)
       return false if key.nil?
       _adapter_exists_by_id?(key)

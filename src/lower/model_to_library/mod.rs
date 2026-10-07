@@ -1068,6 +1068,7 @@ fn build_methods_with_finder_inputs(
         // project_level_3_adapter_emit.md.
         if finder_inputs == FinderInputs::Request {
             methods.push(adapter_emit::synth_find_primary_key_input(&model.name, table));
+            methods.push(adapter_emit::synth_exists_primary_key_input(&model.name, table));
         }
         push_adapter_methods(&mut methods, &model.name, table, schema);
         // `from_params(p: <Resource>Params)` — typed factory matching the
@@ -1872,10 +1873,15 @@ fn build_class_info_with_finder_inputs(
         "count",
         fn_sig(vec![], Ty::Int),
     );
+    let exists_input = if finder_inputs == FinderInputs::Request {
+        finder_input_ty(&key_ty)
+    } else {
+        key_ty.clone()
+    };
     insert_default(
         &mut info.class_methods,
         "exists?",
-        fn_sig(vec![(Symbol::from("id"), key_ty.clone())], Ty::Bool),
+        fn_sig(vec![(Symbol::from("id"), exists_input)], Ty::Bool),
     );
     insert_default(
         &mut info.class_methods,

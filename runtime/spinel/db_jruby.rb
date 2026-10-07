@@ -637,6 +637,12 @@ module Db
     raise error
   end
 
+  # Non-optional integer binds share the JDBC setter with the optional
+  # path; the lowerer emits `bind_int` for required columns.
+  def self.bind_int(handle, idx, value)
+    bind_int_opt(handle, idx, value)
+  end
+
   # Optional read predicates occupy one slot whether nil or present.
   def self.bind_int_opt(handle, idx, value)
     ps = handle.pstmt
