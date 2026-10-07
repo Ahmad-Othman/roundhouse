@@ -66,8 +66,8 @@ fn into_variant_does_not_allocate_its_own_buffer() {
         "_into must append into the caller's buffer, not alloc; got:\n{into}",
     );
     assert!(
-        !into.contains("String.new"),
-        "_into must not String.new; got:\n{into}",
+        !into.contains("ViewBufferCap.store"),
+        "_into does not own the page-size memo; got:\n{into}",
     );
 }
 
