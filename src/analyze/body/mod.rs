@@ -1775,6 +1775,15 @@ impl<'a> BodyTyper<'a> {
                     // type (the naive desugar), so reuse it — but union
                     // with any prior binding and skip an unknown RHS so a
                     // before_action-seeded type isn't clobbered.
+                    // `instance_variable_set(:@article, record)` is Kernel,
+                    // not `Assign`, so the arm above misses it. Fold a
+                    // statically resolvable name so a later statement in
+                    // the same method can read the ivar.
+                    if let Some((name, ty)) =
+                        super::ivar_set::binding_from_send(e, local_ctx.self_ty.as_ref())
+                    {
+                        local_ctx.ivar_bindings.insert(name, ty);
+                    }
                     if let ExprNode::OpAssign { target, .. } = &*e.node {
                         if let Some(ty) = e.ty.clone() {
                             if !matches!(ty, Ty::Var { .. }) {

@@ -7620,3 +7620,57 @@ puts "impersonates passed"
 "#)
         .assert_passes();
 }
+
+/// Controller ivars written through `instance_variable_set` with a
+/// statically resolvable name (literal, `controller_name`, or a helper
+/// that inflects `self.class`) reach the template, and a template that
+/// assigns an ivar reaches the layout — the same view context Rails
+/// uses. Overlay is abstract; the forcing fixture is Writebook.
+fn record_ivar_set_overlay() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    def set_article\n      @article = Article.find(params.expect(:id))\n    end\n",
+            r#"    def set_article
+      instance_variable_set "@#{instance_name}", Article.find(params.expect(:id))
+    end
+
+    def instance_name
+      controller_record_name.underscore
+    end
+
+    def controller_record_name
+      self.class.to_s.remove("Controller").demodulize.singularize
+    end
+"#,
+        )
+        .edit(
+            "app/views/articles/show.html.erb",
+            "<% content_for :title, \"Showing article\" %>\n",
+            "<% @section_class = \"reading\" %>\n<% content_for :title, \"Showing article\" %>\n",
+        )
+        .edit(
+            "app/views/layouts/application.html.erb",
+            "<main class=\"container mx-auto mt-28 px-5 flex flex-col\">",
+            "<main class=\"container mx-auto mt-28 px-5 flex flex-col <%= @section_class %>\">",
+        )
+}
+
+#[test]
+fn instance_variable_set_and_view_assigned_layout_ivar_run() {
+    record_ivar_set_overlay()
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+fn controller_name_instance_variable_set_runs_on_show() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/controllers/articles_controller.rb",
+            "    def set_article\n      @article = Article.find(params.expect(:id))\n    end\n",
+            "    def set_article\n      instance_variable_set(\"@#{controller_name.singularize}\", Article.find(params.expect(:id)))\n    end\n",
+        )
+        .run_test("test/controllers/articles_controller_test.rb")
+        .assert_passes();
+}
