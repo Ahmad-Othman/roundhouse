@@ -201,6 +201,10 @@ end
         "key walks each record:\n{body}"
     );
     assert!(
+        body.contains(".length > 8"),
+        "small collections skip the store (cost gate):\n{body}"
+    );
+    assert!(
         residues(&diags).is_empty(),
         "cached: true is not residue: {diags:?}"
     );

@@ -345,6 +345,13 @@ fn emit_named_collection_each(
     ))
 }
 
+/// Below this length, `cached: true` skips the collection store: key
+/// build + `read_str` costs more than rendering a small/empty page
+/// (Campfire sidebar after #488). Room/messages keep `PAGE_SIZE` 40
+/// above the line. Prefer `length` over `size` so an unloaded Relation
+/// loads once rather than `COUNT` then load.
+const MIN_CACHED_COLLECTION_LENGTH: i64 = 8;
+
 /// Rails' collection cache: one `read_str` of the concatenated partials,
 /// keyed by each element's `cache_key_with_version`. A miss still walks
 /// the collection (inner `<% cache %>` fragments still apply).
@@ -356,6 +363,11 @@ fn emit_named_collection_each(
 /// (quoted, so `a/b`+`c` cannot collide with `a`+`b/c`). A local whose
 /// name is not a literal Symbol/String cannot be keyed safely — fall
 /// back to the uncached each path.
+///
+/// Small collections (`length <= MIN_CACHED_COLLECTION_LENGTH`) take the
+/// uncached each path instead: same HTML, no store tax. Deliberate
+/// divergence from Rails, which always collection-caches when
+/// `cached: true`.
 fn wrap_cached_collection(
     collection: &Expr,
     partial: &str,
@@ -551,7 +563,31 @@ fn wrap_cached_collection(
             else_branch: seq(vec![accumulator_append_call(hit_ref(), ctx)]),
         },
     ));
-    Some(seq(prelude))
+    let cached = seq(prelude);
+    let uncached = emit_named_collection_each(collection, partial, as_name, locals, ctx)?;
+    let length = send(
+        Some(collection.clone()),
+        "length",
+        Vec::new(),
+        None,
+        false,
+    );
+    let threshold = Expr::new(
+        span,
+        ExprNode::Lit {
+            value: Literal::Int {
+                value: MIN_CACHED_COLLECTION_LENGTH,
+            },
+        },
+    );
+    Some(Expr::new(
+        span,
+        ExprNode::If {
+            cond: send(Some(length), ">", vec![threshold], None, false),
+            then_branch: cached,
+            else_branch: uncached,
+        },
+    ))
 }
 
 /// Literal Symbol/String name of a `locals:` key, or None when dynamic.
