@@ -2,5 +2,7 @@ module Timeout
   class Error < RuntimeError
   end
 
-  def self.timeout: (untyped sec) { () -> untyped } -> untyped
+  # `sec` is Integer|Float (Campfire passes both). Block result is
+  # Pattern D — genuinely polymorphic — so return stays gradual.
+  def self.timeout: (Integer | Float sec) { () -> untyped } -> untyped
 end

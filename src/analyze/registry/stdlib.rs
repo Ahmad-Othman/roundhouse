@@ -620,7 +620,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "Process", &[
         ("pid", Ty::Int),
         ("kill", Ty::Int),
-        ("clock_gettime", Ty::Untyped),
+        // Default (no unit / `:float_*`) is Float; send special-case
+        // narrows integer units. Catalog default matches the common path.
+        ("clock_gettime", Ty::Float),
     ], &[]);
     register_stdlib_class(classes, "Process::CLOCK_MONOTONIC", &[], &[]);
     register_stdlib_class(classes, "Process::CLOCK_REALTIME", &[], &[]);
