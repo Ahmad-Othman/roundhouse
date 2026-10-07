@@ -40,17 +40,20 @@ module ActionController
   REDIRECT_LINE_BREAK_PATTERN = /[\r\n\0\t]/.freeze
 
   # Puma's illegal-header rule: drop a key/value that cannot be one
-  # HTTP/1.1 line. Character walks (`[i, 1]`), not `getbyte`/`bytesize`
-  # — those do not exist on strict-target strings. CRuby/JRuby replace
-  # these two predicates with regex checks in the target overlay.
+  # HTTP/1.1 line. Keys scan UTF-8 bytes; values walk characters and
+  # recognize the CRLF grapheme. CRuby/JRuby replace these portable
+  # predicates with regex checks in the target overlay.
   def self.header_key_ok?(k)
     return false if k.nil?
-    n = k.length
+    # Delimiters can share a Swift grapheme with a combining mark. Inspect
+    # their UTF-8 bytes so the policy does not depend on string indexing.
+    bytes = k.bytes
+    n = bytes.length
     return false if n == 0
     i = 0
     while i < n
-      c = k[i, 1].to_s
-      return false if c == "\"" || c == ":" || c == " " || header_control?(c)
+      byte = bytes[i]
+      return false if byte <= 32 || byte == 34 || byte == 58 || byte == 127
       i += 1
     end
     true

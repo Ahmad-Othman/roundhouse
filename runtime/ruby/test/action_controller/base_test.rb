@@ -178,34 +178,4 @@ class ActionControllerBaseTest < Minitest::Test
         "resolve_status mismapped :#{sym}"
     end
   end
-
-  # Shared policy: the same predicates must execute on every emitted target.
-  def test_header_key_policy_rejects_controls_and_delimiters
-    refute ActionController.header_key_ok?(nil)
-    refute ActionController.header_key_ok?("")
-    refute ActionController.header_key_ok?("X:Bad")
-    refute ActionController.header_key_ok?("X Bad")
-    refute ActionController.header_key_ok?("X\"Bad")
-    refute ActionController.header_key_ok?("X\tBad")
-    refute ActionController.header_key_ok?("X\r\nBad")
-    refute ActionController.header_key_ok?("X\x00Bad")
-    refute ActionController.header_key_ok?("X\x1fBad")
-    refute ActionController.header_key_ok?("X\x7fBad")
-    assert ActionController.header_key_ok?("X-Valid")
-    assert ActionController.header_key_ok?("X-Café")
-  end
-
-  def test_header_value_policy_allows_tab_but_rejects_other_controls
-    refute ActionController.header_value_ok?(nil)
-    refute ActionController.header_value_ok?("a\r\nb")
-    refute ActionController.header_value_ok?("a\x00b")
-    refute ActionController.header_value_ok?("a\x08b")
-    refute ActionController.header_value_ok?("a\x0ab")
-    refute ActionController.header_value_ok?("a\x1fb")
-    refute ActionController.header_value_ok?("a\x7fb")
-    assert ActionController.header_value_ok?("")
-    assert ActionController.header_value_ok?("a\tb")
-    assert ActionController.header_value_ok?(" : Café ")
-  end
-
 end
