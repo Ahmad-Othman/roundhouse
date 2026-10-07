@@ -490,6 +490,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("ActiveRecord::ValueTooLong", None),
         // Not `ActiveRecord::Base`: no instance surface is registered there, so `e.record.errors` would still fail.
         ("ActiveRecord::RecordInvalid", Some(("record", Ty::Untyped))),
+        // Names overlap `project::RUBY_FAMILY_RUNTIME_CONSTANTS` (emit
+        // ledger). Keep extras here — inference needs the readers.
         ("ActionController::ParameterMissing", Some(("param", Ty::Str))),
         ("ActionController::UnpermittedParameters", None),
         ("ActionController::UnknownFormat", None),

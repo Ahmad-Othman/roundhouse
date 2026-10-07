@@ -3949,6 +3949,51 @@ fn report_keyword_params(app: &App, target: &str) {
     }
 }
 
+/// Exception classes defined in `runtime/ruby/`
+/// (`action_controller/parameter_missing.rb`,
+/// `action_view/missing_template.rb`) that only the ruby family and
+/// Spinel ship. Strict targets must ledger a typed constant read; keep
+/// this list as the single name source for the gate and its tests.
+pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
+    "ActionController::ParameterMissing",
+    "ActionController::UnpermittedParameters",
+    "ActionController::UnknownFormat",
+    "ActionController::RoutingError",
+    "ActionView::MissingTemplate",
+];
+
+/// Availability policy for class/module *values* that inference
+/// resolves but the target does not ship. Returns the diagnostic
+/// construct when the name is unavailable on `target`.
+///
+/// Two policies share one visitor walk and the app-defined exemptions:
+/// Ruby/Spinel bundled library objects (`bundled_constant`), and
+/// ruby-family runtime exception stubs (`ruby_family_runtime_constant`).
+fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'static str> {
+    if RUBY_FAMILY_RUNTIME_CONSTANTS.iter().any(|n| *n == name) {
+        // JRuby ships the same runtime files as CRuby.
+        return if target == "jruby" {
+            None
+        } else {
+            Some("ruby_family_runtime_constant")
+        };
+    }
+    let bundled = matches!(name,
+        "URI::HTTP" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
+        | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
+        | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
+        | "Struct" | "Mutex");
+    if !bundled {
+        return None;
+    }
+    // Nokogiri does not supply HTML5 on JRuby. The other bundled
+    // values remain available there.
+    if target == "jruby" && name != "Rails::HTML5::SafeListSanitizer" {
+        return None;
+    }
+    Some("bundled_constant")
+}
+
 /// Most of these class objects are supplied by Ruby/Spinel's bundled
 /// libraries, not by the transpiled runtimes. The others are exception
 /// classes that only the ruby-family runtime defines. Recognizing them
@@ -3962,23 +4007,7 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         if matches!(&*expr.node, crate::expr::ExprNode::Const { .. }) {
             if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
                 let name = id.0.as_str();
-                let bundled = matches!(name,
-                    "URI::HTTP" | "URI::InvalidURIError" | "Net::OpenTimeout" | "Net::ReadTimeout"
-                    | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
-                    | "Rails::HTML5::SafeListSanitizer" | "JSON" | "JSON::ParserError"
-                    | "Struct" | "Mutex");
-                // `runtime/ruby/action_controller/parameter_missing.rb`
-                // and `runtime/ruby/action_view/missing_template.rb`
-                // define these. Only the ruby family and spinel ship
-                // the two files.
-                let ruby_family_runtime = matches!(name,
-                    "ActionController::ParameterMissing" | "ActionController::UnpermittedParameters"
-                    | "ActionController::UnknownFormat" | "ActionController::RoutingError"
-                    | "ActionView::MissingTemplate");
-                // Nokogiri does not supply HTML5 on JRuby. The
-                // other bundled values remain available there.
-                if ((bundled && (target != "jruby" || name == "Rails::HTML5::SafeListSanitizer"))
-                    || (ruby_family_runtime && target != "jruby"))
+                if let Some(construct) = unavailable_class_module_construct(name, target)
                     && !app.library_classes.iter().any(|class| class.name == *id)
                     && !app.models.iter().any(|model| model.name == *id)
                     && !app.controllers.iter().any(|controller| controller.name == *id)
@@ -3988,7 +4017,7 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                     emit::diagnostics::report_unsupported(
                         expr.span,
                         target,
-                        "bundled_constant",
+                        construct,
                         format!("{name} is not available as a class/module value on {target}"),
                     );
                 }

@@ -17,7 +17,9 @@ use std::path::{Path, PathBuf};
 
 use roundhouse::analyze::Analyzer;
 use roundhouse::ingest::ingest_app;
-use roundhouse::project::{spinel_base_files, target_files, BuildTarget};
+use roundhouse::project::{
+    spinel_base_files, target_files, BuildTarget, RUBY_FAMILY_RUNTIME_CONSTANTS,
+};
 
 /// `require_relative "x/y"` occurrences in `content`, as the raw
 /// argument text. Deliberately syntactic: a dynamic require is not a
@@ -273,20 +275,18 @@ end
         let gaps: Vec<_> = diags.iter().filter(|d| matches!(
             &d.kind,
             roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
-                if construct.as_str() == "bundled_constant"
+                if construct.as_str() == "ruby_family_runtime_constant"
         )).collect();
         if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
             assert!(gaps.is_empty(), "{target:?}: {gaps:?}");
             continue;
         }
-        assert_eq!(gaps.len(), 5, "{target:?}: {gaps:?}");
+        assert_eq!(gaps.len(), RUBY_FAMILY_RUNTIME_CONSTANTS.len(), "{target:?}: {gaps:?}");
         let t = target.as_str();
-        for name in [
-            "ActionController::RoutingError", "ActionController::UnknownFormat",
-            "ActionController::ParameterMissing", "ActionController::UnpermittedParameters",
-            "ActionView::MissingTemplate",
-        ] {
-            let text = format!("bundled_constant not supported ({t}): {name} is not available as a class/module value on {t}");
+        for name in RUBY_FAMILY_RUNTIME_CONSTANTS {
+            let text = format!(
+                "ruby_family_runtime_constant not supported ({t}): {name} is not available as a class/module value on {t}"
+            );
             let gap = gaps.iter().find(|d| d.message == text).expect(&text);
             assert_eq!(gap.severity, roundhouse::diagnostic::Severity::Error);
             assert!(!gap.span.is_synthetic(), "{gap:?}");
@@ -341,7 +341,7 @@ end
         assert!(!diags.iter().any(|d| matches!(
             &d.kind,
             roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
-                if construct.as_str() == "bundled_constant"
+                if matches!(construct.as_str(), "bundled_constant" | "ruby_family_runtime_constant")
         )), "{target:?}: {diags:?}");
     }
 }
