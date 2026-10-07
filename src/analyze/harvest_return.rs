@@ -8,9 +8,11 @@
 //! `Nil|Untyped` — a full lattice join was tried and rejected because
 //! `Untyped` then `Nil` collapsed Campfire URI helpers to bare `Nil`.
 //!
-//! First writes keep their gradual unions (`String|Untyped` stays) so
-//! library signatures that honestly return untyped are not narrowed.
-//! A later bare `Untyped` never replaces an already-informative return.
+//! First writes are stored as-is (including gradual unions). Any later
+//! same-core pair collapses per stabilize (Nil sticky). A bare
+//! `Untyped`/`Var` never replaces an already-informative return.
+//! Distinct concrete cores still last-write (residual thrash for a
+//! later call-graph pass).
 
 use crate::ident::Symbol;
 use crate::ty::Ty;
@@ -21,18 +23,14 @@ fn gradual_nil() -> Ty {
     body::union_of(Ty::Nil, Ty::Untyped)
 }
 
-fn is_gradual_nil(ty: &Ty) -> bool {
-    ty == &gradual_nil()
-}
-
-fn is_bare_unknown(ty: &Ty) -> bool {
-    matches!(ty, Ty::Untyped | Ty::Var { .. })
-}
-
 /// True when stripping top-level unknown arms leaves a usable core
 /// (anything other than bare [`Ty::Untyped`]).
 fn has_informative_core(ty: &Ty) -> bool {
-    !matches!(ty.clone().strip_unknown(), Ty::Untyped)
+    match ty {
+        Ty::Untyped | Ty::Var { .. } => false,
+        Ty::Union { variants } => variants.iter().any(|v| !v.is_unknown()),
+        _ => true,
+    }
 }
 
 /// If two harvested returns differ only by top-level `Untyped`/`Var`
@@ -54,6 +52,32 @@ fn stabilize_untyped_return_oscillation(existing: &Ty, new: &Ty) -> Option<Ty> {
     Some(core_e)
 }
 
+enum HarvestWrite {
+    Keep,
+    Set(Ty),
+}
+
+/// Single merge decision for an existing harvested return vs a new body type.
+fn decide_harvested_return(existing: &Ty, new: Ty) -> HarvestWrite {
+    if matches!(existing, Ty::Fn { .. }) {
+        return HarvestWrite::Keep;
+    }
+    if existing == &new {
+        return HarvestWrite::Keep;
+    }
+    if let Some(stable) = stabilize_untyped_return_oscillation(existing, &new) {
+        if existing == &stable {
+            return HarvestWrite::Keep;
+        }
+        return HarvestWrite::Set(stable);
+    }
+    if has_informative_core(existing) && new.is_unknown() {
+        return HarvestWrite::Keep;
+    }
+    // Distinct cores: last-write wins (residual thrash; not this PR's fix).
+    HarvestWrite::Set(new)
+}
+
 /// Conservative insertion into the harvested-return table.
 ///
 /// RBS-sourced `Ty::Fn` stays authoritative. Same-core returns that
@@ -67,22 +91,15 @@ pub(super) fn insert_inferred_return(
     ty: Ty,
 ) {
     match table.get(method) {
-        Some(Ty::Fn { .. }) => return,
-        Some(existing) if existing == &ty => return,
-        Some(existing) if is_gradual_nil(existing) && matches!(ty, Ty::Nil) => return,
-        Some(existing) if has_informative_core(existing) && is_bare_unknown(&ty) => return,
-        Some(existing) => {
-            if let Some(stable) = stabilize_untyped_return_oscillation(existing, &ty) {
-                if existing != &stable {
-                    table.insert(method.clone(), stable);
-                }
-                return;
-            }
-            table.insert(method.clone(), ty);
-        }
         None => {
             table.insert(method.clone(), ty);
         }
+        Some(existing) => match decide_harvested_return(existing, ty) {
+            HarvestWrite::Keep => {}
+            HarvestWrite::Set(next) => {
+                table.insert(method.clone(), next);
+            }
+        },
     }
 }
 
@@ -164,6 +181,24 @@ mod tests {
         let gradual = body::union_of(Ty::Str, Ty::Untyped);
         insert_inferred_return(&mut table, &method, gradual.clone());
         assert_eq!(table.get(&method), Some(&gradual));
+    }
+
+    #[test]
+    fn insert_gradual_first_write_then_same_core_concrete_narrows() {
+        let method = Symbol::from("config");
+        let mut table = HashMap::new();
+        insert_inferred_return(&mut table, &method, body::union_of(cfg(), Ty::Untyped));
+        insert_inferred_return(&mut table, &method, cfg());
+        assert_eq!(table.get(&method), Some(&cfg()));
+    }
+
+    #[test]
+    fn insert_distinct_cores_last_write_wins() {
+        let method = Symbol::from("value");
+        let mut table = HashMap::new();
+        insert_inferred_return(&mut table, &method, Ty::Str);
+        insert_inferred_return(&mut table, &method, Ty::Int);
+        assert_eq!(table.get(&method), Some(&Ty::Int));
     }
 
     #[test]

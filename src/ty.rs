@@ -440,9 +440,10 @@ impl Ty {
     /// Drop every top-level [`Ty::Untyped`] / [`Ty::Var`] arm from a
     /// union, returning the concrete core: the sole survivor if one
     /// remains, a narrower `Union` if several do, and `Untyped` if
-    /// nothing concrete remains. A bare `Var` collapses to `Untyped`;
-    /// other non-unions pass through unchanged. Mirrors [`Self::strip_nil`]
-    /// for the gradual/inference-noise arms.
+    /// nothing concrete remains. Unlike [`Self::strip_nil`] (which
+    /// leaves non-unions unchanged, including bare `Nil`), a bare
+    /// [`Ty::Var`] collapses to [`Ty::Untyped`] so harvest cores treat
+    /// inference variables like unknown; other non-unions pass through.
     pub(crate) fn strip_unknown(self) -> Ty {
         match self {
             Ty::Union { variants } => {
