@@ -1315,10 +1315,15 @@ fn class_attribute_carrier_refuses_what_it_cannot_carry() {
             .filter_map(|item| match item {
                 ControllerBodyItem::ClassMethod {
                     method,
-                    configuration_slot,
-                    configuration_role: roundhouse::dialect::ClassConfigurationRole::ClassAttribute,
+                    configuration_slot: Some(configuration_slot),
+                    configuration_role: Some(
+                        roundhouse::dialect::ClassConfigurationRole::ClassAttribute,
+                    ),
                     ..
-                } => Some((method.name.as_str().to_string(), configuration_slot.1.as_str().to_string())),
+                } => Some((
+                    method.name.as_str().to_string(),
+                    configuration_slot.1.as_str().to_string(),
+                )),
                 _ => None,
             })
             .collect()

@@ -13,7 +13,7 @@ use crate::ty::{Param, Ty};
 use super::{Analyzer, Ctx, union_of};
 
 impl Analyzer {
-    pub(super) fn analyze_class_configuration(&self, controllers: &mut [Controller]) {
+    pub(super) fn analyze_class_configuration(&mut self, controllers: &mut [Controller]) {
         let mut types: HashMap<(ClassId, Symbol), Ty> = HashMap::new();
         for controller in controllers.iter_mut() {
             for item in &mut controller.body {
@@ -26,6 +26,7 @@ impl Analyzer {
                 // A class-body macro call dispatches on the class itself.
                 let ctx = Ctx {
                     self_ty: Some(Ty::Class { id: controller.name.clone(), args: vec![] }),
+                    class_side: true,
                     ..Ctx::default()
                 };
                 self.body_typer().analyze_expr(expr, &ctx);
@@ -35,12 +36,14 @@ impl Analyzer {
                 } = &*expr.node
                 {
                     if let Some(ty) = &value.ty {
-                        types
-                            .entry((carrier.clone(), name.clone()))
-                            .and_modify(|old| {
-                                *old = union_of(old.clone(), ty.clone());
-                            })
-                            .or_insert_with(|| ty.clone());
+                        if !is_uninformative(ty) {
+                            types
+                                .entry((carrier.clone(), name.clone()))
+                                .and_modify(|old| {
+                                    *old = union_of(old.clone(), ty.clone());
+                                })
+                                .or_insert_with(|| ty.clone());
+                        }
                     }
                 }
             }
@@ -52,12 +55,15 @@ impl Analyzer {
             for item in &controller.body {
                 if let ControllerBodyItem::ClassMethod {
                     method,
-                    configuration_slot: key,
-                    configuration_role: ClassConfigurationRole::ClassAttribute,
+                    configuration_slot: Some(key),
+                    configuration_role: Some(ClassConfigurationRole::ClassAttribute),
                     ..
                 } = item
                 {
                     stored_values(&method.body, &key.1, &mut |ty| {
+                        if is_uninformative(ty) {
+                            return;
+                        }
                         types
                             .entry(key.clone())
                             .and_modify(|old| *old = union_of(old.clone(), ty.clone()))
@@ -116,6 +122,10 @@ impl Analyzer {
                         id: controller.name.clone(),
                         args: vec![],
                     }),
+                    // ClassAttribute / Writer / Reader methods are
+                    // `def self.`; receiverless sends must hit the
+                    // class-method table (main's class_side gate).
+                    class_side: true,
                     ..Ctx::default()
                 };
                 // Methods inherit, initialized values do not: every class
@@ -190,8 +200,32 @@ impl Analyzer {
                     ret: Box::new(method.body.ty.clone().unwrap_or(Ty::Untyped)),
                     effects: method.effects.clone(),
                 });
+                // Sibling class methods in this same pass call each other
+                // (a macro's `self.x += …` reads through the reader). Publish
+                // the return before the next method is typed so the registry
+                // does not wait on a later harvest round — and so a thrashing
+                // harvest cannot leave the reader as `untyped|untyped`.
+                if let Some(ret) = method.body.ty.clone().filter(|t| !is_uninformative(t)) {
+                    let table = &mut self
+                        .classes
+                        .entry(controller.name.clone())
+                        .or_default()
+                        .class_methods;
+                    Self::insert_inferred_return(table, &method.name, ret);
+                }
             }
         }
+    }
+}
+
+/// True when a type carries no attribute-slot evidence: bare unknowns, or
+/// a union of only unknowns. Gradual noise from a prior round must not
+/// wipe a concrete default or a stored hash element.
+fn is_uninformative(ty: &Ty) -> bool {
+    match ty {
+        Ty::Untyped | Ty::Var { .. } | Ty::Bottom => true,
+        Ty::Union { variants } => variants.iter().all(is_uninformative),
+        _ => false,
     }
 }
 

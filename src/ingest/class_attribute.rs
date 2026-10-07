@@ -245,8 +245,8 @@ pub(super) fn expand(
 fn class_method(method: MethodDef, carrier: &ClassId, slot: &Symbol) -> ControllerBodyItem {
     ControllerBodyItem::ClassMethod {
         method,
-        configuration_slot: (carrier.clone(), slot.clone()),
-        configuration_role: ClassConfigurationRole::ClassAttribute,
+        configuration_slot: Some((carrier.clone(), slot.clone())),
+        configuration_role: Some(ClassConfigurationRole::ClassAttribute),
         leading_comments: vec![],
         leading_blank_line: false,
     }
