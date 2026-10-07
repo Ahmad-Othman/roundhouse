@@ -30,7 +30,7 @@ use crate::ty::Ty;
 /// Per-model has_many names that have a synthesized `<name>_loaded?`
 /// reader. Keyed by owner ClassId so `room.boosts.loaded?` is not
 /// rewritten when only `Message` declares `has_many :boosts`.
-fn has_many_by_model(app: &App) -> HashMap<ClassId, HashSet<Symbol>> {
+pub(crate) fn has_many_by_model(app: &App) -> HashMap<ClassId, HashSet<Symbol>> {
     let mut out: HashMap<ClassId, HashSet<Symbol>> = HashMap::new();
     for model in &app.models {
         // Every model gets a key so `in_model` owner checks don't treat
@@ -51,7 +51,7 @@ fn has_many_by_model(app: &App) -> HashMap<ClassId, HashSet<Symbol>> {
 /// Per-model association / rich-text reader names `association(:x).target`
 /// may collapse onto. Keyed by owner so `room.association(:boosts).target`
 /// is not rewritten when only `Message` declares `:boosts`.
-fn association_readers_by_model(app: &App) -> HashMap<ClassId, HashSet<Symbol>> {
+pub(crate) fn association_readers_by_model(app: &App) -> HashMap<ClassId, HashSet<Symbol>> {
     let mut out: HashMap<ClassId, HashSet<Symbol>> = HashMap::new();
     for model in &app.models {
         let entry = out.entry(model.name.clone()).or_default();
@@ -178,6 +178,16 @@ fn rewrite(
 ) {
     expr.node
         .for_each_child_mut(&mut |c| rewrite(c, enclosing, sole_includer, by_model, readers));
+    rewrite_node(expr, enclosing, sole_includer, by_model, readers);
+}
+
+pub(crate) fn rewrite_node(
+    expr: &mut Expr,
+    enclosing: Option<&ClassId>,
+    sole_includer: &HashMap<ClassId, ClassId>,
+    by_model: &HashMap<ClassId, HashSet<Symbol>>,
+    readers: &HashMap<ClassId, HashSet<Symbol>>,
+) {
     if rewrite_association_target(expr, enclosing, sole_includer, readers) {
         return;
     }
