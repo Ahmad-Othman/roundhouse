@@ -472,7 +472,9 @@ end
 "),
     ].into_iter().map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec())).collect();
     let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
-    roundhouse::session::analyze_and_lower(&mut app);
+    let mut analysis = roundhouse::session::analyze_and_lower(&mut app);
+    analysis.extend(roundhouse::analyze::diagnose(&app));
+    assert!(!analysis.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error), "{analysis:?}");
     for target in [BuildTarget::Typescript, BuildTarget::Go] {
         let (_, diags) = roundhouse::emit::diagnostics::scope(|| {
             target_files(&app, Path::new("."), target)
