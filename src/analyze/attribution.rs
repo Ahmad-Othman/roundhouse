@@ -224,6 +224,9 @@ struct AttributionCtx<'a> {
     /// a gap file declares. Survey mode may drop such a class wholesale, and
     /// each reference to it then reports an unsupported constant.
     gap_namespaces: HashMap<String, &'a str>,
+    /// `gap_namespaces` less aliases, for a dispatch receiver: a gap file's
+    /// `Alias = Bar` does not make a `class Alias` reopened elsewhere a gap.
+    gap_receivers: HashMap<String, &'a str>,
     /// Rubydex's answers, to name the declaration a constant reference means.
     resolver: Option<std::sync::Arc<super::body::ConstResolver>>,
 }
@@ -325,11 +328,15 @@ impl<'a> AttributionCtx<'a> {
             .copied();
 
         let mut gap_namespaces: HashMap<String, &str> = HashMap::new();
+        let mut gap_receivers: HashMap<String, &str> = HashMap::new();
         let resolver = (!tainted_files.is_empty()).then(|| app.const_resolver.for_sources(&app.sources));
         if let Some(resolver) = &resolver {
             for (file, path) in &tainted_files {
                 for name in resolver.namespaces_declared_in(*file) {
                     gap_namespaces.entry(name.to_string()).or_insert(path);
+                }
+                for name in resolver.receivers_declared_in(*file) {
+                    gap_receivers.entry(name.to_string()).or_insert(path);
                 }
             }
         }
@@ -342,6 +349,7 @@ impl<'a> AttributionCtx<'a> {
             view_by_file,
             any_controller_tainted,
             gap_namespaces,
+            gap_receivers,
             resolver,
         }
     }
@@ -413,7 +421,7 @@ impl<'a> AttributionCtx<'a> {
             Ty::Class { id, .. } => self
                 .tainted_classes
                 .get(id)
-                .or_else(|| self.gap_namespaces.get(id.0.as_str().trim_start_matches("::"))),
+                .or_else(|| self.gap_receivers.get(id.0.as_str().trim_start_matches("::"))),
             Ty::Union { variants } => variants.iter().find_map(|v| self.recv_taint(v)),
             _ => None,
         }
