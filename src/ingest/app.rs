@@ -839,6 +839,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         match extract_video_preview_arguments(&bytes) {
                             VideoPreviewArgsExtract::Value(a) => video_args = Some(a),
                             VideoPreviewArgsExtract::Unsupported => {
+                                // A later computed assignment must not leave an
+                                // earlier literal override in effect.
+                                video_args = None;
                                 survey::record(&IngestError::Unsupported {
                                     file: entry.display().to_string(),
                                     message: "config.active_storage.video_preview_arguments is not a string-literal concatenation; the emitted app keeps the framework default".to_string(),

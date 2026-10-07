@@ -116,6 +116,55 @@ end
 }
 
 #[test]
+fn later_unsupported_assignment_clears_earlier_literal() {
+    use roundhouse::ingest::survey;
+
+    survey::activate();
+    let files: [(&str, &str); 5] = [
+        (
+            "config/application.rb",
+            "module Blog\n  class Application < Rails::Application\n  end\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        ),
+        ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+        // Sorted before `z_*.rb`, so the literal lands first.
+        (
+            "config/initializers/a_preview.rb",
+            r#"Rails.application.configure do
+  config.active_storage.video_preview_arguments = "-vf 'scale=1:1'"
+end
+"#,
+        ),
+        (
+            "config/initializers/z_preview.rb",
+            r#"Rails.application.configure do
+  config.active_storage.video_preview_arguments =
+    "-vf 'scale=320:240'" + ENV.fetch("PREVIEW_EXTRA")
+end
+"#,
+        ),
+    ];
+    let tree: HashMap<PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    let _ = survey::drain();
+    let app_class = app
+        .rails_application
+        .as_ref()
+        .expect("Rails::Application reopen");
+    let names: Vec<&str> = app_class.methods.iter().map(|m| m.name.as_str()).collect();
+    assert!(
+        !names.contains(&"active_storage_video_preview_arguments"),
+        "later Unsupported must clear the earlier literal override: {names:?}"
+    );
+}
+
+#[test]
 fn computed_video_preview_arguments_are_unsupported() {
     use roundhouse::ingest::survey;
 
