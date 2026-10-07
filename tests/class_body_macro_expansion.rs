@@ -1387,10 +1387,15 @@ module Preloads
   end
 end
 "#;
+    // A bodiless `include` wrapper is dropped by library-class ingest;
+    // keep an instance method so Bundle remains and records Preloads.
     let outer = r#"
 module Bundle
   extend ActiveSupport::Concern
   include Preloads
+  def bundle_marker
+    1
+  end
 end
 "#;
     let tree = [
