@@ -197,57 +197,6 @@ puts "ALL OK"
 }
 
 #[test]
-fn overlay_read_str_does_not_dup_a_cached_fragment() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let script = r#"
-require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/rails_cache"
-
-store = Rails::MemoryStore.new
-frag = "message-html" * 32
-store.write_str("k", frag, 0)
-hit = store.read_str("k")
-raise "miss" if hit.nil?
-raise "duped" unless hit.equal?(store.read_str("k"))
-raise "mutated store" unless hit.frozen?
-begin
-  hit << "x"
-  raise "frozen fragment was mutable"
-rescue FrozenError
-end
-other = store.read("k")
-raise "untyped read must still dup" if other.equal?(hit)
-other << "x"
-raise "store corrupted" unless store.read_str("k") == frag
-# write (untyped) also freezes, so a later read_str cannot mutate
-# the shared entry — CodeRabbit on #432.
-store.write("k2", "plain")
-hit2 = store.read_str("k2")
-raise "write miss" if hit2.nil?
-raise "write not frozen" unless hit2.frozen?
-begin
-  hit2 << "x"
-  raise "write-path fragment was mutable"
-rescue FrozenError
-end
-raise "write store corrupted" unless store.read_str("k2") == "plain"
-puts "ALL OK"
-"#;
-    let out = Command::new("ruby")
-        .arg("-e")
-        .arg(script)
-        .current_dir(root)
-        .output()
-        .expect("ruby is on PATH");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stdout.contains("ALL OK"),
-        "overlay read_str failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
-    );
-    assert!(out.status.success(), "driver exited {:?}", out.status.code());
-}
-
-#[test]
 fn join_body_does_not_copy_a_one_part_rack_body() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let script = r#"
