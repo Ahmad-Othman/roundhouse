@@ -231,6 +231,64 @@ impl Ty {
         }
     }
 
+    /// The same type with every class name it mentions rewritten by
+    /// `f`. Structure (containers, unions, signatures) is preserved;
+    /// only `Ty::Class` ids change.
+    pub fn map_class_ids(&self, f: &dyn Fn(&ClassId) -> ClassId) -> Ty {
+        match self {
+            Ty::Class { id, args } => Ty::Class {
+                id: f(id),
+                args: args.iter().map(|t| t.map_class_ids(f)).collect(),
+            },
+            Ty::Array { elem } => Ty::Array { elem: Box::new(elem.map_class_ids(f)) },
+            Ty::Hash { key, value } => Ty::Hash {
+                key: Box::new(key.map_class_ids(f)),
+                value: Box::new(value.map_class_ids(f)),
+            },
+            Ty::Tuple { elems } => {
+                Ty::Tuple { elems: elems.iter().map(|t| t.map_class_ids(f)).collect() }
+            }
+            Ty::Union { variants } => {
+                Ty::Union { variants: variants.iter().map(|t| t.map_class_ids(f)).collect() }
+            }
+            Ty::Fn { params, block, ret, effects } => Ty::Fn {
+                params: params
+                    .iter()
+                    .map(|p| Param { name: p.name.clone(), ty: p.ty.map_class_ids(f), kind: p.kind.clone() })
+                    .collect(),
+                block: block.as_ref().map(|b| Box::new(b.map_class_ids(f))),
+                ret: Box::new(ret.map_class_ids(f)),
+                effects: effects.clone(),
+            },
+            other => other.clone(),
+        }
+    }
+
+    /// True when an unknown ([`Ty::is_unknown`]) sits anywhere inside
+    /// this type: `untyped`, `Array[untyped]`, `Hash[Symbol, untyped]`,
+    /// `String | untyped`, a signature with an untyped parameter. A
+    /// type that does NOT is fully spelled out, which is what makes a
+    /// declaration the last word rather than a hint.
+    pub fn mentions_unknown(&self) -> bool {
+        match self {
+            Ty::Var { .. } | Ty::Untyped => true,
+            Ty::Class { args, .. } => args.iter().any(Ty::mentions_unknown),
+            Ty::Array { elem } => elem.mentions_unknown(),
+            Ty::Hash { key, value } => key.mentions_unknown() || value.mentions_unknown(),
+            Ty::Tuple { elems } => elems.iter().any(Ty::mentions_unknown),
+            Ty::Union { variants } => variants.iter().any(Ty::mentions_unknown),
+            Ty::Record { row } => {
+                row.fields.values().any(Ty::mentions_unknown) || row.rest.is_some()
+            }
+            Ty::Fn { params, block, ret, .. } => {
+                params.iter().any(|p| p.ty.mentions_unknown())
+                    || block.as_ref().is_some_and(|b| b.mentions_unknown())
+                    || ret.mentions_unknown()
+            }
+            _ => false,
+        }
+    }
+
     /// True for the two "no known type" variants: [`Ty::Var`] (the
     /// analyzer couldn't infer a type) and [`Ty::Untyped`] (an
     /// author-signed gradual-typing opt-out). Both mean "don't reason
@@ -367,6 +425,37 @@ impl Ty {
             0 => Ty::Nil,
             1 => kept.into_iter().next().unwrap(),
             _ => Ty::Union { variants: kept },
+        }
+    }
+
+    /// True when `self` is [`Ty::Untyped`] / [`Ty::Var`], or a union
+    /// that carries either as a top-level arm.
+    pub(crate) fn has_unknown_arm(&self) -> bool {
+        match self {
+            Ty::Union { variants } => variants.iter().any(Ty::is_unknown),
+            other => other.is_unknown(),
+        }
+    }
+
+    /// Drop every top-level [`Ty::Untyped`] / [`Ty::Var`] arm from a
+    /// union, returning the concrete core: the sole survivor if one
+    /// remains, a narrower `Union` if several do, and `Untyped` if
+    /// nothing concrete remains. Unlike [`Self::strip_nil`] (which
+    /// leaves non-unions unchanged, including bare `Nil`), a bare
+    /// [`Ty::Var`] collapses to [`Ty::Untyped`] so harvest cores treat
+    /// inference variables like unknown; other non-unions pass through.
+    pub(crate) fn strip_unknown(self) -> Ty {
+        match self {
+            Ty::Union { variants } => {
+                let kept: Vec<Ty> = variants.into_iter().filter(|v| !v.is_unknown()).collect();
+                match kept.len() {
+                    0 => Ty::Untyped,
+                    1 => kept.into_iter().next().unwrap(),
+                    _ => Ty::Union { variants: kept },
+                }
+            }
+            Ty::Var { .. } => Ty::Untyped,
+            other => other,
         }
     }
 

@@ -94,6 +94,8 @@ pub fn ingest_sequel_model(
         body,
         enums: indexmap::IndexMap::new(),
         enum_defaults: indexmap::IndexMap::new(),
+        class_attr_defaults: indexmap::IndexMap::new(),
+        lexical_json_shadow: false,
         sti_subclass_names: Vec::new(),
         span: Span {
             file: super::sources::file_id(file),
@@ -274,6 +276,8 @@ fn parse_sequel_association(
             // Sequel has no `touch:` on the association; its equivalent
             // is the `touch` plugin, declared on the model.
             touch: None,
+            foreign_type: None,
+            primary_key: None,
         },
         "many_to_many" => Association::HasAndBelongsToMany {
             name: name.clone(),

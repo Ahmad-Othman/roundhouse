@@ -47,7 +47,8 @@ use crate::lower::controller::body::{
 
 use self::params::{helper_spec_map, ParamsSpec, ParamsSpecs};
 use self::process_action::{
-    halt_if_performed, synthesize_process_action, PreambleStmt, RescueHandler,
+    dispatcher_bodies, halt_if_performed, synthesize_process_action, PreambleStmt,
+    RescueHandler,
 };
 use self::rewrites::{
     rewrite_assoc_through_parent_typed, rewrite_destroy_bang,
@@ -1226,6 +1227,12 @@ fn build_methods(
         ));
     }
     if let Some((preamble, wraps)) = pending_dispatcher {
+        let rescues = collect_rescue_handlers(controller, all_controllers, format_breadth);
+        let reads = reads_action_name(
+            controller,
+            all_controllers,
+            &dispatcher_bodies(&preamble, &wraps, &rescues),
+        );
         methods.insert(
             dispatcher_at,
             synthesize_process_action(
@@ -1234,8 +1241,9 @@ fn build_methods(
                 &inherited,
                 controller.name.0.clone(),
                 &deferred_tails,
-                &collect_rescue_handlers(controller, all_controllers, format_breadth),
+                &rescues,
                 &wraps,
+                reads,
             ),
         );
     }
@@ -1285,6 +1293,9 @@ fn build_methods(
             methods.push(clone);
         }
     }
+
+    // Class-side methods are already seeded at the start of build_methods;
+    // do not append them again (duplicate defs break several emitters).
 
     methods
 }
@@ -1588,13 +1599,15 @@ fn build_filter_preamble(
     // bot_key?` sees who signed in); the default then yields to it.
     // ActionController::API does not include the module.
     //
-    // OFF: a bare `protect_from_forgery` is `:null_session` (lobsters)
-    // and is not modeled as 422. Implicit `:exception` would turn those
-    // requests into failures. Apps that write `with: :exception`
-    // (campfire) get the filter; `verify_authenticity_token` now lives
-    // on shared Base. Residual vs Rails: an app that relies on the
-    // implicit default is still CSRF-open until it writes the macro.
-    const IMPLICIT_DEFAULT: bool = false;
+    // ON, matching Rails `load_defaults` 5.2+ (`default_protect_from_forgery`
+    // → `protect_from_forgery with: :exception` on ActionController::Base).
+    // `verify_authenticity_token` lives on the shared Base. An
+    // ActionController::API parent is still skipped. Emitted tests keep
+    // `allow_forgery_protection = false`, as Rails' test.rb does.
+    // Residual: `:null_session` / `:reset_session` still run this same
+    // 422 handler — those strategies are not modeled as empty-session
+    // pass-throughs.
+    const IMPLICIT_DEFAULT: bool = true;
     let root_parent = chain.first().copied().unwrap_or(controller).parent.as_ref();
     let redeclared = chain.iter().copied().chain(std::iter::once(controller)).any(|c| {
         c.filters().any(|f| {
@@ -1970,6 +1983,29 @@ fn ancestor_chain<'a>(controller: &Controller, all: &'a [Controller]) -> Vec<&'a
     chain
 }
 
+/// Does this controller or an ancestor read `action_name`, bare or on
+/// `self`? The scan covers actions, filter guards, and `dispatched`, the
+/// bodies that the dispatcher runs (see `dispatcher_bodies`). Block and
+/// lambda filters stay `Unknown` in the controller body, so only
+/// `dispatched` has them. A concern's methods count too, because ingest
+/// splices them into the controller.
+fn reads_action_name(controller: &Controller, all: &[Controller], dispatched: &[&Expr]) -> bool {
+    let action_name = Symbol::from("action_name");
+    let reads = |e: &Expr| body_calls_method(e, &action_name);
+    let mut chain = ancestor_chain(controller, all);
+    chain.push(controller);
+    dispatched.iter().any(|e| reads(e))
+        || chain.iter().any(|c| {
+            c.actions().any(|a| reads(&a.body))
+                || c.filters().any(|f| {
+                    [&f.block, &f.if_cond_expr, &f.unless_cond_expr]
+                        .into_iter()
+                        .flatten()
+                        .any(reads)
+                })
+        })
+}
+
 /// Does this filter body contain a respond-capable call (render /
 /// redirect_to / head / render_404)? Scopes the `return if performed?`
 /// halting check to filters that need it — pure-assignment filters
@@ -2116,6 +2152,17 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
         .entry(Symbol::from("performed?"))
         .or_insert_with(|| fn_sig(vec![], Ty::Bool));
 
+    // Rails' implicit `protect_from_forgery` heads every chain; the
+    // preamble emits a bare `verify_authenticity_token` send that must
+    // resolve on Self (otherwise lowered_real_blog_typing_residual
+    // trips on TyVar). Lives on the shared Base; return is Nil.
+    info.instance_methods
+        .entry(Symbol::from("verify_authenticity_token"))
+        .or_insert_with(|| fn_sig(vec![], Ty::Nil));
+    info.instance_methods
+        .entry(Symbol::from("verified_request?"))
+        .or_insert_with(|| fn_sig(vec![], Ty::Bool));
+
     // Implicit-`params` — actions read `@params` (the lowerer rewrote
     // bare `params` → `@params`) which the typer should treat as a
     // Hash-shaped object. The instance-method version is for cases
@@ -2135,6 +2182,16 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
         .or_insert_with(|| fn_sig(vec![], Ty::Sym));
     info.instance_method_kinds
         .entry(Symbol::from("request_format"))
+        .or_insert(AccessorKind::AttributeReader);
+
+    info.instance_methods
+        .entry(Symbol::from("assign_action_name"))
+        .or_insert_with(|| fn_sig(vec![(Symbol::from("name"), Ty::Sym)], Ty::Str));
+    info.instance_methods
+        .entry(Symbol::from("action_name"))
+        .or_insert_with(|| fn_sig(vec![], Ty::Str));
+    info.instance_method_kinds
+        .entry(Symbol::from("action_name"))
         .or_insert(AccessorKind::AttributeReader);
 }
 

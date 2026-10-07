@@ -1078,6 +1078,36 @@ end
         );
     }
 
+    /// Session `#[]` rust-emits `Option<String>`. `verified_request?`
+    /// must use `.is_none()` / `unwrap_or_default`, not Value `.is_null()`.
+    #[test]
+    fn verified_request_session_nil_uses_is_none() {
+        let src = emit_action_controller();
+        let secret = method_body(&src, "csrf_session_secret");
+        assert!(
+            secret.contains("is_none()"),
+            "session[] nil? should be Option::is_none:\n{secret}"
+        );
+        assert!(
+            !secret.contains("is_null()"),
+            "session[] nil? must not emit Value::is_null:\n{secret}"
+        );
+        assert!(
+            secret.contains("unwrap_or_default()"),
+            "session[] to_s should be Option unwrap_or_default:\n{secret}"
+        );
+        let pred = method_body(&src, "verified_request_pred");
+        assert!(
+            pred.contains("csrf_token_valid_pred")
+                && (pred.contains("&(") || pred.contains("&self.csrf_session_secret") || pred.contains("&csrf_session_secret")),
+            "csrf_token_valid? String args must borrow as &str:\n{pred}"
+        );
+        assert!(
+            !pred.contains("csrf_token_valid_pred") || !pred.contains("expected.clone()"),
+            "owned expected.clone() is E0308 against &str:\n{pred}"
+        );
+    }
+
     /// Column-union params render as `serde_json::Value`; `nil?` is
     /// `.is_null()`, not Option `.is_none()`.
     #[test]
@@ -1156,6 +1186,11 @@ end
         assert!(
             set_index.contains("header_key_ok_pred(Some("),
             "header_key_ok? takes String?, wrap &str:\n{set_index}"
+        );
+        let key_at = method_body(&src, "key_at");
+        assert!(
+            !key_at.contains(".map("),
+            "keys[i].to_s on Array[String] must not Option-map a plain String:\n{key_at}"
         );
         let val_at = method_body(&src, "val_at");
         assert!(
