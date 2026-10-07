@@ -272,22 +272,6 @@ pub(in crate::analyze) fn register(
         }
     }
 
-    // `ActionDispatch::Router.escape_path`, the one router method generated
-    // code calls: a routing redirect's `%{name}` re-escapes the decoded
-    // capture with it (`synthesize_redirect_controller`). Only that one,
-    // read from the runtime's signatures; the router's matching internals
-    // are not Rails API an app could call.
-    {
-        const RBS: &str = include_str!("../../../runtime/ruby/action_dispatch/router.rbs");
-        if let Ok(parsed) = crate::rbs::parse_app_signatures(RBS) {
-            let id = ClassId(Symbol::from("ActionDispatch::Router"));
-            let name = Symbol::from("escape_path");
-            if let Some(ty) = parsed.get(&id).and_then(|methods| methods.get(&name)) {
-                classes.entry(id).or_default().class_methods.entry(name).or_insert_with(|| ty.clone());
-            }
-        }
-    }
-
     // The FlashHash returned by `flash`. Values are messages (Str); `now`
     // is the same hash scoped to this request (so `flash.now[:x]` types);
     // `notice`/`alert`/`error`/`success` are the convenience readers Rails

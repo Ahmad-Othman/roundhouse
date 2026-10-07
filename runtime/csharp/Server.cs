@@ -68,6 +68,10 @@ public static class Server
         else if (!string.IsNullOrEmpty(rawTarget) && Uri.TryCreate(rawTarget, UriKind.Absolute, out var targetUri))
             path = targetUri.AbsolutePath;
         else
+            // Last resort when Kestrel left RawTarget empty (not origin-
+            // or absolute-form). Request.Path is decoded; `%25XX` can
+            // then be decoded twice. Normal HTTP/1 and HTTP/2 :path
+            // traffic hits the RawTarget branches above.
             path = ctx.Request.Path.Value ?? "/";
 
         // Action Cable WebSocket — upgrade /cable and hand the socket to the
