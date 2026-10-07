@@ -225,6 +225,7 @@ pub(crate) fn materialize_models(
         &params_specs,
         &assoc_scopes,
         materialization,
+        crate::lower::model_to_library::FinderInputs::Request,
     ).0;
     (lcs, params_specs)
 }
@@ -331,6 +332,11 @@ pub(crate) fn apply_model_lowering(mut lcs: &mut [LibraryClass], app: &App) {
     // that same cache and would have nothing to prepend itself to if it
     // ran first.
     library::apply_belongs_to_memoization(&mut lcs, app);
+    // Every association reader waits on its record's pending preload
+    // (`lower::deferred_preload`): a Relation's includes run when a record
+    // first reads an association, not when the rows arrive. After the two
+    // passes above, which put the `@<name>_loaded` guard it looks for.
+    crate::lower::deferred_preload::apply(&mut lcs, app);
     // A has_many cache is made on first read rather than at construction,
     // and the constructor's `attrs = {}` default is one shared frozen Hash
     // (`lower::lazy_model_state`) — nine Arrays and a Hash per hydrated
@@ -544,7 +550,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth) -> Vec
     // + class_info_from_library_class) because the former returns
     // ClassInfo with `table` set — the Arel pass needs `info.table`
     // to map a Const recv to a TableRef when recognizing chains.
-    let (_, model_registry) = crate::lower::lower_models_with_registry(
+    let (_, model_registry) = crate::lower::model_to_library::lower_models_with_request_finders(
         &app.models,
         &app.schema,
         Vec::new(),
@@ -996,7 +1002,7 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
         // counted twice, which is worse than not knowing.
         let (model_registry, _dup_diags) = crate::emit::diagnostics::scope(|| {
             let (_, reg) =
-                crate::lower::lower_models_with_registry(&app.models, &app.schema, Vec::new());
+                crate::lower::model_to_library::lower_models_with_request_finders(&app.models, &app.schema, Vec::new());
             reg
         });
         let fixture_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> = fixture_lcs

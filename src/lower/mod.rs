@@ -67,6 +67,7 @@ mod perform_all_later;
 pub mod authenticate_by;
 pub mod group_count;
 pub mod bool_fold;
+pub mod generates_token_for;
 pub mod spliced_concern_bodies;
 pub mod unported_rails_subclasses;
 pub mod pathname_ctor;
@@ -175,6 +176,7 @@ pub mod view;
 pub mod view_buffer_passing;
 pub mod tag_block_passing;
 pub mod lazy_model_state;
+pub mod deferred_preload;
 pub mod view_to_library;
 
 pub use blank::apply_blank_lowering;

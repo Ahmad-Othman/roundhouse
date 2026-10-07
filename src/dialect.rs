@@ -1457,6 +1457,10 @@ pub struct RouteTable {
     /// writes by hand when it wants the same thing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redirects: Vec<RedirectRoute>,
+    /// Recovered route omissions stay errors in the normal diagnostic stream,
+    /// so callers can inspect supported siblings without claiming full support.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<crate::diagnostic::Diagnostic>,
 }
 
 /// One `to: redirect(...)` route, as the action synthesized for it.
@@ -1555,8 +1559,13 @@ pub enum RouteSpec {
         scope: ResourceScope,
     },
     /// `root "controller#action"` — shorthand for `GET /` routed to the
-    /// given target, with `:root` as the generated name.
-    Root { target: String },
+    /// given target. Helper name defaults to `{prefix}root`; `as:`
+    /// overrides via [`Self::Root::as_name`].
+    Root {
+        target: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_name: Option<Symbol>,
+    },
     /// `resources :name [, only: [...]] [, except: [...]] [do ... end]`.
     /// `only` and `except` are empty-on-default (an empty `only` means
     /// "all seven standard actions," matching Rails' behavior). Nested
