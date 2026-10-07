@@ -146,6 +146,11 @@ module GzipCache
 
   @pieces = SPLICE_OK ? ObjectSpace::WeakKeyMap.new : nil
   @pieces_mutex = Mutex.new
+  # The last fragment looked up and its entry. The cache hands a view the
+  # same frozen String until a record changes, so most lookups are this
+  # one: an identity check instead of WeakKeyMap hashing ~400 KB (4.6% of
+  # the room page).
+  @last_piece = nil
   # The last splice: [fragments, texts, gzip]. A page that comes back with
   # the same text around the same fragments (one with no per-request token)
   # reuses it without deflating anything.
@@ -264,10 +269,22 @@ module GzipCache
 
   # A fragment's piece and CRC-32, deflated the first time it is seen.
   def self.fragment_piece(frag)
-    hit = @pieces_mutex.synchronize { @pieces[frag] }
+    hit = @pieces_mutex.synchronize do
+      last = @last_piece
+      if !last.nil? && last[0].equal?(frag)
+        last[1]
+      else
+        e = @pieces[frag]
+        @last_piece = [frag, e].freeze unless e.nil?
+        e
+      end
+    end
     return hit unless hit.nil?
     entry = [raw_deflate(frag, nil, Zlib::DEFAULT_COMPRESSION).freeze, Zlib.crc32(frag)].freeze
-    @pieces_mutex.synchronize { @pieces[frag] = entry }
+    @pieces_mutex.synchronize do
+      @pieces[frag] = entry
+      @last_piece = [frag, entry].freeze
+    end
     entry
   end
 
