@@ -939,6 +939,14 @@ impl<'a> BodyTyper<'a> {
                 if id.0.as_str() == "ActiveSupport" && method.as_str() == "parse_db_date" {
                     return Ty::Union { variants: vec![Ty::Date, Ty::Nil] };
                 }
+                // The Date calendar intrinsics `time_calendar` lowers to.
+                if id.0.as_str() == "ActiveSupport" {
+                    match method.as_str() {
+                        "current_date" | "date_beginning_of_month" | "date_end_of_month" => return Ty::Date,
+                        "date_beginning_of_day" | "date_end_of_day" => return Ty::Time,
+                        _ => {}
+                    }
+                }
                 if id.0.as_str() == "ActiveSupport" && method.as_str() == "format_db_date" {
                     return if matches!(call_args.first().and_then(|a| a.ty.as_ref()), Some(Ty::Date)) {
                         Ty::Str
@@ -1922,6 +1930,8 @@ fn date_constructor(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
         "strptime" => vec![Ty::Str, Ty::Str, numeric],
         "iso8601" => vec![Ty::Str, numeric],
         "today" => vec![numeric],
+        // ActiveSupport's zone-aware today; lowered by `time_calendar`.
+        "current" => vec![],
         _ => return None,
     };
     let accepts = |actual: Option<&Ty>, expected: &Ty| match actual {
@@ -1942,6 +1952,11 @@ fn date_method(method: &Symbol, args: &[crate::expr::Expr]) -> Option<Ty> {
             && args[0].ty.as_ref().is_none_or(|t| matches!(t, Ty::Int | Ty::Var { .. })) => Ty::Date,
         "to_date" => Ty::Date,
         "to_time" => Ty::Time,
+        // ActiveSupport's calendar extensions, lowered by `time_calendar`.
+        "beginning_of_month" | "at_beginning_of_month" | "end_of_month" | "at_end_of_month"
+            if args.is_empty() => Ty::Date,
+        "beginning_of_day" | "at_beginning_of_day" | "midnight" | "at_midnight" | "end_of_day"
+        | "at_end_of_day" if args.is_empty() => Ty::Time,
         "year" | "month" | "mon" | "day" | "mday" | "wday" | "yday" => Ty::Int,
         "iso8601" | "xmlschema" | "to_s" | "strftime" | "inspect" => Ty::Str,
         "<" | ">" | "<=" | ">=" | "leap?" | "monday?" | "tuesday?" | "wednesday?"
