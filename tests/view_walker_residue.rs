@@ -200,8 +200,9 @@ end
         body.contains("cache_key_with_version"),
         "key walks each record:\n{body}"
     );
+    let gate = roundhouse::lower::MAX_UNCACHED_COLLECTION_LENGTH;
     assert!(
-        body.contains(".length > 8"),
+        body.contains(&format!(".length > {gate}")),
         "small collections skip the store (cost gate):\n{body}"
     );
     assert!(
