@@ -101,6 +101,17 @@ pub(super) fn ingest_controller_with_nesting(
     let Some(class) = class else {
         return Ok(None);
     };
+    // No `*Controller` class in the file: the first class is only a
+    // controller when it descends from one. `app/controllers/` also
+    // holds plain objects (a redirection strategy, a request-options
+    // struct nested in a concern, a `FormBuilder` subclass), and
+    // ingesting those as controllers types their `initialize` as an
+    // action: no default-value typing, no ivar environment, so every
+    // ivar they assign reads `has no known type`. `Ok(None)` hands the
+    // file to the library-class path, where a class is a class.
+    if chosen_idx.is_none() && !descends_from_controller(&class) {
+        return Ok(None);
+    }
 
     let mut name_path = scope;
     name_path.extend(class_name_path(&class).ok_or_else(|| IngestError::Unsupported {
@@ -122,6 +133,7 @@ pub(super) fn ingest_controller_with_nesting(
     let mut comments = collect_comments(&result);
     drain_comments_before(&mut comments, class.location().start_offset());
     let mut body_items: Vec<ControllerBodyItem> = Vec::new();
+    let owner = ClassId(Symbol::from(name_path.join("::")));
     let mut layout = LayoutDecl::Inherit;
     if let Some(class_body) = class.body() {
         let mut prev_end: Option<usize> = None;
@@ -161,6 +173,57 @@ pub(super) fn ingest_controller_with_nesting(
                         },
                         leading_blank_line: i == 0 && leading_blank,
                     });
+                }
+                prev_end = Some(stmt.location().end_offset());
+                continue;
+            }
+            // Class-side methods: `def self.x`, and every `def` in a
+            // `class << self`. They are methods of the controller CLASS,
+            // not actions — read as actions (as a `def self.x` used to
+            // be) they became instance methods, and a `class << self`
+            // block reached the expression ingester, which refused it.
+            let class_side = if let Some(def) = stmt.as_def_node() {
+                def.receiver()
+                    .is_some_and(|r| r.as_self_node().is_some())
+                    .then(|| super::library_class::ingest_library_method(&def, &owner, file))
+                    .map(|m| m.map(|m| (vec![m], Vec::new())))
+            } else if let Some(sc) = stmt.as_singleton_class_node() {
+                Some(
+                    super::singleton_class::ingest_singleton_body(&sc, &owner, file, &|def| {
+                        super::library_class::ingest_library_method(def, &owner, file)
+                    })
+                    .map(|b| (b.methods, b.class_body)),
+                )
+            } else {
+                None
+            };
+            if let Some(result) = class_side {
+                match result {
+                    Ok((methods, class_body)) => {
+                        let mut leading = leading;
+                        let mut blank = leading_blank;
+                        let items = methods
+                            .into_iter()
+                            .map(|method| ControllerBodyItem::ClassMethod {
+                                configuration_slot: None,
+                                configuration_role: None,
+                                method,
+                                leading_comments: Vec::new(),
+                                leading_blank_line: false,
+                            })
+                            .chain(class_body.into_iter().map(|expr| ControllerBodyItem::Unknown {
+                                expr,
+                                leading_comments: Vec::new(),
+                                leading_blank_line: false,
+                            }));
+                        for mut item in items {
+                            *item.leading_comments_mut() = std::mem::take(&mut leading);
+                            item.set_leading_blank_line(std::mem::take(&mut blank));
+                            body_items.push(item);
+                        }
+                    }
+                    Err(err) if super::survey::is_active() => super::survey::record(&err),
+                    Err(err) => return Err(err),
                 }
                 prev_end = Some(stmt.location().end_offset());
                 continue;
@@ -911,4 +974,16 @@ pub fn render_template_name(args: &[Expr]) -> Option<Symbol> {
         }),
         _ => None,
     }
+}
+
+/// Whether `class`'s superclass names a controller: anything under
+/// `ActionController::` (`Base`, `API`, `Metal`), or a constant whose
+/// last segment ends in `Controller` (`ApplicationController`,
+/// `Admin::SectionController`).
+fn descends_from_controller(class: &ruby_prism::ClassNode<'_>) -> bool {
+    let Some(parent) = class.superclass().and_then(|n| constant_path_of(&n)) else {
+        return false;
+    };
+    parent.first().is_some_and(|s| s == "ActionController")
+        || parent.last().is_some_and(|s| s.ends_with("Controller"))
 }

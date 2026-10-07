@@ -237,7 +237,12 @@ pub(crate) fn lower_models_inner(
                 // Preserve original source inputs for late derivations
                 // (e.g. raw helpers) without treating them as framework
                 // claims. Both kinds traverse the canonical Arel/typer.
-                methods.extend(model.methods().filter(|m| !m.name_span.is_synthetic()).cloned());
+                methods.extend(model.methods().filter(|m| !m.name_span.is_synthetic()).cloned().map(|mut method| {
+                    // Match build_methods' provenance backfill even when a source
+                    // method was retained beside the generated probe surface.
+                    method.body.inherit_span(model.span);
+                    method
+                }));
                 methods
             }
         };
@@ -513,8 +518,26 @@ fn model_class(model: &Model, methods: Vec<MethodDef>, table: Option<&Table>) ->
         origin: None,
         constants: collect_model_constants(model),
         unknown_calls: Vec::new(),
-        class_ivar_initializers: Vec::new(),
+        class_ivar_initializers: collect_class_attr_initializers(model),
     }
+}
+
+/// `mattr_accessor` / `cattr_accessor` `default:` / block seeds → class
+/// ivar writes emitted once on the model class object.
+fn collect_class_attr_initializers(model: &Model) -> Vec<Expr> {
+    model
+        .class_attr_defaults
+        .iter()
+        .map(|(name, value)| {
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: crate::expr::LValue::Ivar { name: name.clone() },
+                    value: value.clone(),
+                },
+            )
+        })
+        .collect()
 }
 
 /// Class-level `NAME = <expr>` constants declared in a model body (e.g.
@@ -581,9 +604,9 @@ fn report_unclaimed_unknowns(model: &Model) {
             {
                 continue;
             }
-            // Literal table names are consumed by ingest::model; other
-            // class settings remain unsupported unless a recognizer claims them.
-            if name == "table_name="
+            // Literal table settings are consumed by ingest::model's
+            // explicit_class_setting; dynamic values remain unsupported.
+            if matches!(name, "table_name=" | "table_name_prefix=")
                 && args.len() == 1
                 && matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })
             {
@@ -650,6 +673,15 @@ fn report_unclaimed_unknowns(model: &Model) {
         // re-deriving the shape (same dance as `has_rich_text`).
         if name == "has_json"
             && crate::lower::has_json::has_json_decls(&model.body)
+                .iter()
+                .any(|d| d.span == expr.span)
+        {
+            continue;
+        }
+        // `serialize :col, coder: JSON` (and legacy positional `JSON`) —
+        // claimed by lower::serialize; accessors go through JsonColumn.
+        if name == "serialize"
+            && crate::lower::serialize::serialize_decls(model)
                 .iter()
                 .any(|d| d.span == expr.span)
         {

@@ -86,6 +86,18 @@ pub struct Model {
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub enum_defaults: IndexMap<Symbol, crate::expr::Literal>,
 
+    /// `mattr_accessor :x, default: …` / `cattr_accessor(:x) { … }` —
+    /// class-ivar seeds lowered into `LibraryClass::class_ivar_initializers`.
+    /// Symbol-only mattr/cattr leave this empty (readers start nil).
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub class_attr_defaults: IndexMap<Symbol, crate::expr::Expr>,
+
+    /// An enclosing module (via EnumConstants nesting) defines a `JSON`
+    /// constant that would shadow bare `JSON` in `serialize` coder
+    /// resolution. Fail closed: claim only `::JSON` when set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lexical_json_shadow: bool,
+
     /// STI subclass class-ids whose rows live in THIS model's table
     /// (stamped by `lower::sti_scope`, which already derives the
     /// subclass->base map for scoping and `becomes!`). Non-empty turns
@@ -395,8 +407,9 @@ pub enum Association {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<Expr>,
         /// `autosave: true` — persist a built/assigned child after the
-        /// owner saves. Default false, matching Rails. Carried on IR;
-        /// has_one autosave lowering is still a separate claim.
+        /// owner saves. Default false, matching Rails. When true, the
+        /// shared lowerer stashes via the writer and folds an
+        /// `after_save` that stamps the FK (and `as:` type) then saves.
         #[serde(default, skip_serializing_if = "is_false")]
         autosave: bool,
     },
@@ -1132,8 +1145,16 @@ impl Controller {
         })
     }
 
+    /// The class-side methods (`def self.x`, `class << self` defs).
     pub fn class_methods(&self) -> impl Iterator<Item = &MethodDef> {
         self.body.iter().filter_map(|item| match item {
+            ControllerBodyItem::ClassMethod { method, .. } => Some(method),
+            _ => None,
+        })
+    }
+
+    pub fn class_methods_mut(&mut self) -> impl Iterator<Item = &mut MethodDef> {
+        self.body.iter_mut().filter_map(|item| match item {
             ControllerBodyItem::ClassMethod { method, .. } => Some(method),
             _ => None,
         })
@@ -1177,8 +1198,10 @@ pub enum ControllerBodyItem {
         method: MethodDef,
         /// Finite macro carrier and storage slot.
         /// Used to infer a shared method contract without sharing values.
-        configuration_slot: (ClassId, Symbol),
-        configuration_role: ClassConfigurationRole,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        configuration_slot: Option<(ClassId, Symbol)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        configuration_role: Option<ClassConfigurationRole>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         leading_comments: Vec<Comment>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
