@@ -3551,10 +3551,16 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
             // touched top-level controllers saw nothing wrong. The
             // spinel lane, which resolves requires at BUILD time,
             // is what surfaced it.
+            //
+            // Memoized per arm: `require_relative` of an already-loaded
+            // file still resolves its path and searches $LOADED_FEATURES,
+            // on every request (1% of a small route). The ivar lives on
+            // Main (the method is `def self.`), so each controller's file
+            // is required once and laziness is kept.
             let stem = crate::naming::underscore(class);
             writeln!(
                 arms,
-                "    when :{sym} then require_relative \"app/controllers/{stem}\"; {class}.new"
+                "    when :{sym} then @__ctl_{sym} ||= require_relative(\"app/controllers/{stem}\") || true; {class}.new"
             )
             .unwrap();
         } else {
