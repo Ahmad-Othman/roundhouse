@@ -96,6 +96,14 @@ fn a_schema_without_the_table_gets_no_record_model() {
             .any(|m| m.name.0.as_str() == "ActionText::Markdown"),
         "no action_text_markdowns table must mean no synthesized record"
     );
+    // Claiming without storage would emit ActionText::Markdown.where /
+    // .new against a missing class — leave the declaration unclaimed
+    // and do not synthesize owner accessors.
+    let lc = lower(&app, "Article");
+    assert!(
+        instance_method(&lc, "body").is_none(),
+        "no table must mean no has_markdown expansion on Article"
+    );
 }
 
 #[test]

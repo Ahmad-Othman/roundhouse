@@ -59,6 +59,13 @@ use super::model_to_library::{
 /// Table Rails' Action Text Markdown migration creates.
 pub const RECORD_TABLE: &str = "action_text_markdowns";
 
+/// Whether the schema carries the Markdown storage table. Claiming and
+/// method expansion both require it — without the table there is no
+/// honest runtime for `ActionText::Markdown.where` / `.new`.
+pub fn record_table_present(schema: &crate::schema::Schema) -> bool {
+    schema.tables.contains_key(&crate::ident::Symbol::from(RECORD_TABLE))
+}
+
 /// Rails API name for the declaration. Recognition only — file/test
 /// stems stay abstract (`plain_text_attr`).
 pub const DECL_MACRO: &str = "has_markdown";
@@ -157,8 +164,14 @@ pub fn synthesize_record_model(app: &mut App) {
 
 /// Expand `has_markdown` onto declaring models. The record class needs
 /// no Content-coder overrides — `content` is a plain String column.
-pub(crate) fn push_plain_text_methods(methods: &mut Vec<MethodDef>, model: &Model) {
-    if is_record_model(model) {
+/// No-ops when the backing table is absent so claim/expansion stay
+/// paired with storage (Invariant 6).
+pub(crate) fn push_plain_text_methods(
+    methods: &mut Vec<MethodDef>,
+    model: &Model,
+    schema: &crate::schema::Schema,
+) {
+    if is_record_model(model) || !record_table_present(schema) {
         return;
     }
     for (span, attr) in plain_text_attrs(model) {

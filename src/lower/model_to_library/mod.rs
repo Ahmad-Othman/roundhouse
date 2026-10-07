@@ -616,7 +616,7 @@ pub(crate) fn collect_model_constants(model: &Model) -> Vec<(Symbol, Expr)> {
 /// dynamic targets often run fine without it. The skip-list below must
 /// stay in sync with the claiming passes — each entry names the pass
 /// that consumes the shape.
-fn report_unclaimed_unknowns(model: &Model) {
+fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
     use crate::diagnostic::{Diagnostic, Severity};
     use crate::expr::LValue;
 
@@ -742,9 +742,11 @@ fn report_unclaimed_unknowns(model: &Model) {
             continue;
         }
         // Bare `has_markdown :body` — claimed by lower::plain_text_attr
-        // (named plain-text association+storage). Option-carrying
-        // forms stay unclaimed.
+        // (named plain-text association+storage) only when the
+        // `action_text_markdowns` table is present. Option-carrying
+        // forms and missing-table apps stay unclaimed.
         if name == "has_markdown"
+            && crate::lower::plain_text_attr::record_table_present(schema)
             && crate::lower::plain_text_attr::plain_text_attrs(model)
                 .iter()
                 .any(|(span, _)| *span == expr.span)
@@ -940,6 +942,11 @@ pub fn writable_field_set(
     for (_span, attr) in crate::lower::rich_text::rich_text_attrs(model) {
         writable.insert(attr);
     }
+    // Callers without schema cannot prove the backing table; those
+    // paths go through `build_methods` which gates expansion. Here the
+    // attrs are still shape-claimed — `push_plain_text_methods` is the
+    // hard gate. Keep permit surface aligned when the declaration is
+    // present (Writebook / emit_and_run always ship the table).
     for (_span, attr) in crate::lower::plain_text_attr::plain_text_attrs(model) {
         writable.insert(attr);
     }
@@ -1034,7 +1041,7 @@ fn build_methods_with_finder_inputs(
 ) -> Vec<MethodDef> {
     // No-op outside an emit diagnostics scope, so the many direct
     // test callers of the lowering entries are unaffected.
-    report_unclaimed_unknowns(model);
+    report_unclaimed_unknowns(model, schema);
 
     let mut methods: Vec<MethodDef> = Vec::new();
 
@@ -1160,7 +1167,7 @@ fn build_methods_with_finder_inputs(
     crate::lower::rich_text::push_rich_text_methods(&mut methods, model);
     // Named plain-text association (`has_markdown`) — same slot; the
     // record's `content` column needs no coder override.
-    crate::lower::plain_text_attr::push_plain_text_methods(&mut methods, model);
+    crate::lower::plain_text_attr::push_plain_text_methods(&mut methods, model, schema);
     // `has_one_attached` — the attachment-EXISTENCE reader, over the
     // synthesized `ActiveStorage::Attachment` row. Same ordering
     // rationale as the macros above (a hand-written method wins).

@@ -617,10 +617,15 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
         // than a `__scope_` hop to a body that returns its argument;
         // leaving them here would make `by_name` claim them and the
         // identity arm skip them as "a declared scope of the same name".
+        let plain_preload = if crate::lower::plain_text_attr::record_table_present(&app.schema) {
+            crate::lower::plain_text_attr::preload_scope_names(model)
+        } else {
+            Vec::new()
+        };
         let synthesized: std::collections::HashSet<String> =
             crate::lower::rich_text::preload_scope_names(model)
                 .into_iter()
-                .chain(crate::lower::plain_text_attr::preload_scope_names(model))
+                .chain(plain_preload)
                 .chain(crate::lower::attached::preload_scope_names(model))
                 .map(|n| n.as_str().to_string())
                 .collect();
@@ -658,9 +663,14 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
     // reached mid-chain, not only from the class.
     let mut preloads: std::collections::BTreeMap<String, String> = Default::default();
     for model in &app.models {
+        let plain_scopes = if crate::lower::plain_text_attr::record_table_present(&app.schema) {
+            crate::lower::plain_text_attr::preload_scopes(model)
+        } else {
+            Vec::new()
+        };
         let scopes = crate::lower::rich_text::preload_scopes(model)
             .into_iter()
-            .chain(crate::lower::plain_text_attr::preload_scopes(model))
+            .chain(plain_scopes)
             .chain(crate::lower::attached::preload_scopes(model));
         for (n, assoc) in scopes {
             let n = n.as_str().to_string();
@@ -1148,7 +1158,9 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     for lc in lcs.iter_mut() {
         if let Some(model) = app.models.iter().find(|m| m.name == lc.name) {
             crate::lower::rich_text::push_preload_scope_methods(&mut lc.methods, model);
-            crate::lower::plain_text_attr::push_preload_scope_methods(&mut lc.methods, model);
+            if crate::lower::plain_text_attr::record_table_present(&app.schema) {
+                crate::lower::plain_text_attr::push_preload_scope_methods(&mut lc.methods, model);
+            }
             crate::lower::attached::push_preload_scope_methods(&mut lc.methods, model);
             crate::lower::attachable::push_attachable_sgid(&mut lc.methods, model, &attachable);
             crate::lower::broadcasts::push_to_gid_param(&mut lc.methods, model);
