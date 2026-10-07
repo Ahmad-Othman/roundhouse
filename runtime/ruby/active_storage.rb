@@ -96,22 +96,39 @@ module ActiveStorage
   # quoted `-vf` value — never feeds the whole argv into `-vf`.
   def self.video_preview_vf_filter
     args = video_preview_arguments
-    i = args.index("-vf")
-    if i.nil?
-      return "select=eq(n\\,0)+eq(key\\,1)+gt(scene\\,0.015),loop=loop=-1:size=2,trim=start_frame=1"
+    default = "select=eq(n\\,0)+eq(key\\,1)+gt(scene\\,0.015),loop=loop=-1:size=2,trim=start_frame=1"
+    # Match `-vf` as a whole option (not a prefix of `-vframes`).
+    i = 0
+    found = nil
+    while i < args.length
+      j = args.index("-vf", i)
+      if j.nil?
+        break
+      end
+      before_ok = j == 0 || args[j - 1] == " "
+      after = args[j + 3]
+      after_ok = after.nil? || after == " " || after == "'" || after == "\""
+      if before_ok && after_ok
+        found = j
+        break
+      end
+      i = j + 1
     end
-    rest = args[(i + 3)..-1].to_s
+    if found.nil?
+      return default
+    end
+    rest = args[(found + 3)..-1].to_s
     while rest.start_with?(" ")
       rest = rest[1..-1].to_s
     end
     quote = rest[0]
     if quote != "'" && quote != "\""
-      return "select=eq(n\\,0)+eq(key\\,1)+gt(scene\\,0.015),loop=loop=-1:size=2,trim=start_frame=1"
+      return default
     end
     body = rest[1..-1].to_s
     j = body.index(quote)
     if j.nil?
-      return "select=eq(n\\,0)+eq(key\\,1)+gt(scene\\,0.015),loop=loop=-1:size=2,trim=start_frame=1"
+      return default
     end
     body[0...j]
   end

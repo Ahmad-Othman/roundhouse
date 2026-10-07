@@ -107,9 +107,61 @@ end
         .find(|m| m.name.as_str() == "active_storage_video_preview_arguments")
         .expect("single-quoted arguments must be lifted");
     let body = format!("{:?}", method.body);
+    // Ruby single-quotes preserve `\,`; ffmpeg needs the backslash.
+    // Debug escapes each backslash, so the dump shows `n\\,0`.
     assert!(
-        body.contains("gte(t"),
-        "single-quoted argv must reach the Application reopen: {body}"
+        body.contains("n\\\\,0") && body.contains("t\\\\,5"),
+        "single-quoted argv must preserve ffmpeg backslash-commas: {body}"
+    );
+}
+
+#[test]
+fn computed_video_preview_arguments_are_unsupported() {
+    use roundhouse::ingest::survey;
+
+    survey::activate();
+    let files: [(&str, &str); 4] = [
+        (
+            "config/application.rb",
+            "module Blog\n  class Application < Rails::Application\n  end\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        ),
+        ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+        (
+            "config/initializers/active_storage.rb",
+            r#"Rails.application.configure do
+  config.active_storage.video_preview_arguments =
+    "-vf 'scale=320:240'" + ENV.fetch("PREVIEW_EXTRA")
+end
+"#,
+        ),
+    ];
+    let tree: HashMap<PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    let gaps = survey::drain();
+    let app_class = app
+        .rails_application
+        .as_ref()
+        .expect("Rails::Application reopen");
+    let names: Vec<&str> = app_class.methods.iter().map(|m| m.name.as_str()).collect();
+    assert!(
+        !names.contains(&"active_storage_video_preview_arguments"),
+        "computed argv must not be synthesized: {names:?}"
+    );
+    assert!(
+        gaps.iter().any(|g| match g {
+            roundhouse::ingest::IngestError::Unsupported { message, .. } => {
+                message.contains("video_preview_arguments")
+            }
+            _ => false,
+        }),
+        "computed argv must ledger Unsupported: {gaps:?}"
     );
 }
 

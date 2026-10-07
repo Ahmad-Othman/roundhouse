@@ -836,8 +836,15 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 for entry in read_rb_files(vfs, &init_dir)? {
                     if let Ok(bytes) = vfs.read(&entry) {
                         excluded.extend(extract_variable_content_type_exclusions(&bytes));
-                        if let Some(a) = extract_video_preview_arguments(&bytes) {
-                            video_args = Some(a);
+                        match extract_video_preview_arguments(&bytes) {
+                            VideoPreviewArgsExtract::Value(a) => video_args = Some(a),
+                            VideoPreviewArgsExtract::Unsupported => {
+                                survey::record(&IngestError::Unsupported {
+                                    file: entry.display().to_string(),
+                                    message: "config.active_storage.video_preview_arguments is not a string-literal concatenation; the emitted app keeps the framework default".to_string(),
+                                });
+                            }
+                            VideoPreviewArgsExtract::Absent => {}
                         }
                         if let Some(name) = extract_video_previewer_replacement(&bytes) {
                             previewer_replacement = Some(name);
@@ -5963,11 +5970,20 @@ fn quoted_after_key_label(text: &str) -> Option<String> {
     Some(inner[..end].to_string())
 }
 
+/// Result of scanning an initializer for `video_preview_arguments`.
+enum VideoPreviewArgsExtract {
+    Absent,
+    Value(String),
+    /// Assignment present but not a pure string-literal concatenation.
+    Unsupported,
+}
+
 /// `config.active_storage.video_preview_arguments = "…" \ "…"` —
 /// concatenated quoted string literals after the `=` (double or single),
 /// the way campfire tip writes the `-vf … -frames:v 1 -f image2` argv.
-/// Returns the joined runtime string (with `\\,` already a single backslash).
-fn extract_video_preview_arguments(source: &[u8]) -> Option<String> {
+/// Returns the joined runtime string. Computed RHS forms (`+ ENV…`) are
+/// `Unsupported` rather than a wrong joined literal.
+fn extract_video_preview_arguments(source: &[u8]) -> VideoPreviewArgsExtract {
     let source = String::from_utf8_lossy(source);
     let mut lines = source.lines().peekable();
     while let Some(line) = lines.next() {
@@ -5997,12 +6013,49 @@ fn extract_video_preview_arguments(source: &[u8]) -> Option<String> {
             text.push(' ');
             text.push_str(n);
         }
+        if !rhs_is_only_string_literals_and_continuations(&text) {
+            return VideoPreviewArgsExtract::Unsupported;
+        }
         let out = join_ruby_string_literals(&text);
         if !out.is_empty() {
-            return Some(out);
+            return VideoPreviewArgsExtract::Value(out);
+        }
+        // Recognized the assignment but found no quoted pieces.
+        return VideoPreviewArgsExtract::Unsupported;
+    }
+    VideoPreviewArgsExtract::Absent
+}
+
+/// True when `text` is only `'…'` / `"…"` literals, whitespace, and `\`.
+fn rhs_is_only_string_literals_and_continuations(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let mut saw_literal = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii_whitespace() || b == b'\\' {
+            i += 1;
+            continue;
+        }
+        if b != b'"' && b != b'\'' {
+            return false;
+        }
+        saw_literal = true;
+        let q = b;
+        i += 1;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == q {
+                i += 1;
+                break;
+            }
+            i += 1;
         }
     }
-    None
+    saw_literal
 }
 
 /// True when `text` ends inside an unclosed `'…'` or `"…"` literal.
@@ -6030,7 +6083,9 @@ fn ruby_string_literals_unclosed(text: &str) -> bool {
     open.is_some()
 }
 
-/// Join adjacent `'…'` / `"…"` literals in an RHS, unescaping `\\X` → `X`.
+/// Join adjacent `'…'` / `"…"` literals in an RHS.
+/// Double-quoted: `\\X` → `X`. Single-quoted: only `\\` → `\` and
+/// `\'` → `'`; other backslashes (e.g. `\,` in ffmpeg filters) stay.
 fn join_ruby_string_literals(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = String::new();
@@ -6044,7 +6099,19 @@ fn join_ruby_string_literals(text: &str) -> String {
         i += 1;
         while i < bytes.len() {
             if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                out.push(bytes[i + 1] as char);
+                let next = bytes[i + 1];
+                if q == b'\'' {
+                    if next == b'\\' || next == b'\'' {
+                        out.push(next as char);
+                        i += 2;
+                        continue;
+                    }
+                    out.push('\\');
+                    out.push(next as char);
+                    i += 2;
+                    continue;
+                }
+                out.push(next as char);
                 i += 2;
                 continue;
             }

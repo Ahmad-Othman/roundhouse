@@ -7829,6 +7829,12 @@ raise "args" unless ActiveStorage.video_preview_arguments.include?("gte(t\\,5)")
 raise "filter" unless ActiveStorage.video_preview_vf_filter.include?("gte(t\\,5)")
 raise "previewers include" unless ActiveStorage.previewers.include?(TimeLimitedVideoPreviewer)
 raise "previewers exclude" if ActiveStorage.previewers.include?(ActiveStorage::Previewer::VideoPreviewer)
+
+# `-vf` must match as a whole option, not a prefix of `-vframes`.
+def ActiveStorage.video_preview_arguments
+  "-vframes 1 -vf 'scale=320:240' -f image2"
+end
+raise "vf vs vframes" unless ActiveStorage.video_preview_vf_filter == "scale=320:240"
 "#,
         )
         .assert_passes();
