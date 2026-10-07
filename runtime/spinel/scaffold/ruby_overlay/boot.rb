@@ -147,6 +147,8 @@ require_relative "runtime/rails_executor"
 # the `UploadedFile` it defines.
 require_relative "runtime/multipart"
 require_relative "runtime/active_storage"
+# Column list and metadata reads without per-load String building.
+require_relative "runtime/active_storage_cruby"
 require_relative "runtime/active_storage_disk"
 # The video previewer over ffmpeg — see the file.
 require_relative "runtime/active_storage_previewer"
