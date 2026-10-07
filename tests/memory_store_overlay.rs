@@ -93,10 +93,13 @@ raise "marshal equal?" if got.equal?(payload)
 raise "marshal body #{got.inspect}" unless got == payload
 raise "read_str must miss marshal" unless store.read_str("marshal-k").nil?
 
-# TTL: short-lived key expires.
+# TTL: plant an already-expired timestamp rather than sleeping past
+# a 1s window (50 ms of slack flakes on a loaded CI host).
 store.write_str("ttl-k", "old", 1)
 raise "ttl prime" unless store.read_str("ttl-k") == "old"
-sleep 1.05
+ttl_s = store.send(:shard_of, "ttl-k")
+store.instance_variable_get(:@shards)[ttl_s]["ttl-k"] =
+  ["old".freeze, Process.clock_gettime(Process::CLOCK_MONOTONIC) - 1]
 raise "ttl still live" unless store.read_str("ttl-k").nil?
 
 # Expired-eviction re-check: reader observes stale, blocks on the shard
@@ -120,7 +123,10 @@ locker = Thread.new do
 end
 held.pop
 reader = Thread.new { results << store.read_str(k) }
-sleep 0.05
+deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+Thread.pass until reader.status == "sleep" || !reader.alive? ||
+  Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+raise "reader never blocked on shard mutex (#{reader.status.inspect})" unless reader.status == "sleep"
 shards[s][k] = ["fresh".freeze, nil]
 release << true
 locker.join
