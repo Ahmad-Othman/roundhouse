@@ -4924,6 +4924,15 @@ impl Analyzer {
                 self.collect_send_sites(&method.body, Some(&controller.name), helpers, &mut sites);
                 self.record_callers(&controller.name, &sites[from..]);
             }
+            // A class-body macro call (`preload_site_configs %w[a], only:
+            // :show`) is the call site that types the class method.
+            for item in &controller.body {
+                if let crate::dialect::ControllerBodyItem::ClassIvarInit { expr, .. } = item {
+                    let from = sites.len();
+                    self.collect_send_sites(expr, Some(&controller.name), helpers, &mut sites);
+                    self.record_callers(&controller.name, &sites[from..]);
+                }
+            }
         }
         // WithViews: param sites only — no `record_callers` (no ClassId).
         if matches!(scope, UnifyScope::WithViews) {
@@ -5029,6 +5038,11 @@ impl Analyzer {
         for c in &app.controllers {
             for a in c.actions() {
                 defined.insert((c.name.clone(), a.name.clone()));
+            }
+            // A subclass's class-body macro call reaches the class method
+            // on the controller that defines it.
+            for m in c.class_methods() {
+                defined.insert((c.name.clone(), m.name.clone()));
             }
         }
         defined
@@ -5256,12 +5270,28 @@ impl Analyzer {
                 record(&module.name, method);
             }
         }
+
         // A controller helper's keywords are call-site evidence too:
         // without its shape, `describe(name: "gear", count: 2)` against
         // `def describe(name:, count:)` typed the first slot with the
         // whole kwargs Hash. Same slot order the controller lowering
         // builds: positionals, optionals, keywords, `**rest`.
         for controller in &app.controllers {
+            // Copied Concern class methods keep their source keywords
+            // (`ingest::class_attribute`), so a key binds by kind too.
+            for m in controller.class_methods() {
+                let shape = ParamShape {
+                    slots: m.params.iter().map(|p| (p.name.clone(), p.ty_kind())).collect(),
+                    keywords_by_kind: true,
+                };
+                out.entry((controller.name.clone(), m.name.clone()))
+                    .and_modify(|slot| {
+                        if slot.as_ref() != Some(&shape) {
+                            *slot = None;
+                        }
+                    })
+                    .or_insert(Some(shape));
+            }
             for a in controller.actions() {
                 let mut shape: Vec<(Symbol, ParamKind)> =
                     a.params.fields.iter().map(|(n, _)| (n.clone(), ParamKind::Required)).collect();
@@ -5315,7 +5345,9 @@ impl Analyzer {
     ) -> Vec<Ty> {
         if let Some(shape) = shape.filter(|s| s.keywords_by_kind) {
             if kw.group {
-                if let Some(placed) = Self::bind_keyword_group(shape, &arg_tys, &kw.keys) {
+                if let Some(placed) =
+                    Self::bind_keyword_group(shape, &arg_tys, &kw.keys, kw.splat.as_ref())
+                {
                     return placed;
                 }
             }
@@ -5399,6 +5431,7 @@ impl Analyzer {
         shape: &ParamShape,
         arg_tys: &[Ty],
         keys: &[(Symbol, Ty)],
+        splat: Option<&Ty>,
     ) -> Option<Vec<Ty>> {
         let params = &shape.slots;
         let is_named = |kind: &ParamKind| matches!(kind, ParamKind::Keyword { .. });
@@ -5422,12 +5455,27 @@ impl Analyzer {
         for (i, t) in positional_slots.zip(positionals) {
             out[i] = t.clone();
         }
+        // A keyword the literal does not name may still come from the
+        // splat's Hash; when the key is absent it keeps its default,
+        // which `param_ty_with_default` joins in.
+        if let Some(v) = splat {
+            for (i, (_, kind)) in params.iter().enumerate() {
+                if is_named(kind) {
+                    out[i] = v.clone();
+                }
+            }
+        }
+        // The splat merges over the literal, so a named key may still
+        // take the splat's value.
         for (key, t) in keys {
             if let Some(i) = params
                 .iter()
                 .position(|(n, kind)| n == key && is_named(kind))
             {
-                out[i] = t.clone();
+                out[i] = match splat {
+                    Some(v) => crate::analyze::body::union_of(t.clone(), v.clone()),
+                    None => t.clone(),
+                };
             }
         }
         if let (Some(i), false) = (rest, has_named) {
@@ -5545,7 +5593,20 @@ impl Analyzer {
                         args.last().map(|a| &*a.node),
                         Some(ExprNode::Hash { kwargs: true, .. } | ExprNode::KeywordSplat { .. })
                     );
-                    let kw_tys = SiteKeywords { group, keys };
+                    // The splat merges over the literal, so each literal
+                    // key may take the splat's value too.
+                    let (keys, splat) = match args.last().map(|a| &*a.node) {
+                        Some(ExprNode::KeywordSplat { value }) => keyword_splat(value)
+                            .map_or((keys, None), |(pairs, v)| {
+                                let joined = pairs
+                                    .into_iter()
+                                    .map(|(k, t)| (k, union_of(t, v.clone())))
+                                    .collect();
+                                (joined, Some(v))
+                            }),
+                        _ => (keys, None),
+                    };
+                    let kw_tys = SiteKeywords { group, keys, splat };
                     // `Klass.new(a, b)` hands its arguments to
                     // `initialize` — that is all `Class#new` does with
                     // them — so the site is evidence for the
@@ -6826,6 +6887,32 @@ pub(crate) fn model_includes(model: &crate::dialect::Model) -> Vec<ClassId> {
     out
 }
 
+/// `**{k: v, …}.merge(h)`, `h` a `Hash[Symbol, V]` and the literal's
+/// keys all symbols: the literal's pairs, and `V`. Ingest writes
+/// `f(k: v, **h)` this way. A bare `**h` stays unplaced, as before: its
+/// keys are not known at the call.
+fn keyword_splat(value: &Expr) -> Option<(Vec<(Symbol, Ty)>, Ty)> {
+    let symbol_values = |ty: &Option<Ty>| match ty {
+        Some(Ty::Hash { key, value }) if matches!(**key, Ty::Sym) => Some((**value).clone()),
+        _ => None,
+    };
+    if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*value.node {
+        if method.as_str() == "merge" {
+            let (ExprNode::Hash { entries, .. }, [other]) = (&*recv.node, args.as_slice()) else {
+                return None;
+            };
+            let mut pairs = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                let ExprNode::Lit { value: Literal::Sym { value: k } } = &*k.node else {
+                    return None;
+                };
+                pairs.push((k.clone(), v.ty.clone().unwrap_or(Ty::Var { var: crate::ident::TyVar(0) })));
+            }
+            return Some((pairs, symbol_values(&other.ty)?));
+        }
+    }
+    None
+}
 
 /// A call's trailing keyword arguments as `collect_send_sites` saw them.
 #[derive(Clone, Debug)]
@@ -6835,6 +6922,10 @@ struct SiteKeywords {
     /// Its `key: value` pairs, by name; empty when any key is not a
     /// literal symbol (a `**splat` included).
     keys: Vec<(Symbol, Ty)>,
+    /// `**{k: v}.merge(h)` with `h: Hash[Symbol, V]`: `V`, the most any
+    /// keyword the literal does not name can receive. `keys` then holds
+    /// the literal's pairs.
+    splat: Option<Ty>,
 }
 
 /// A method's declared parameter slots, in declaration order, as
@@ -8319,4 +8410,43 @@ pub(crate) fn tuple_return_ty(body: &Expr) -> Option<Ty> {
         return None;
     }
     Some(Ty::Tuple { elems })
+}
+
+#[cfg(test)]
+mod keyword_splat_tests {
+    use super::*;
+
+    /// `f(**{kind: :x, keys: codes}.merge(options))` against
+    /// `def f(kind:, keys:, only: nil)`: the literal's keys are typed from
+    /// the literal, but the splat merges over them, so each also takes the
+    /// splat's value type; an unnamed keyword takes only the splat's.
+    #[test]
+    fn a_merged_splat_joins_the_literal_keys_and_fills_the_rest() {
+        let shape = ParamShape {
+            slots: vec![
+                (Symbol::from("kind"), ParamKind::Keyword { required: true }),
+                (Symbol::from("keys"), ParamKind::Keyword { required: true }),
+                (Symbol::from("only"), ParamKind::Keyword { required: false }),
+            ],
+            keywords_by_kind: true,
+        };
+        let hash = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) };
+        let keys = vec![
+            (Symbol::from("kind"), Ty::Sym),
+            (Symbol::from("keys"), Ty::Array { elem: Box::new(Ty::Str) }),
+        ];
+        let placed = Analyzer::bind_keyword_group(&shape, &[hash], &keys, Some(&Ty::Bool))
+            .expect("placed");
+        assert_eq!(
+            placed,
+            vec![
+                union_of(Ty::Sym, Ty::Bool),
+                union_of(Ty::Array { elem: Box::new(Ty::Str) }, Ty::Bool),
+                Ty::Bool,
+            ]
+        );
+        let unsplatted = Analyzer::bind_keyword_group(&shape, &[Ty::Untyped], &keys, None)
+            .expect("placed");
+        assert_eq!(unsplatted[0], Ty::Sym, "without a splat the literal stands alone");
+    }
 }

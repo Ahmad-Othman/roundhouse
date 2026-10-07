@@ -789,6 +789,34 @@ pub fn spinel_relation_model_handle(files: &mut [(String, String)]) -> Result<()
         *conn = conn.replace(narrow, wide);
     }
     *conn = widen_spinel_base_on_sigs(conn);
+
+    // The public find/exists? nil guards live in the connection reopen.
+    // Spinel seeds their inherited adapter calls from Base's declaration,
+    // even when a String-keyed model overrides the adapter with a String
+    // argument. Follow the app-wide id contract established by
+    // widen_key_contract: Integer-only apps keep their original seeds,
+    // while apps with String keys need both kinds at shared dispatch.
+    // Each generated model still declares its schema's scalar.
+    let base = files
+        .iter_mut()
+        .find(|(p, _)| {
+            p == "sig/runtime/active_record/base.rbs" || p == "runtime/active_record/base.rbs"
+        })
+        .ok_or_else(|| {
+            "spinel_relation_model_handle: active_record/base.rbs not in the tree".to_string()
+        })?;
+    if base.1.contains("    def id: () -> (Integer | String)\n") {
+        for method in ["self._adapter_find_by_id", "self._adapter_exists_by_id?"] {
+            let narrow = format!("    def {method}: (Integer id)");
+            let wide = format!("    def {method}: (Integer | String id)");
+            if !base.1.contains(&narrow) {
+                return Err(format!(
+                    "spinel_relation_model_handle: base.rbs no longer declares {narrow:?}"
+                ));
+            }
+            base.1 = base.1.replace(&narrow, &wide);
+        }
+    }
     resolve_runtime_sig_conflicts(files)
 }
 
@@ -4375,6 +4403,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         let path = format!("runtime/spinel/{stem}.rbs");
         let rbs = crate::runtime_files::read_to_string(&path)?;
         files.push((format!("sig/runtime/{stem}.rbs"), rbs));
+    }
+
+    // View buffer capacity memo — returning wrappers call
+    // ViewBufferCap.alloc/store (lower::view_buffer_passing). Spinel
+    // stub + CRuby overlay share this contract.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/view_buffer_cap.rbs")
+            .map_err(|e| format!("read runtime/spinel/view_buffer_cap.rbs: {e}"))?;
+        files.push(("sig/runtime/view_buffer_cap.rbs".to_string(), rbs));
     }
 
     // `db_jruby.rb` is the JRuby/JDBC Db backend — it uses Java interop

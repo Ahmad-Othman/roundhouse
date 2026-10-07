@@ -5214,6 +5214,29 @@ pub(crate) fn apply_hydration_nil_lowering(lcs: &mut [LibraryClass], app: &App) 
         if let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) {
             for m in &mut lc.methods {
                 widen_fk_zero_guards(&mut m.body, &nullable_fks);
+                // Polymorphic readers dispatch on the type discriminator,
+                // so they have no zero-sentinel guard to widen. Guard their
+                // nullable FK here too, before any key-typed adapter call.
+                if m.name_span.is_synthetic() {
+                    for assoc in model.associations() {
+                        if let crate::dialect::Association::BelongsTo {
+                            name, foreign_key, polymorphic: true, ..
+                        } = assoc {
+                            if m.name == *name && nullable.contains(foreign_key) {
+                                let cond = Expr::new(Span::synthetic(), ExprNode::Send {
+                                    recv: Some(Expr::new(Span::synthetic(), ExprNode::Ivar { name: foreign_key.clone() })),
+                                    method: Symbol::from("nil?"), args: vec![], block: None,
+                                    parenthesized: false,
+                                });
+                                m.body = Expr::new(m.body.span, ExprNode::If {
+                                    cond,
+                                    then_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                                    else_branch: m.body.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -5292,10 +5315,8 @@ fn widen_fk_zero_guards(expr: &mut Expr, fks: &BTreeSet<Symbol>) {
             if method.as_str() == "==" && args.len() == 1 =>
         {
             matches!(&*r.node, ExprNode::Ivar { name } if fks.contains(name))
-                && matches!(
-                    &*args[0].node,
-                    ExprNode::Lit { value: Literal::Int { value: 0 } }
-                )
+                && (matches!(&*args[0].node, ExprNode::Lit { value: Literal::Int { value: 0 } })
+                    || matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { value } } if value.is_empty()))
         }
         _ => false,
     };
@@ -5851,6 +5872,67 @@ pub(super) fn emit_library_class_pair_with_synthesized(
     vec![rb, rbs]
 }
 
+/// A lowered read owns its statement from prepare until finalize, including
+/// argument serialization and row hydration. Release within that scope even
+/// when the caller rescues inside a longer connection lease. This Ruby-only
+/// pass leaves strict-target IR unchanged and covers reloads and preloads too.
+fn read_statement_cleanup(lc: &LibraryClass) -> std::borrow::Cow<'_, LibraryClass> {
+    fn db_send(expr: &Expr, name: &str) -> bool {
+        matches!(&*expr.node, ExprNode::Send { recv: Some(recv), method, .. }
+            if method.as_str() == name && matches!(&*recv.node,
+                ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Db"))
+    }
+    fn prepare(expr: &Expr) -> bool {
+        db_send(expr, "prepare") || db_send(expr, "prepare_uncached")
+    }
+    fn prepared_name(expr: &Expr) -> Option<&Symbol> {
+        match &*expr.node {
+            ExprNode::Assign { target: LValue::Var { name, .. }, value } if prepare(value) => Some(name),
+            _ => None,
+        }
+    }
+    fn finalize(expr: &Expr, name: &Symbol) -> bool {
+        db_send(expr, "finalize") && matches!(&*expr.node,
+            ExprNode::Send { args, .. } if args.len() == 1
+                && matches!(&*args[0].node, ExprNode::Var { name: actual, .. } if actual == name))
+    }
+    fn needs_cleanup(expr: &Expr) -> bool {
+        let mut found = prepared_name(expr).is_some();
+        expr.node.for_each_child(&mut |child| found |= needs_cleanup(child));
+        found
+    }
+    fn rewrite(expr: &mut Expr) {
+        expr.node.for_each_child_mut(&mut rewrite);
+        let ExprNode::Seq { exprs } = expr.node.as_mut() else { return };
+        let mut start = 0;
+        while start < exprs.len() {
+            if let Some(name) = prepared_name(&exprs[start]) {
+                if let Some(end) = (start + 1..exprs.len()).find(|&i| finalize(&exprs[i], name)) {
+                    let mut work: Vec<_> = exprs.drain(start + 1..=end).collect();
+                    let cleanup = work.pop().unwrap();
+                    let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: work });
+                    exprs.insert(start + 1, Expr::new(Span::synthetic(), ExprNode::BeginRescue {
+                        body,
+                        rescues: vec![],
+                        else_branch: None,
+                        ensure: Some(cleanup),
+                        implicit: false,
+                    }));
+                }
+            }
+            start += 1;
+        }
+    }
+    if !lc.methods.iter().any(|m| needs_cleanup(&m.body)) {
+        return std::borrow::Cow::Borrowed(lc);
+    }
+    let mut adapted = lc.clone();
+    for method in &mut adapted.methods {
+        rewrite(&mut method.body);
+    }
+    std::borrow::Cow::Owned(adapted)
+}
+
 /// Emit a group of LibraryFunctions sharing a `module_path` as a
 /// single Ruby file. Mirrors `typescript::library::emit_module_file`
 /// — converts the function group into a synthetic
@@ -6001,6 +6083,8 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     out_path: PathBuf,
     synthesized_siblings: &[(String, String)],
 ) -> EmittedFile {
+    let guarded = read_statement_cleanup(lc);
+    let lc = guarded.as_ref();
     // The one chokepoint every library-shape file goes through, and the
     // only place that knows which class is being emitted — the send
     // emitter is a free function reached from a dozen callers. A reopen
@@ -6384,15 +6468,6 @@ fn emit_library_class_decl_inner(
         }
     }
 
-    // Finite class-side initialization is lowered IR, not replay of a
-    // framework DSL. Each assignment runs once on this class object;
-    // unset subclasses deliberately keep their ivar absent.
-    for init in &lc.class_ivar_initializers {
-        for line in super::emit_expr(init).lines() {
-            writeln!(s, "{body_pad}{line}").unwrap();
-        }
-    }
-
     let mut first = true;
     for m in &lc.methods {
         if !first {
@@ -6429,6 +6504,19 @@ fn emit_library_class_decl_inner(
         };
         if let Some(directive) = directive {
             writeln!(s, "{body_pad}{directive} :{}", m.name).unwrap();
+        }
+    }
+
+    // Finite class-side initialization is lowered IR, not replay of a
+    // framework DSL. Each statement runs once on this class object, after
+    // the class methods it may call (a Concern macro writing its
+    // `class_attribute`); unset subclasses keep their ivar absent.
+    if !lc.class_ivar_initializers.is_empty() && !lc.methods.is_empty() {
+        writeln!(s).unwrap();
+    }
+    for init in &lc.class_ivar_initializers {
+        for line in super::emit_expr(init).lines() {
+            writeln!(s, "{body_pad}{line}").unwrap();
         }
     }
 
