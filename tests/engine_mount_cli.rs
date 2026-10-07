@@ -167,6 +167,7 @@ fn unimplemented_cable_mount_shapes_still_report_an_error() {
     let app = fixture.write_app(false);
     for (index, mount) in [
         "mount ActionCable.server, at: '/socket'",
+        "mount ActionCable.server => '/cable', as: 'action_cable'",
         "namespace :admin do\n    mount ActionCable.server => '/cable'\n  end",
         "mount OtherCable.server => '/cable'",
     ].iter().enumerate() {

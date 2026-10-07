@@ -1,4 +1,8 @@
 module ActiveSupport
+  module JSON
+    def self.encode: (Hash[untyped, untyped] value) -> String
+    def self.encode_scalar: (untyped item) -> String
+  end
   def self.blank?: (untyped value) -> bool
 
   def self.present?: (untyped value) -> bool
@@ -99,6 +103,6 @@ module ActiveSupport
   def self.local_time: (Integer y, Integer mo, Integer d, Integer h, Integer mi, Integer s, Integer nsec) -> Time
   def self.number_delimited: (Integer | Float number) -> String
   def self.underscore: (String text) -> String
-  def self.humanize: (String text) -> String
-  def self.titleize: (String text) -> String
+  def self.humanize: (String? text) -> String
+  def self.titleize: (String? text) -> String
 end

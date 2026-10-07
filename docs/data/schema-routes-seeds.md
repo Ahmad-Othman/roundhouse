@@ -166,7 +166,8 @@ errors. Strict emission refuses those errors; `--allow-unsupported` can
 write the incomplete project. Survey mode additionally records the gap
 without clearing the error. The fixed runtime's top-level
 `mount ActionCable.server => "/cable"` (or `at: "/cable"`) is preserved;
-custom paths or enclosing route wrappers are not modeled by that runtime.
+custom helper names (`as:`), paths, and enclosing route wrappers remain
+unsupported because the fixed runtime does not model them.
 The existing CRuby/JRuby pruning policy still omits Cable from apps without
 a live broadcast surface; the mount exemption does not change that policy.
 

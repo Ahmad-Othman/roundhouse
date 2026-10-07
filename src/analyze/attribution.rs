@@ -347,7 +347,7 @@ pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
                         return Some((gem, Some(format!("matches the declared `{dsl}` surface in {}; runtime method availability is unverified", owner.0))));
                     }
                 }
-                match ancestry.as_ref()?.receiver_gem(recv_ty, &census) {
+                match ancestry.as_ref()?.receiver_gem(recv_ty, &census, &|gem, path| app.gem_boundary.declares_path(gem, path)) {
                     GemClaim::Known { gem, constant } => Some((gem, Some(format!(
                         "receiver ancestry reaches `{constant}`; method ownership is unverified"
                     )))),
@@ -363,7 +363,10 @@ pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
             DiagnosticKind::Unsupported { construct, detail, .. }
                 if construct.as_str() == "constant" =>
             {
-                crate::gems::gem_owning_constant(&census, detail).map(|gem| (gem, None))
+                crate::gems::gem_owning_constant_with(&census, detail, &|gem, path| {
+                    app.gem_boundary.declares_path(gem, path)
+                })
+                .map(|gem| (gem, None))
             }
             _ => None,
         }
@@ -375,7 +378,16 @@ pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
             &d.kind,
             DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "constant"
         );
-        if (!eligible(&d.kind) && !unknown_constant) || d.severity == Severity::Info {
+        if unknown_constant {
+            // Attribution cannot certify a constant whose emitted body
+            // is a refusal stub. Keep severity/kind/span and add context only.
+            if let Some((gem, _)) = gem_for(d) {
+                let context = format!(" — unmodeled gem `{gem}`; emitted constant availability is unverified");
+                if !d.message.ends_with(&context) { d.message.push_str(&context); }
+            }
+            continue;
+        }
+        if !eligible(&d.kind) || d.severity == Severity::Info {
             continue;
         }
         if let Some((gem, evidence)) = gem_for(d) {
@@ -592,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_gem_constant_is_a_coverage_note_not_a_user_error() {
+    fn unknown_gem_constant_keeps_its_error_and_idempotent_context() {
         let mut app = App::new();
         app.gem_lock = Some(crate::gems::Lockfile::parse(
             "GEM\n  remote: https://rubygems.org/\n  specs:\n    acme-core (1.0.0)\n\nPLATFORMS\n  ruby\n\nDEPENDENCIES\n  acme-core\n",
@@ -602,9 +614,12 @@ mod tests {
             Diagnostic::unsupported(Span::synthetic(), None, "other construct", "AcmeCore::Client"),
         ];
         attribute_unknown_gems(&mut diags, &app);
-        assert_eq!(diags[0].severity, Severity::Info);
+        assert_eq!(diags[0].severity, Severity::Error);
         assert!(diags[0].message.contains("acme-core"));
         assert_eq!(diags[1].severity, Severity::Error);
+        let once = diags.clone();
+        attribute_unknown_gems(&mut diags, &app);
+        assert_eq!(diags, once);
     }
 
     #[test]
