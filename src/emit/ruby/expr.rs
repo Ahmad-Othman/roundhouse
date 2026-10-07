@@ -248,13 +248,29 @@ fn emit_node(n: &ExprNode) -> String {
                     if e.leading_blank_line {
                         out.push('\n');
                     }
+                    // Not before the first: a value-site Seq renders as
+                    // `(a\nb)`, and the marker must start its line. The
+                    // enclosing statement's or def's marker covers it.
+                    if let Some(m) = super::source_markers::marker_for(&e.span) {
+                        out.push_str(&m);
+                        out.push('\n');
+                    }
                 }
                 out.push_str(&emit_expr(e));
             }
             out
         }
         ExprNode::Assign { target, value } => {
-            format!("{} = {}", emit_lvalue(target), emit_expr(value))
+            // Multi-stmt Seq as RHS (mattr/cattr block defaults) must
+            // group so the assign value is the last expression — bare
+            // newlines end the statement after the first line.
+            let rhs = emit_expr(value);
+            let rhs = if is_multi_seq(value) {
+                format!("({rhs})")
+            } else {
+                rhs
+            };
+            format!("{} = {}", emit_lvalue(target), rhs)
         }
         // Native Ruby compound assignment — `target ||= value`,
         // `target += value`, etc. Preserves source short-circuit

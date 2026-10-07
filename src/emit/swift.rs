@@ -71,12 +71,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // registry, then models lower to LibraryClasses (including
     // synthesized `<Model>Row` siblings).
     let vctx = crate::lower::ViewLowerCtx::new(app);
-    let preliminary_views: Vec<crate::dialect::LibraryClass> = app
-        .views
-        .iter()
-        .map(|v| vctx.lower(v))
-        .collect();
-    let view_extras = crate::lower::extras_from_lcs(&preliminary_views);
+    let mut view_lcs = crate::lower::preliminary_view_classes(&app.views, &vctx);
+    let view_extras = crate::lower::extras_from_lcs(&view_lcs);
     // Permitted-params specs (resource → fields) collected from the
     // controllers, so each model gains a typed `fromParams(<Model>Params)`
     // factory the controllers call.
@@ -115,8 +111,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     if let Some(f) = library::emit_function_module(&importmap_funcs) {
         files.push(f);
     }
-    let view_lcs =
-        crate::lower::lower_views_to_library_classes(&app.views, app, view_lower_extras.clone());
+    crate::lower::type_view_library_classes(&mut view_lcs, app, view_lower_extras.clone());
     // Jbuilder (json-format) views lower to `<name>_json` methods on the
     // same `Views::<Plural>` module; merge them into the html view enums
     // so a controller's JSON branch resolves `Articles.indexJson(...)`.
@@ -326,8 +321,16 @@ fn route_table_literals(app: &App, indent: &str) -> (String, String) {
     let route_lines: Vec<String> = routes
         .iter()
         .map(|r| {
+            // The sixth constructor argument carries the shared router's
+            // digit constraints. Keep the existing req_format default and
+            // the unconstrained four-argument spelling unchanged.
+            let integer_params = if r.int_params.is_empty() {
+                String::new()
+            } else {
+                format!(", nil, {:?}", r.int_params.join(" "))
+            };
             format!(
-                "{indent}Route({:?}, {:?}, {:?}, {:?}),",
+                "{indent}Route({:?}, {:?}, {:?}, {:?}{integer_params}),",
                 verb(&r.method),
                 r.path,
                 r.controller.0.as_str(),

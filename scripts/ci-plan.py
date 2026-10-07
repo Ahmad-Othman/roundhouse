@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Select coverage, not test results. Unknown inputs expand to full validation."""
+"""Select coverage, not test results.
+
+Extra-language SDKs need a path owner, `ci:full`, or scheduled full
+validation. Unknown inputs keep the Ruby floor plus Spinel.
+"""
 
 import argparse
 import json
@@ -33,16 +37,18 @@ BASE = [
     "campfire-compare",
 ]
 # Compact publication additionally waits on Rust/TS when those jobs were
-# selected (full/main, or a change that owns them). Unselected skips must
-# not fail the Ruby PR floor.
+# selected (scheduled full, or a change that owns them). Unselected skips
+# must not fail the Ruby PR floor.
 PUBLICATION = [*BASE, "compare", "browser-smoke-typescript"]
 CORE = ["build-spinel", "toolchain-spinel", "compare-spinel"]
 SPINEL_TESTS = [
+    "date_columns_spinel",
     "framework_tests_spinel",
     "spinel_web_push_crypto",
     "spinel_db_lease",
     "param_binds",
     "spinel_stmt_cache_lru",
+    "db_sqlite_concurrency",
     "spinel_param_builder",
     "rails_compat_vectors_spinel",
 ]
@@ -90,6 +96,7 @@ def native_coverage(path):
         or path == "src/emit/ruby.rs"
         or (path.startswith("tests/spinel") and path.endswith((".rs", ".rb")))
         or path in {f"tests/{name}.rs" for name in SPINEL_TESTS}
+        or path == "tests/support/db_concurrency_spinel.rb"
     ) and not interpreter_only
     suites = set()
     if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):
@@ -97,9 +104,15 @@ def native_coverage(path):
     focused = re.fullmatch(r"tests/([^/]+)\.(?:rs|rb)", path)
     if focused and focused[1] in SPINEL_TESTS:
         suites.add(focused[1])
+    if path == "tests/support/db_concurrency_spinel.rb":
+        suites.add("db_sqlite_concurrency")
     if path in {
         "tests/param_binds_emit.rb",
+        "tests/param_binds_raw_where.rb",
         "tests/param_binds_runtime.rb",
+        "tests/param_binds_cruby_cache.rb",
+        "tests/param_binds_spinel_cache.rb",
+        "runtime/spinel/test/statement_cache_cases.rb",
         "tests/support/emit_and_run.rs",
         "src/lower/model_to_library/adapter_emit.rs",
     } or path.startswith("src/lower/arel/"):
@@ -107,6 +120,8 @@ def native_coverage(path):
     if path.startswith(("runtime/spinel/", "runtime/ruby/")) and not interpreter_only:
         name = path.rsplit("/", 1)[-1]
         owned_tests = set()
+        if name == "statement_cache_cases.rb":
+            owned_tests.add("param_binds")
         if any(word in name for word in ("web_push", "base64")):
             owned_tests.add("spinel_web_push_crypto")
         if any(
@@ -123,10 +138,33 @@ def native_coverage(path):
         if any(
             word in path for word in ("/db", "sqlite", "active_support_time_parsing")
         ):
-            # Shared database inputs own lease/ownership, binds, and cache recency.
-            owned_tests.update(("spinel_db_lease", "param_binds", "spinel_stmt_cache_lru"))
+            # Shared database inputs own lease/ownership, binds, cache recency,
+            # and the snapshot / write-permit / checkpoint policy.
+            owned_tests.update(
+                (
+                    "spinel_db_lease",
+                    "param_binds",
+                    "spinel_stmt_cache_lru",
+                    "db_sqlite_concurrency",
+                )
+            )
         if any(word in name for word in ("param", "multipart", "request")):
             owned_tests.add("spinel_param_builder")
+        if name in {
+            "date.rb",
+            "date.rbs",
+            "active_support_date_parsing.rb",
+            "active_support_date_parsing.rbs",
+            "active_record_date_serialization.rb",
+            "active_record_date_serialization.rbs",
+            "sqlite_adapter.rb",
+        }:
+            owned_tests.add("date_columns_spinel")
+        if name in {
+            "active_record_date_serialization.rb",
+            "active_record_serialization.rb",
+        }:
+            owned_tests.add("framework_tests_spinel")
         if (
             path.startswith("runtime/spinel/")
             and not path.startswith("runtime/spinel/scaffold/")
@@ -218,19 +256,12 @@ def select(
                 spinel_tests.update(SPINEL_TESTS)
             reasons.append(f"{path}: proven {project_scope} assembly bodies only")
             continue
-        if path.startswith((".github/", ".cargo/")) or path in {
-            "scripts/ci-plan.py",
-            "scripts/ci-reuse.py",
-            "scripts/ci-archive-evidence.py",
-            "src/project.rs",
-            "Cargo.toml",
-            "Cargo.lock",
-            "build.rs",
-            "rust-toolchain.toml",
-            ".cargo/config.toml",
+        if path in {
+            "tests/support/jdbc_cleanup_failures.rb",
+            "runtime/spinel/test/statement_cache_cases.rb",
         }:
-            full = True
-            reasons.append(f"{path}: validation/packaging policy")
+            targets.add("jruby")
+            reasons.append(f"{path}: JDBC statement lifecycle")
         match = re.match(r"(?:src/emit/|runtime/)([^/.]+)(?:[/.]|$)", path)
         test = re.match(
             r"tests/(?:framework_tests_)?([a-z]+)_toolchain\.rs$|tests/framework_tests_([a-z]+)\.rs$",
@@ -276,15 +307,6 @@ def select(
         elif target == "shared":
             full = True
             reasons.append(f"{path}: shared code generation")
-        elif target and target not in {
-            "ruby",
-            "ruby_family",
-            "roda",
-            "mod",
-            "rails",
-        }:
-            full = True
-            reasons.append(f"{path}: unknown target ownership")
         if path.startswith("wasm/"):
             wasm = True
             reasons.append(f"{path}: WASM/browser compiler")
@@ -413,7 +435,8 @@ def project_change_scope(before, after):
     """Narrow only body-only edits in known builders; all other bytes must match.
 
     This is not a Rust parser. Only indented bodies without raw strings or
-    block comments qualify; unknown shapes/signatures/items retain full CI.
+    block comments qualify; unknown shapes/signatures/items do not narrow
+    and stay on the Ruby floor.
     """
     pattern = re.compile(
         r"(?P<header>^fn (?P<name>"
@@ -470,7 +493,7 @@ def project_change_scope(before, after):
     return None
 
 
-def changed_inputs(event, event_name, sha):
+def changed_inputs(event, event_name, sha, *, need_project_scope=True):
     if not SHA.fullmatch(sha) or git("rev-parse", "HEAD").decode().strip() != sha:
         raise ValueError("checkout is not the event SHA")
     if event_name == "pull_request":
@@ -504,7 +527,7 @@ def changed_inputs(event, event_name, sha):
         if p
     ]
     scope = None
-    if "src/project.rs" in paths:
+    if need_project_scope and "src/project.rs" in paths:
         entries = [
             git("ls-tree", ref, "--", "src/project.rs").split() for ref in (base, sha)
         ]
@@ -600,20 +623,30 @@ def main():
         event_name == "push"
         and os.environ.get("GITHUB_REF") == "refs/heads/main"
         and not pr
+        and not full
     ):
-        full = True
+        # Extra-language SDKs are the scheduled full-ci ledger, not every merge.
+        spinel_lane = True
     reason = None
     try:
+        # project_scope only narrows path selection; spinel/full short-circuit
+        # before that, so skip the expensive project.rs body scan there.
         paths, project_scope = changed_inputs(
-            event, event_name, os.environ["GITHUB_SHA"]
+            event,
+            event_name,
+            os.environ["GITHUB_SHA"],
+            need_project_scope=not full and not spinel_lane,
         )
     except (KeyError, ValueError, UnicodeError, subprocess.CalledProcessError) as e:
-        paths, project_scope, full, reason = (
-            [],
-            None,
-            True,
-            f"Unknown changed inputs: {e}; running full validation",
-        )
+        paths, project_scope = [], None
+        if full:
+            reason = f"Unknown changed inputs: {e}; running full validation"
+        else:
+            spinel_lane = True
+            reason = (
+                f"Unknown changed inputs: {e}; "
+                "Ruby+Spinel only (extra-language SDKs not selected)"
+            )
     publish = os.environ.get("CI_PUBLISH") == "true"
     if publish and (
         os.environ["GITHUB_REPOSITORY"] != "rubys/roundhouse"
