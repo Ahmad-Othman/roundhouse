@@ -116,6 +116,22 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         for m in ["sanitize_sql", "sanitize_sql_array"] {
             base.class_methods.entry(Symbol::from(m)).or_insert(Ty::Str);
         }
+        // Association / ActionText macro helpers call these on the
+        // literal Base (and on every model via the AR catalog). Seed
+        // Base itself so concern bodies typed with `self =
+        // ActiveRecord::Base` (sole includer of a load-hook module)
+        // do not ledger "lacks a shared runtime" for live AR API.
+        base.class_methods
+            .entry(Symbol::from("reflect_on_association"))
+            .or_insert(Ty::Class {
+                id: ClassId(Symbol::from(
+                    "ActiveRecord::Reflection::AssociationReflection",
+                )),
+                args: vec![],
+            });
+        base.class_methods
+            .entry(Symbol::from("strict_loading_by_default"))
+            .or_insert(Ty::Bool);
     }
 
     // CollectionProxy — the runtime helper transpiled models use
