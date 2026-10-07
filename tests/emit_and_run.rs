@@ -7715,3 +7715,48 @@ fn controller_name_instance_variable_set_runs_on_show() {
         .run_test("test/controllers/articles_controller_test.rb")
         .assert_passes();
 }
+
+#[test]
+fn campfire_video_preview_config_runs() {
+    // Campfire tip initializer sets video_preview_arguments (gte(t,5))
+    // and swaps previewers VideoPreviewer → TimeLimitedVideoPreviewer.
+    // Suite asserts ActiveStorage.previewers / video_preview_arguments;
+    // poster reads the vf filter from the same config.
+    emit_and_run::real_blog()
+        .write(
+            "lib/rails_ext/time_limited_video_previewer.rb",
+            r#"class TimeLimitedVideoPreviewer < ActiveStorage::Previewer::VideoPreviewer
+  TIME_LIMIT = 10
+end
+"#,
+        )
+        .write(
+            "config/initializers/extensions.rb",
+            r#"Dir[Rails.root.join("lib/rails_ext/*.rb")].sort.each { |f| require f }
+"#,
+        )
+        .write(
+            "config/initializers/active_storage.rb",
+            r#"require "rails_ext/time_limited_video_previewer"
+
+Rails.application.configure do
+  config.active_storage.video_preview_arguments =
+    "-vf 'select=eq(n\\,0)+eq(key\\,1)+gt(scene\\,0.015)+gte(t\\,5),loop=loop=-1:size=2,trim=start_frame=1'" \
+    " -frames:v 1 -f image2"
+
+  config.active_storage.previewers = config.active_storage.previewers.map do |previewer|
+    previewer == ActiveStorage::Previewer::VideoPreviewer ? TimeLimitedVideoPreviewer : previewer
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"
+raise "args" unless ActiveStorage.video_preview_arguments.include?("gte(t\\,5)")
+raise "filter" unless ActiveStorage.video_preview_vf_filter.include?("gte(t\\,5)")
+raise "previewers include" unless ActiveStorage.previewers.include?(TimeLimitedVideoPreviewer)
+raise "previewers exclude" if ActiveStorage.previewers.include?(ActiveStorage::Previewer::VideoPreviewer)
+"#,
+        )
+        .assert_passes();
+}

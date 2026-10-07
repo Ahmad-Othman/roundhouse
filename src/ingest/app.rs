@@ -857,6 +857,54 @@ end
                 }
             }
         }
+        // `config.active_storage.video_preview_arguments = "…"` and
+        // `config.active_storage.previewers = ….map { VideoPreviewer →
+        // TimeLimitedVideoPreviewer }` — campfire tip. Lifted onto the
+        // Application reopen like the variable_content_types trim;
+        // `ActiveStorage.video_preview_arguments` / `.previewers` and
+        // the ffmpeg poster filter read the overrides.
+        {
+            let init_dir = dir.join("config/initializers");
+            let mut args: Option<String> = None;
+            let mut time_limited = false;
+            if vfs.is_dir(&init_dir) {
+                for entry in read_rb_files(vfs, &init_dir)? {
+                    if let Ok(bytes) = vfs.read(&entry) {
+                        if let Some(a) = extract_video_preview_arguments(&bytes) {
+                            args = Some(a);
+                        }
+                        if extract_time_limited_video_previewer_swap(&bytes) {
+                            time_limited = true;
+                        }
+                    }
+                }
+            }
+            if let Some(arguments) = args {
+                let filter = video_preview_vf_filter_from_arguments(&arguments)
+                    .unwrap_or_else(|| arguments.clone());
+                if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
+                    "def active_storage_video_preview_arguments
+  {arguments:?}
+end
+def active_storage_video_preview_vf_filter
+  {filter:?}
+end
+"
+                )) {
+                    methods.append(&mut synth);
+                }
+            }
+            if time_limited {
+                if let Ok(mut synth) = crate::runtime_src::parse_methods(
+                    "def active_storage_previewers
+  [TimeLimitedVideoPreviewer]
+end
+",
+                ) {
+                    methods.append(&mut synth);
+                }
+            }
+        }
         // `Vips.block_untrusted(true)` / `Vips.block("<op>", true)` —
         // an initializer setting libvips' loader policy before any
         // upload is decoded (any app that stores user uploads; campfire
@@ -5935,6 +5983,98 @@ fn quoted_after_key_label(text: &str) -> Option<String> {
     let inner = &rest[1..];
     let end = inner.find(quote)?;
     Some(inner[..end].to_string())
+}
+
+/// `config.active_storage.video_preview_arguments = "…" \ "…"` —
+/// concatenated double-quoted string literals after the `=`, the way
+/// campfire tip writes the `-vf … -frames:v 1 -f image2` argv. Returns
+/// the joined runtime string (with `\\,` already a single backslash).
+fn extract_video_preview_arguments(source: &[u8]) -> Option<String> {
+    let source = String::from_utf8_lossy(source);
+    let mut lines = source.lines().peekable();
+    while let Some(line) = lines.next() {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            continue;
+        }
+        let Some(idx) = t.find("active_storage.video_preview_arguments") else {
+            continue;
+        };
+        let rest = t[idx + "active_storage.video_preview_arguments".len()..].trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let mut text = rest.to_string();
+        // Line continuations (`\`) and further `"…"` pieces on
+        // following lines until a blank / next config assignment.
+        while text.trim_end().ends_with('\\')
+            || (!text.contains('"') && lines.peek().is_some())
+            || (text.matches('"').count() % 2 == 1)
+        {
+            let Some(next) = lines.next() else { break };
+            let n = next.trim();
+            if n.is_empty() || n.starts_with("config.") {
+                break;
+            }
+            text.push(' ');
+            text.push_str(n);
+        }
+        let mut out = String::new();
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] != b'"' {
+                i += 1;
+                continue;
+            }
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    out.push(bytes[i + 1] as char);
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    i += 1;
+                    break;
+                }
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        if !out.is_empty() {
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// The `-vf '…'` filter expression inside a `video_preview_arguments`
+/// string, or `None` when the spelling has no quoted `-vf` value.
+fn video_preview_vf_filter_from_arguments(arguments: &str) -> Option<String> {
+    let Some(rest) = arguments.split("-vf").nth(1) else {
+        return None;
+    };
+    let rest = rest.trim_start();
+    let quote = rest.chars().next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let body = &rest[1..];
+    let end = body.find(quote)?;
+    Some(body[..end].to_string())
+}
+
+/// `config.active_storage.previewers = ….map` that replaces
+/// `ActiveStorage::Previewer::VideoPreviewer` with
+/// `TimeLimitedVideoPreviewer` — campfire tip's identity swap.
+fn extract_time_limited_video_previewer_swap(source: &[u8]) -> bool {
+    let source = String::from_utf8_lossy(source);
+    let has_map = source.contains("active_storage.previewers")
+        && source.contains(".map");
+    let swaps = source.contains("ActiveStorage::Previewer::VideoPreviewer")
+        && source.contains("TimeLimitedVideoPreviewer");
+    has_map && swaps
 }
 
 /// The MIME types a `config.active_storage.variable_content_types -=

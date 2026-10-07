@@ -80,6 +80,33 @@ module ActiveStorage
     variable_content_types.include?(content_type)
   end
 
+  # Rails' `config.active_storage.video_preview_arguments` — the ffmpeg
+  # argv fragment after `-i <path>`. Default matches the filter the
+  # ruby-family poster reopen draws with; an initializer override
+  # (campfire adds `gte(t,5)`) is lifted onto the Application reopen
+  # at ingest. Suite pins and `Previewer.poster` both read this.
+  def self.video_preview_arguments
+    Rails.application.active_storage_video_preview_arguments
+  end
+
+  # The `-vf` filter expression inside `video_preview_arguments`. The
+  # poster reopen takes this alone (it already passes `-frames:v` /
+  # `-f image2` positionally); kept beside the full arguments string
+  # so suite asserts on the config spelling stay honest.
+  def self.video_preview_vf_filter
+    Rails.application.active_storage_video_preview_vf_filter
+  end
+
+  # Rails' `config.active_storage.previewers` — class list used for
+  # identity checks (`assert_includes ActiveStorage.previewers, …`).
+  # Default is the video previewer only (RH does not ship PDF
+  # previewers). Campfire's map-swap to `TimeLimitedVideoPreviewer`
+  # is lifted at ingest onto `Rails.application.active_storage_previewers`
+  # (app Consts resolve there; this method only forwards).
+  def self.previewers
+    Rails.application.active_storage_previewers
+  end
+
   # Marcel's answers for the formats a variation can name, so the
   # variant blob's `content_type` column is what Rails would write.
   def self.content_type_for_format(format)

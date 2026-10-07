@@ -482,6 +482,26 @@ module Rails
       []
     end
 
+    # `config.active_storage.video_preview_arguments` — ffmpeg argv
+    # after `-i`. Default is the select/keyframe/scene filter the
+    # poster reopen has always drawn with; campfire's initializer
+    # adds `gte(t,5)` and ingest overrides these three methods.
+    def active_storage_video_preview_arguments
+      "-vf 'select=eq(n\\,0)+eq(key\\,1)+gt(scene\\,0.015),loop=loop=-1:size=2,trim=start_frame=1' -frames:v 1 -f image2"
+    end
+
+    def active_storage_video_preview_vf_filter
+      "select=eq(n\\,0)+eq(key\\,1)+gt(scene\\,0.015),loop=loop=-1:size=2,trim=start_frame=1"
+    end
+
+    # `config.active_storage.previewers` — default video previewer.
+    # Campfire's VideoPreviewer → TimeLimitedVideoPreviewer map is
+    # synthesized onto the Application reopen at ingest (where the
+    # app Const resolves).
+    def active_storage_previewers
+      [ActiveStorage::Previewer::VideoPreviewer]
+    end
+
     # `Vips.block_untrusted(true)` / `Vips.block("<op>", true)` in an
     # initializer: libvips' loader policy, which an app that stores
     # user uploads sets before any image is decoded. Lifted at ingest
