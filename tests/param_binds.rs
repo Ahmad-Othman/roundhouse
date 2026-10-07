@@ -471,6 +471,98 @@ fn bind_runtime_spinel() {
     runtime(true);
 }
 
+// A String-only override exposes the inherited Integer adapter seed that
+// SQLite's escape helpers otherwise hide. Compile the actual emitted RBS;
+// an unseeded native compile does not exercise this boundary.
+fn string_key_adapter(test: &str, target: BuildTarget) {
+    if std::env::var_os("ROUNDHOUSE_BINDS_CHILD").is_none() {
+        for mode in ["0", "1"] {
+            println!("{test}: ROUNDHOUSE_PARAM_BINDS={mode}");
+            success(
+                Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", test, "--include-ignored", "--nocapture"])
+                    .env("ROUNDHOUSE_BINDS_CHILD", "1")
+                    .env("ROUNDHOUSE_PARAM_BINDS", mode),
+            );
+        }
+        return;
+    }
+    let (dir, errors) = emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write(
+            "app/models/widget.rb",
+            "class Widget < ApplicationRecord\n  self.primary_key = \"identifier\"\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"widgets\", primary_key: \"identifier\", id: :string do |t|\n    t.string \"name\"\n  end\nend\n",
+        )
+        .emit(target);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let _cleanup = ScratchDir(dir.parent().unwrap().to_path_buf());
+    let script = r#"require_relative "boot"
+class Widget
+  def self._adapter_find_by_id(id)
+    record = Widget.new
+    record.name = id.upcase
+    record
+  end
+  def self._adapter_exists_by_id?(id)
+    id.upcase == "LITERAL_KEY"
+  end
+end
+raise "String adapter input" unless Widget.find("literal_key").name == "LITERAL_KEY"
+raise "empty String key" unless Widget.find("").name == ""
+raise "zero String key" unless Widget.find("0").name == "0"
+raise "String exists adapter" unless Widget.exists?("literal_key")
+raise "missing String exists adapter" if Widget.exists?("other")
+raise "nil exists guard" if Widget.exists?(nil)
+begin
+  Widget.find(nil)
+  raise "nil reached adapter"
+rescue ActiveRecord::RecordNotFound
+end
+puts "PASS seeded String-only find/exists adapter boundary and nil guards"
+"#;
+    if target == BuildTarget::Spinel {
+        std::fs::write(dir.join("strict_adapter.rb"), script).unwrap();
+        let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
+        let mut command = Command::new(compiler);
+        command
+            .args(["--rbs", ".", "strict_adapter.rb", "-o", "strict_adapter"])
+            .current_dir(&dir);
+        let output = command.output().expect("compile seeded String adapter");
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("type seeds are unavailable"),
+            "RBS extractor is required: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        check_success(&command, &output);
+        success(Command::new(dir.join("strict_adapter")).current_dir(&dir));
+    } else {
+        run_script(&dir, script, false);
+    }
+}
+
+#[test]
+fn string_key_adapter_ruby() {
+    string_key_adapter("string_key_adapter_ruby", BuildTarget::Ruby);
+}
+
+#[test]
+#[ignore = "requires Spinel and its RBS extractor"]
+fn string_key_adapter_spinel() {
+    string_key_adapter("string_key_adapter_spinel", BuildTarget::Spinel);
+}
+
 fn nullable_associations(test: &str, target: BuildTarget) {
     if std::env::var_os("ROUNDHOUSE_BINDS_CHILD").is_none() {
         for mode in ["0", "1"] {
