@@ -57,11 +57,18 @@ pub(super) fn expand(
             continue;
         }
         let Some(attributes) = included_attributes(&lc.unknown_calls, &lc.name) else {
-            survey::record(&IngestError::Unsupported {
-                file: lc.name.0.as_str().to_string(),
-                message: "class_attribute carrier `included do` must contain only class_attribute and filter DSL"
-                    .to_string(),
-            });
+            // Only ledger when `included` actually declares a
+            // `class_attribute` and also runs something else. A verified
+            // Concern whose `included` is only `attr_accessor` / custom
+            // hooks is not a class_attribute carrier — surveying it
+            // polluted store-check and model-concern suites.
+            if included_declares_class_attribute(&lc.unknown_calls) {
+                survey::record(&IngestError::Unsupported {
+                    file: lc.name.0.as_str().to_string(),
+                    message: "class_attribute carrier `included do` must contain only class_attribute and filter DSL"
+                        .to_string(),
+                });
+            }
             continue;
         };
         if attributes.is_empty() {
@@ -297,6 +304,28 @@ fn reader(name: &Symbol, parent: Option<&ClassId>, owner: &str) -> MethodDef {
     method.body = body;
     method.kind = crate::dialect::AccessorKind::Method;
     method
+}
+
+/// True when some `included do` body contains a `class_attribute` call,
+/// whether or not the rest of the body is a supported carrier shape.
+fn included_declares_class_attribute(calls: &[Expr]) -> bool {
+    for call in calls {
+        let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*call.node else {
+            continue;
+        };
+        if method.as_str() != "included" || !args.is_empty() {
+            continue;
+        }
+        let ExprNode::Lambda { body, .. } = &*block.node else { continue };
+        let statements: Vec<&Expr> = match &*body.node {
+            ExprNode::Seq { exprs } => exprs.iter().collect(),
+            _ => vec![body],
+        };
+        if statements.iter().any(|stmt| class_attribute(stmt).is_some()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// `included do … end` when every statement is `class_attribute` or
