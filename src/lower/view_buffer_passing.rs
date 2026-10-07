@@ -4,8 +4,9 @@
 //! (`io = String.new; io << …; io`), which is the right way to BUILD a
 //! string on every target. The returning wrapper here upgrades the init
 //! to a capacity-hinted alloc (`ViewBufferCap.alloc(:cap_…)`, sized from
-//! the last render of that page — ports keep the same idea in
-//! `Ractor[:cap_<page>]`) and stores `io.bytesize` afterward. What the
+//! the last render of that page — ports: `Ractor[:cap_<page>]`; CRuby
+//! overlay: thread variables so the memo survives fiber-per-request)
+//! and stores `io.bytesize` afterward. What the
 //! buffer-passing half costs is at the seam: a nested view returns its
 //! finished buffer as a string value and its caller appends that value
 //! into its own buffer, so a page pays one full copy of each fragment

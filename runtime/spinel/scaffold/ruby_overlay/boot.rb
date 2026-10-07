@@ -211,7 +211,7 @@ require_relative "runtime/thread_state"
 # thread_state: it wraps that file's locked queue methods.
 require_relative "runtime/active_job_cruby"
 # Returning view wrappers call ViewBufferCap.alloc/store (see
-# lower::view_buffer_passing). Overlay: Thread.current memo +
+# lower::view_buffer_passing). Overlay: thread-variable memo +
 # String.new(capacity:) from the last render of that page/action.
 require_relative "runtime/view_buffer_cap"
 # `Turbo::StreamsChannel` — the channel a `<turbo-cable-stream-source>`

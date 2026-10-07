@@ -88,7 +88,7 @@ io = ViewBufferCap.alloc(key)
 io << "hello world"
 ViewBufferCap.store(key, io.bytesize)
 abort("truncated") unless io == "hello world"
-abort("memo") unless Thread.current[key] == "hello world".bytesize
+abort("memo") unless Thread.current.thread_variable_get(key) == "hello world".bytesize
 puts "ok"
 "#
         ))

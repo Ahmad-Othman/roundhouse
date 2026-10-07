@@ -4,7 +4,7 @@
 # `lower::view_buffer_passing`). Capacity pre-sizing is a CRuby overlay
 # concern — Spinel Strings grow without a `capacity:` keyword, and this
 # stub keeps AOT free of that surface. The CRuby overlay replaces this
-# file with a `Thread.current`-backed memo (ports use `Ractor[:cap_<page>]`).
+# file with a thread-variable memo (ports use `Ractor[:cap_<page>]`).
 module ViewBufferCap
   def self.alloc(_key)
     String.new

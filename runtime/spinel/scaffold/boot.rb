@@ -150,7 +150,7 @@ require_relative "runtime/active_job"
 require_relative "runtime/thread_state"
 # Returning view wrappers call ViewBufferCap.alloc/store (see
 # lower::view_buffer_passing). Spinel's file is a no-op stub; the CRuby
-# overlay replaces it with a Thread.current memo + String.new(capacity:).
+# overlay replaces it with a thread-variable memo + String.new(capacity:).
 require_relative "runtime/view_buffer_cap"
 require_relative "runtime/tep/tep"
 # Spinel-only CGI reopen: `require "cgi"` reaches spinel's bundled package
