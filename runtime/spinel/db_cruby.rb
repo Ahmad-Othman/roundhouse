@@ -738,10 +738,32 @@ module Db
     end
     handle = { stmt: stmt, row: nil, cached: cached, capture: nil, open: open }
     open[stmt] = handle
+    handle[:capture] = { rows: [], names: stmt.columns, eof: false, sql: sql } if !qcache.nil? && !parameterized
+    handle
+  end
+
+  # Explicit uncached reads skip statement reuse, but the separate
+  # request result cache still applies. Partial replays already promote
+  # to a transient statement, which finalize closes.
+  def self.prepare_uncached(sql)
     qcache = Fiber[:rh_qcache]
-    unless qcache.nil? || parameterized
-      handle[:capture] = { rows: [], names: stmt.columns, eof: false, sql: sql }
+    parameterized = sql.include?("?")
+    if !qcache.nil? && !parameterized && (hit = qcache[sql])
+      return { stmt: nil, row: nil, cached: false, replay: hit, pos: 0, sql: sql }
     end
+    record_query(sql)
+    conn = current_dbh
+    begin_snapshot(conn)
+    stmt = conn.prepare(sql)
+    statement_handle(open_statements(conn), stmt, sql, false, !qcache.nil? && !parameterized)
+  end
+
+  # Transient handles use the same ownership and bounded capture contract.
+  # The cached path constructs its handle inline on the query hot path.
+  def self.statement_handle(open, stmt, sql, cached, capture_rows)
+    handle = { stmt: stmt, row: nil, cached: cached, capture: nil, open: open }
+    open[stmt] = handle
+    handle[:capture] = { rows: [], names: stmt.columns, eof: false, sql: sql } if capture_rows
     handle
   end
 
@@ -932,12 +954,37 @@ module Db
     bind_value(handle, idx, value)
   end
 
+  def self.bind_int_opt(handle, idx, value)
+    bind_int(handle, idx, value)
+  end
+
+  def self.bind_text_opt(handle, idx, value)
+    value.nil? ? bind_value(handle, idx, nil) : bind_text(handle, idx, value)
+  end
+
+  def self.bind_bool_opt(handle, idx, value)
+    bind_value(handle, idx, value.nil? ? nil : (value ? 1 : 0))
+  end
+
   def self.bind_text(handle, idx, value)
-    bind_value(handle, idx, value)
+    value = value.to_s
+    # Match escape_string's storage class exactly. The gem otherwise binds
+    # every BINARY string as BLOB and every UTF-8 string (even NUL) as TEXT;
+    # SQLite equality does not equate the same bytes across those classes.
+    if value.include?("\0") || (value.encoding == Encoding::BINARY && !value.ascii_only?)
+      bind_value(handle, idx, value.b)
+    elsif value.encoding == Encoding::BINARY
+      bind_value(handle, idx, value.encode(Encoding::UTF_8))
+    else
+      bind_value(handle, idx, value)
+    end
+  rescue StandardError => error
+    # Encoding checks/conversion can raise before bind_value is entered.
+    statement_failed(handle, "bind", error)
   end
 
   def self.bind_bool(handle, idx, value)
-    bind_value(handle, idx, value ? 1 : 0)
+    bind_value(handle, idx, value.nil? ? nil : (value ? 1 : 0))
   end
 
   def self.last_insert_rowid

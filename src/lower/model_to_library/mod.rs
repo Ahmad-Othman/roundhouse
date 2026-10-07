@@ -242,6 +242,22 @@ pub(crate) fn lower_models_inner(
     materialization: Materialization<'_>,
     finder_inputs: FinderInputs,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
+    lower_models_inner_with_ruby_values(
+        models, schema, extra_class_infos, params_specs, unfolded, materialization,
+        finder_inputs, false,
+    )
+}
+
+pub(crate) fn lower_models_inner_with_ruby_values(
+    models: &[Model],
+    schema: &Schema,
+    extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
+    params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
+    unfolded: &std::collections::HashSet<(ClassId, Symbol)>,
+    materialization: Materialization<'_>,
+    finder_inputs: FinderInputs,
+    ruby_read_values: bool,
+) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
     for model in models {
@@ -381,7 +397,9 @@ pub(crate) fn lower_models_inner(
             let unfold = method.receiver == crate::dialect::MethodReceiver::Class
                 && unfolded.contains(&(model.name.clone(), method.name.clone()));
             if !unfold {
-                crate::lower::arel::rewrite_arel_in_expr(&mut method.body, schema, &classes);
+                crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
+                    &mut method.body, schema, &classes, &[], ruby_read_values,
+                );
             }
             type_method_body(method, &classes, table, Some(model));
         }
@@ -1070,6 +1088,7 @@ fn build_methods_with_finder_inputs(
         // project_level_3_adapter_emit.md.
         if finder_inputs == FinderInputs::Request {
             methods.push(adapter_emit::synth_find_primary_key_input(&model.name, table));
+            methods.push(adapter_emit::synth_exists_primary_key_input(&model.name, table));
         }
         push_adapter_methods(&mut methods, &model.name, table, schema);
         // `from_params(p: <Resource>Params)` — typed factory matching the
@@ -1877,10 +1896,15 @@ fn build_class_info_with_finder_inputs(
         "count",
         fn_sig(vec![], Ty::Int),
     );
+    let exists_input = if finder_inputs == FinderInputs::Request {
+        finder_input_ty(&key_ty)
+    } else {
+        key_ty.clone()
+    };
     insert_default(
         &mut info.class_methods,
         "exists?",
-        fn_sig(vec![(Symbol::from("id"), key_ty.clone())], Ty::Bool),
+        fn_sig(vec![(Symbol::from("id"), exists_input)], Ty::Bool),
     );
     insert_default(
         &mut info.class_methods,
