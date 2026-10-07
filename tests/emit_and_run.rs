@@ -7,6 +7,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/class_attribute.rs"]
+mod class_attribute;
 #[path = "emit_and_run/integer_query_find_by.rs"]
 mod integer_query_find_by;
 
@@ -265,6 +267,79 @@ fn finite_concern_class_configuration_runs_without_replaying_rails() {
         run.assert_passes();
         assert!(run.stdout.contains("finite class configuration contract passed"));
     }
+}
+
+/// A Concern macro that writes a `class_attribute` runs when the
+/// includer loads, rather than being evaluated at compile time.
+#[test]
+fn concern_class_attribute_macros_run_at_class_load() {
+    let run = class_attribute::overlay().run_ruby(class_attribute::ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("class_attribute contract passed"));
+}
+
+/// An explicit nil on a subclass is its value; unset reads the parent's.
+#[test]
+fn concern_class_attribute_set_to_nil_is_not_unset() {
+    let run = class_attribute::nil_overlay().run_ruby(class_attribute::NIL_ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("class_attribute nil contract passed"));
+}
+
+/// The same Concern types without a diagnostic of any severity: the
+/// macro parameters from the class-body calls (a subclass's included),
+/// the helper's keywords through `**options`, `Array(...)`'s elements,
+/// and the attribute from the values its methods store.
+#[test]
+fn concern_class_attribute_macros_are_fully_typed() {
+    let controllers = [
+        ("probe_controller.rb", "class ProbeController < ApplicationController\n  include PreloadableConfigurationConcern\n  preload_site_configs %w[a b], only: :show\nend\n"),
+        ("own_controller.rb", "class OwnController < ProbeController\n  preload_feature_flags %w[f], only: %i[index show]\nend\n"),
+        ("inherit_controller.rb", "class InheritController < ProbeController\n  def show\n    render plain: self.class._preload_definitions.length.to_s\n  end\nend\n"),
+    ];
+    let tree = [
+        ("app/controllers/concerns/preloadable_configuration_concern.rb".to_string(), class_attribute::CONCERN.to_string()),
+        ("app/controllers/application_controller.rb".to_string(), "class ApplicationController < ActionController::Base\nend\n".to_string()),
+    ]
+    .into_iter()
+    .chain(controllers.iter().map(|(f, s)| (format!("app/controllers/{f}"), s.to_string())))
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
+    .collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let _ = roundhouse::session::analyze_and_lower(&mut app);
+    let concern: Vec<String> = roundhouse::analyze::diagnose(&app)
+        .into_iter()
+        .filter(|d| {
+            (d.span.file.0 as usize)
+                .checked_sub(1)
+                .and_then(|i| app.sources.get(i))
+                .is_some_and(|f| f.path.ends_with("preloadable_configuration_concern.rb"))
+        })
+        .map(|d| d.message)
+        .collect();
+    assert!(concern.is_empty(), "concern diagnostics: {concern:#?}");
+    // The signature declares the parameter's own type, not the slot's.
+    let probe = app.controllers.iter().find(|c| c.name.0.as_str() == "ProbeController").unwrap();
+    let preload = probe.class_methods().find(|m| m.name.as_str() == "preload_site_configs").unwrap();
+    let Some(roundhouse::ty::Ty::Fn { params, .. }) = &preload.signature else {
+        panic!("unsigned: {:?}", preload.signature)
+    };
+    assert_eq!(
+        params[0].ty,
+        roundhouse::ty::Ty::Array { elem: Box::new(roundhouse::ty::Ty::Str) },
+        "codes"
+    );
+    // `only: nil` is nil when absent, which the signature has to say.
+    let add = probe.class_methods().find(|m| m.name.as_str() == "add_preload_definition").unwrap();
+    let Some(roundhouse::ty::Ty::Fn { params, .. }) = &add.signature else {
+        panic!("unsigned: {:?}", add.signature)
+    };
+    let only = params.iter().find(|p| p.name.as_str() == "only").expect("only");
+    assert!(
+        matches!(&only.ty, roundhouse::ty::Ty::Union { variants } if variants.contains(&roundhouse::ty::Ty::Nil)),
+        "only: {:?}",
+        only.ty
+    );
 }
 
 /// The harness itself: the unedited blog emits and its controller

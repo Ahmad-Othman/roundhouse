@@ -1490,6 +1490,17 @@ impl<'a> BodyTyper<'a> {
                 if method.as_str() == "sum" && !args.is_empty() {
                     return Ty::Untyped;
                 }
+                // `[] + [h]` is an Array of `h`: when the receiver's
+                // element is empty or not yet known, `+`, `|` and
+                // `concat` take the argument's. A known receiver element
+                // keeps answering for the result, as before.
+                if let ("+" | "|" | "concat", [other]) = (method.as_str(), args) {
+                    if let (Ty::Var { .. } | Ty::Bottom, Some(Ty::Array { elem: other })) =
+                        (elem, &other.ty)
+                    {
+                        return Ty::Array { elem: other.clone() };
+                    }
+                }
                 array_method(method, elem, block_ret)
             }
             // Relation-typed receiver — a chain started from a scope
