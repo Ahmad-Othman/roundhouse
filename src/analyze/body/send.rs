@@ -1301,11 +1301,15 @@ impl<'a> BodyTyper<'a> {
                         _ => {}
                     }
                 }
-                // `Process.pid` — the one Process method the corpus
-                // reaches, and it is Ruby's `Logger::Formatter` that
-                // reaches it: every log line carries `#<pid>`. An
+                // `Process.pid` — Ruby's `Logger::Formatter` and
+                // Campfire's web-push pool (`forget_after_fork`). An
                 // Integer on every target that has a process at all.
                 if id.0.as_str() == "Process" && method.as_str() == "pid" {
+                    return Ty::Int;
+                }
+                // `Process.kill(signal, pid)` — TimeLimitedVideoPreviewer
+                // kills a stuck ffmpeg. Answers the signal as Integer.
+                if id.0.as_str() == "Process" && method.as_str() == "kill" {
                     return Ty::Int;
                 }
                 // `Process.clock_gettime(clock, unit = :float_second)`:
@@ -1320,6 +1324,20 @@ impl<'a> BodyTyper<'a> {
                         }
                         Some(_) => Ty::Untyped,
                     };
+                }
+                // `Timeout.timeout(sec) { ... }` — block result, or raises
+                // Timeout::Error. Campfire unfurl + video previewer.
+                if id.0.as_str() == "Timeout" && method.as_str() == "timeout" {
+                    return Ty::Untyped;
+                }
+                // `IO.popen` / `IO.copy_stream` — capture path; popen is
+                // polymorphic (block vs handle), copy_stream answers bytes.
+                if id.0.as_str() == "IO" {
+                    match method.as_str() {
+                        "popen" => return Ty::Untyped,
+                        "copy_stream" => return Ty::Int,
+                        _ => {}
+                    }
                 }
                 // JSON stdlib — `JSON.generate` and `JSON.dump` return
                 // String; `JSON.parse` / `JSON.load` return parsed

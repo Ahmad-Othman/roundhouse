@@ -36,13 +36,48 @@ fn unimplemented_reporters_and_tracers_are_refused() {
     Rails.error.report(StandardError.new("x"), handled: true)
     Rails.error.handle(StandardError) { 1 }
     Rails.error.set_context(a: 1)
-    t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    ShopifyTracer.in_span("x") { |s| 1 }
+    1"#,
+    );
+    for name in ["event", "error", "ShopifyTracer"] {
+        assert!(diags.iter().any(|d| d.contains(name)), "missing {name}: {diags:?}");
+    }
+    // Process.pid / clock_gettime / CLOCK_MONOTONIC are registered stdlib
+    // (Campfire tip web-push + video previewer). They must not linger as
+    // residuals beside the still-unsupported reporters above.
+    assert!(
+        diags.iter().all(|d| !d.contains("Process")),
+        "Process should resolve: {diags:?}"
+    );
+}
+
+#[test]
+fn process_clock_and_timeout_consts_resolve() {
+    let diags = diagnostics_for(
+        r#"    t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     ms = Process.clock_gettime(Process::CLOCK_MONOTONIC, :millisecond)
     fm = Process.clock_gettime(Process::CLOCK_MONOTONIC, :float_millisecond)
-    ShopifyTracer.in_span("x") { |s| 1 }
-    [t + 1.0, ms + 1, fm + 1.0]"#,
+    n = Process.pid
+    begin
+      Timeout.timeout(0.01) { sleep 1 }
+    rescue Timeout::Error
+      n = n + 1
+    end
+    IO.popen(["true"], in: IO::NULL, err: IO::NULL) { }
+    begin
+      raise SystemCallError, "x"
+    rescue SystemCallError, OpenSSL::SSL::SSLError, Vips::Error
+      n = n + 1
+    end
+    [t + 1.0, ms + 1, fm + 1.0, n]"#,
     );
-    for name in ["event", "error", "ShopifyTracer", "Process"] {
-        assert!(diags.iter().any(|d| d.contains(name)), "missing {name}: {diags:?}");
+    for name in [
+        "Process", "Timeout", "Timeout::Error", "IO", "IO::NULL",
+        "SystemCallError", "OpenSSL::SSL::SSLError", "Vips::Error",
+    ] {
+        assert!(
+            diags.iter().all(|d| !d.contains(name)),
+            "{name} should resolve: {diags:?}"
+        );
     }
 }
