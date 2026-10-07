@@ -538,6 +538,75 @@ impl<'a> BodyTyper<'a> {
         None
     }
 
+    /// `message.boosts.loaded?` — Rails AssociationProxy spelling.
+    ///
+    /// The has_many reader types as `Array[Boost]`, which has no
+    /// `loaded?`. Emit lowers the two-hop onto the synthesized
+    /// `boosts_loaded?` Bool (`lower::assoc_loaded`), but `check` /
+    /// LSP analyze without that pass and would otherwise residual the
+    /// tip Campfire view. Mirror the rewrite's admission here: only
+    /// when the owner actually has `<assoc>_loaded?` (has_many was
+    /// synthesized) answer Bool — never catalog Relation `#loaded?`
+    /// (invariant 6: no silent runtime gap).
+    ///
+    /// View locals are often `Untyped`; then fall back to the same
+    /// unique-name rule `assoc_loaded` uses for non-model owners.
+    pub(super) fn assoc_loaded_ty(
+        &self,
+        recv: Option<&crate::expr::Expr>,
+        method: &Symbol,
+    ) -> Option<Ty> {
+        if method.as_str() != "loaded?" {
+            return None;
+        }
+        let ExprNode::Send {
+            recv: Some(owner),
+            method: assoc,
+            args,
+            block: None,
+            ..
+        } = &*recv?.node
+        else {
+            return None;
+        };
+        if !args.is_empty() {
+            return None;
+        }
+        let flat = Symbol::from(format!("{}_loaded?", assoc.as_str()));
+        let typed_owner = match owner.ty.as_ref() {
+            Some(Ty::Class { id, .. }) => Some(id),
+            Some(Ty::Union { variants }) => variants.iter().find_map(|v| match v {
+                Ty::Class { id, .. } => Some(id),
+                _ => None,
+            }),
+            _ => None,
+        };
+        if let Some(id) = typed_owner {
+            let mut current = Some(id);
+            for _ in 0..32 {
+                let cls = self.classes().get(current?)?;
+                if cls.instance_methods.contains_key(&flat) {
+                    return Some(Ty::Bool);
+                }
+                current = cls.parent.as_ref();
+            }
+            return None;
+        }
+        // Untyped / missing owner type (view local): unique `<assoc>_loaded?`
+        // across modeled classes, matching `lower::assoc_loaded`'s
+        // unique-name path for views.
+        let mut found = false;
+        for cls in self.classes().values() {
+            if cls.instance_methods.contains_key(&flat) {
+                if found {
+                    return None;
+                }
+                found = true;
+            }
+        }
+        found.then_some(Ty::Bool)
+    }
+
     pub(super) fn normalize_trailing_kwargs(
         &self,
         recv_ty: Option<&Ty>,
