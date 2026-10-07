@@ -499,6 +499,8 @@ impl Analyzer {
             // `has_rich_text :body` generates the reader/predicate/
             // writer and the scoped has_one behind them.
             register_has_rich_text(model, &mut cls.instance_methods);
+            // Named plain-text association (`has_markdown`) — same surface.
+            register_plain_text_attr(model, &app.schema, &mut cls.instance_methods);
 
             // Named scopes resolve as relation-returning class methods, so
             // `Story.active` types and chains like `Story.active.recent`
@@ -566,6 +568,13 @@ impl Analyzer {
                 cls.class_methods
                     .entry(name)
                     .or_insert(Ty::Relation { of: model.name.clone() });
+            }
+            if crate::lower::plain_text_attr::record_table_present(&app.schema) {
+                for name in crate::lower::plain_text_attr::preload_scope_names(model) {
+                    cls.class_methods
+                        .entry(name)
+                        .or_insert(Ty::Relation { of: model.name.clone() });
+                }
             }
             // `has_one_attached :avatar` declares one the same way
             // (`with_attached_avatar`). Same registration, same reason.
@@ -1521,7 +1530,7 @@ impl Analyzer {
                 class_objects: Default::default(),
                 constants: Default::default(),
                 annotate_self_dispatch: false,
-                in_view: false, class_side: false,
+                in_view: false, class_side: false, claimed_macro_template: false,
             };
             self.body_typer().analyze_expr(&mut helper.body, &ctx);
         }
@@ -1739,7 +1748,7 @@ impl Analyzer {
                     class_objects: Default::default(),
                     constants: shared.clone(),
                     annotate_self_dispatch: false,
-                    in_view: false, class_side: false,
+                    in_view: false, class_side: false, claimed_macro_template: false,
                 };
                 let ty = typer.analyze_expr(value, &ctx);
                 if matches!(ty, Ty::Var { .. }) {
@@ -2006,7 +2015,7 @@ impl Analyzer {
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
                 constants: global_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, class_side: false,
+                annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false,
             };
             for item in model.body.iter_mut() {
                 if let ModelBodyItem::Unknown { expr, .. } = item {
@@ -2022,7 +2031,7 @@ impl Analyzer {
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
                 constants: class_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, class_side: false,
+                annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false,
             };
 
             // Pass A: type every method body with only `@attributes`
@@ -2042,7 +2051,7 @@ impl Analyzer {
                         self.body_typer().analyze_expr(default, &class_ctx);
                     }
                 }
-                let mctx = self.seed_method_params(&class_ctx, &model_name, method);
+                let mctx = self.seed_method_params(&class_ctx, &model_name, method, true);
                 self.body_typer().analyze_expr(&mut method.body, &mctx);
             }
 
@@ -2082,14 +2091,14 @@ impl Analyzer {
                     local_bindings: HashMap::new(),
                     class_objects: Default::default(),
                     constants: class_constants.clone(),
-                    annotate_self_dispatch: false, in_view: false, class_side: false,
+                    annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false,
                 };
 
                 for scope in model.scopes_mut() {
                     self.body_typer().analyze_expr(&mut scope.body, &reseeded_ctx);
                 }
                 for method in model.methods_mut() {
-                    let mctx = self.seed_method_params(&reseeded_ctx, &model_name, method);
+                    let mctx = self.seed_method_params(&reseeded_ctx, &model_name, method, true);
                     self.body_typer().analyze_expr(&mut method.body, &mctx);
                 }
             }
@@ -2130,7 +2139,7 @@ impl Analyzer {
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
                 constants: global_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, class_side: false,
+                annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false,
             };
             if retype {
                 for item in controller.body.iter_mut() {
@@ -2150,7 +2159,7 @@ impl Analyzer {
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
                 constants: class_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, class_side: false,
+                annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false,
             };
 
             // Snapshot this controller's own segment of the filter chain
@@ -2211,7 +2220,7 @@ impl Analyzer {
                             self.body_typer().analyze_expr(default, &ctx);
                         }
                     }
-                    let mctx = self.seed_method_params(&ctx, &ctrl_id, method);
+                    let mctx = self.seed_method_params(&ctx, &ctrl_id, method, false);
                     self.body_typer().analyze_expr(&mut method.body, &mctx);
                 }
             }
@@ -2659,7 +2668,7 @@ impl Analyzer {
                             local_bindings: HashMap::new(),
                             class_objects: Default::default(),
                             constants: meta.class_constants.clone(),
-                            annotate_self_dispatch: false, in_view: false, class_side: false,
+                            annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false,
                         };
                         // Seed helper-method params from the inferred-params
                         // table too, so `period(query)`'s body resolves on
@@ -3155,7 +3164,7 @@ impl Analyzer {
                         class_objects: Default::default(),
                         constants: class_constants.clone(),
                         annotate_self_dispatch: false,
-                        in_view: false, class_side: false,
+                        in_view: false, class_side: false, claimed_macro_template: false,
                     };
                     let origin = app
                         .concern_spliced_actions
@@ -3334,7 +3343,7 @@ impl Analyzer {
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 class_objects: Default::default(),
-                constants: Default::default(), annotate_self_dispatch: false, in_view: false, class_side: false,
+                constants: Default::default(), annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false,
             };
 
             if retype {
@@ -3351,13 +3360,17 @@ impl Analyzer {
                     // its type is half of what an optional parameter IS:
                     // `for_user = Current.user` is a User whenever the
                     // caller leaves it out. Typed here so `seed_method_params`
-                    // and the stamped signature can fold it in.
+                    // and the stamped signature can fold it in. Use the
+                    // seeded method ctx so claimed-macro templates
+                    // (`has_markdown(name, strict_loading:
+                    // strict_loading_by_default)`) do not ledger
+                    // ActiveRecord::Base noise on the default expression.
+                    let mctx = self.seed_method_params(&class_ctx, &lc_name, method, true);
                     for p in &mut method.params {
                         if let Some(default) = &mut p.default {
-                            self.body_typer().analyze_expr(default, &class_ctx);
+                            self.body_typer().analyze_expr(default, &mctx);
                         }
                     }
-                    let mctx = self.seed_method_params(&class_ctx, &lc_name, method);
                     self.body_typer().analyze_expr(&mut method.body, &mctx);
                 }
             }
@@ -3474,10 +3487,10 @@ impl Analyzer {
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
                     class_objects: Default::default(),
-                    constants: Default::default(), annotate_self_dispatch: false, in_view: false, class_side: false,
+                    constants: Default::default(), annotate_self_dispatch: false, in_view: false, class_side: false, claimed_macro_template: false,
                 };
                 for method in &mut lc.methods {
-                    let mctx = self.seed_method_params(&reseeded_ctx, &lc_name, method);
+                    let mctx = self.seed_method_params(&reseeded_ctx, &lc_name, method, true);
                     self.body_typer().analyze_expr(&mut method.body, &mctx);
                 }
             }
@@ -3888,16 +3901,40 @@ impl Analyzer {
             .is_some_and(|p| matches!(p.ty, Ty::Untyped))
     }
 
+    /// `dsl_macro_host`: model and library-class concern hosts may declare
+    /// first-class DSL macros (`has_markdown` on `ActionText::HasMarkdown`).
+    /// Controllers and test modules do not — keep their diagnostics.
     fn seed_method_params(
         &self,
         base: &Ctx,
         class_id: &ClassId,
         method: &crate::dialect::MethodDef,
+        dsl_macro_host: bool,
     ) -> Ctx {
         let key = (class_id.clone(), method.name.clone());
         let observed = self.inferred_params.get(&key);
         let mut ctx = base.clone();
         ctx.class_side = matches!(method.receiver, crate::dialect::MethodReceiver::Class);
+        // Class-method bodies named after a first-class model DSL
+        // (`has_markdown`, `has_rich_text`, …) are macro templates —
+        // association/`scope` leftovers inside them are claimed at
+        // call sites by the dedicated lowerer, not typed as live
+        // ActiveRecord::Base sends. Library-class concerns are hosts
+        // too (`ActionText::HasMarkdown`); controllers are not.
+        ctx.claimed_macro_template = dsl_macro_host
+            && ctx.class_side
+            && matches!(
+                method.name.as_str(),
+                "generates_token_for"
+                    | "has_one_attached"
+                    | "has_rich_text"
+                    | "has_markdown"
+                    | "has_secure_token"
+                    | "has_secure_password"
+                    | "has_json"
+                    | "typed_store"
+                    | "broadcasts_to"
+            );
         let mut positional_seen = 0usize;
         for (i, param) in method.params.iter().enumerate() {
             let is_positional = !param.keyword && !param.rest && !param.from_keyword;
@@ -4669,6 +4706,13 @@ impl Analyzer {
     /// the call-site fact, the harvest the function's, and a compiled
     /// target (spinel) returns what the function returns.
     fn method_return_ty(&self, _class_id: &ClassId, method: &crate::dialect::MethodDef) -> Option<Ty> {
+        // A declared signature (ingest-expanded DSL, RBS, …) wins over
+        // body harvest: `delegated_type`'s `def page; leafable if page?;
+        // end` body types as the full polymorphic union, but the useful
+        // call-site answer is `Page | nil`.
+        if let Some(Ty::Fn { ret, .. }) = &method.signature {
+            return Some((**ret).clone());
+        }
         self.class_object_return_ty(&method.body)
             .or_else(|| tuple_return_ty(&method.body))
             .or_else(|| effective_return_ty(&method.body))
@@ -7764,6 +7808,28 @@ fn register_has_rich_text(model: &crate::dialect::Model, methods: &mut HashMap<S
     for (_, attr) in rich_text::rich_text_attrs(model) {
         let a = attr.as_str();
         for name in [format!("rich_text_{a}"), format!("build_rich_text_{a}"), a.to_string()] {
+            methods.entry(Symbol::from(name)).or_insert(record.clone());
+        }
+        methods.entry(Symbol::from(format!("{a}?"))).or_insert(Ty::Bool);
+        methods.entry(Symbol::from(format!("{a}="))).or_insert(Ty::Untyped);
+    }
+}
+
+/// Register methods `has_markdown :name` generates — mirror of
+/// [`register_has_rich_text`] for the plain-text association lowerer.
+fn register_plain_text_attr(
+    model: &crate::dialect::Model,
+    schema: &crate::schema::Schema,
+    methods: &mut HashMap<Symbol, Ty>,
+) {
+    use crate::lower::plain_text_attr;
+    if plain_text_attr::is_record_model(model) || !plain_text_attr::record_table_present(schema) {
+        return;
+    }
+    let record = Ty::Class { id: plain_text_attr::record_class(), args: vec![] };
+    for (_, attr) in plain_text_attr::plain_text_attrs(model) {
+        let a = attr.as_str();
+        for name in [format!("markdown_{a}"), format!("build_markdown_{a}"), a.to_string()] {
             methods.entry(Symbol::from(name)).or_insert(record.clone());
         }
         methods.entry(Symbol::from(format!("{a}?"))).or_insert(Ty::Bool);
