@@ -6,13 +6,20 @@
 //! `config/routes/`.
 //!
 //! Recovery discipline: in survey mode an unsupported DSL construct
-//! (`use_doorkeeper`, `devise_for`, …) records a gap and drops
+//! (`use_doorkeeper`, …) records a gap and drops
 //! that one entry — the rest of the table still flattens. In strict
 //! mode it still fails loud so the fixture that introduces a new form
 //! forces a recognizer. Not-modeled ≠ absent: a dropped entry is a
 //! ledger line, never a silently empty route table. Engine mounts recover
 //! in every mode with a located error carried on the route table; strict
 //! emission refuses it unless explicitly overridden.
+//!
+//! Devise's wrappers (`authenticated` / `unauthenticated` /
+//! `devise_scope`) flatten like `constraints` — nested routes are kept,
+//! auth is not enforced. `devise_for` expands a static route/helper
+//! table (sessions / registrations / passwords / confirmations) from
+//! the resource name and optional `controllers:` overrides; it does
+//! not claim Warden or Devise controller runtime.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -420,7 +427,18 @@ fn ingest_route_stmts<'pr>(
         //     flattened child with its `ResourceScope` and let the
         //     flattener build the right path. `find_comment` reading
         //     `params[:id]` depends on the member routes carrying `:id`.
-        if matches!(method.as_str(), "constraints" | "member" | "collection") {
+        //   - `authenticated` / `unauthenticated` / `devise_scope` —
+        //     Devise visibility wrappers. Runtime auth is not modeled;
+        //     nested routes still belong in the table.
+        if matches!(
+            method.as_str(),
+            "constraints"
+                | "member"
+                | "collection"
+                | "authenticated"
+                | "unauthenticated"
+                | "devise_scope"
+        ) {
             if let Some(block_node) = call.block() {
                 if let Some(block) = block_node.as_block_node() {
                     if let Some(inner_body) = block.body() {
@@ -430,7 +448,7 @@ fn ingest_route_stmts<'pr>(
                         let scope = match method.as_str() {
                             "member" => Some(ResourceScope::Member),
                             "collection" => Some(ResourceScope::Collection),
-                            _ => None, // constraints: no scope change
+                            _ => None, // constraints / Devise wrappers: no scope change
                         };
                         if let Some(scope) = scope {
                             retag_scope(&mut inner, scope);
@@ -831,11 +849,10 @@ fn ingest_route_call(
         // custom URL helper, not a route, so it contributes no entry
         // here.
         "direct" => Ok(None),
-        // Unknown DSL — `concern`, `devise_for`,
-        // `use_doorkeeper`, `authenticate`, etc. land here. Strict
-        // ingest fails loud so the fixture that introduces them forces
-        // a recognizer; survey callers get a per-entry ledger line
-        // (see ingest_route_stmts).
+        // `devise_for` — static Devise route/helper table; see
+        // `ingest::devise_routes`. Controllers override via
+        // `controllers:`. Does not model Warden or OmniAuth callbacks.
+        "devise_for" => super::devise_routes::ingest_devise_for(call, file),
         // A block-taking method the app added to the mapper
         // (`routing_method :x do … end`): a scope over the enclosing
         // mapper that changes no path.
@@ -847,6 +864,10 @@ fn ingest_route_call(
             nest: false,
             entries: block_entries(call, file, parent, cx)?,
         })),
+        // Unknown DSL — `concern`, `use_doorkeeper`, `authenticate`
+        // (non-block), etc. land here. Strict ingest fails loud so the
+        // fixture that introduces them forces a recognizer; survey
+        // callers get a per-entry ledger line (see ingest_route_stmts).
         _ => Err(IngestError::Unsupported {
             file: file.into(),
             message: format!("unsupported routes DSL: `{method}`"),
@@ -1995,6 +2016,7 @@ fn ingest_root_route(
     // (#82).
     let mut target: Option<String> = None;
     let mut redirect_target: Option<(String, u16, bool)> = None;
+    let mut as_name: Option<Symbol> = None;
     if let Some(args_node) = call.arguments() {
         for arg in args_node.arguments().iter() {
             if let Some(s) = rstring(&arg) {
@@ -2005,12 +2027,19 @@ fn ingest_root_route(
                 for el in kh.elements().iter() {
                     let Some(assoc) = el.as_assoc_node() else { continue };
                     let Some(key_sym) = symbol_value(&assoc.key()) else { continue };
-                    if key_sym.as_str() == "to" {
-                        if let Some(v) = rstring(&assoc.value()) {
-                            target = Some(v);
-                        } else if let Some(r) = redirect_literal(&assoc.value()) {
-                            redirect_target = Some(r);
+                    match key_sym.as_str() {
+                        "to" => {
+                            if let Some(v) = rstring(&assoc.value()) {
+                                target = Some(v);
+                            } else if let Some(r) = redirect_literal(&assoc.value()) {
+                                redirect_target = Some(r);
+                            }
                         }
+                        "as" => {
+                            as_name = symbol_or_string_value(&assoc.value())
+                                .map(|s| Symbol::from(s.as_str()));
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -2031,13 +2060,16 @@ fn ingest_root_route(
             path: "/".to_string(),
             controller: ClassId(Symbol::from(REDIRECT_CONTROLLER)),
             action,
-            as_name: Some(Symbol::from("root")),
+            as_name: Some(as_name.unwrap_or_else(|| Symbol::from("root"))),
             constraints: IndexMap::new(),
             scope: ResourceScope::default(),
         }));
     }
     match target {
-        Some(target) if !target.is_empty() => Ok(Some(RouteSpec::Root { target })),
+        Some(target) if !target.is_empty() => Ok(Some(RouteSpec::Root {
+            target,
+            as_name,
+        })),
         // Same contract as `mount` and the explicit verbs' redirect
         // drop: not an error, but never silent.
         _ => {
@@ -2236,7 +2268,7 @@ fn ingest_resources_route(
 }
 
 /// `"c"` / `"admin/c"` → `CController` / `Admin::CController`.
-fn controller_class_name(short: &str) -> String {
+pub(super) fn controller_class_name(short: &str) -> String {
     let mut s = short
         .split('/')
         .map(camelize)
