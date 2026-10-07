@@ -80,13 +80,14 @@ Writebook pin, or relaxing error, gap, emission or corpus checks.
    as a first-class named plain-text association (`lower::plain_text_attr`),
    the same shape as `has_rich_text`: scoped `markdown_<name>` storage on
    `ActionText::Markdown`, reader/predicate/writer through `.content`, ordinary
-   autosave (including blanks), dependent destroy, and preload scopes. Proven
-   with abstract `emit_and_run` overlays — not by expanding the concern's
-   interpolatable `class_eval` / leftover `has_one` template (generic string
-   eval stays unsupported per [issue #30](https://github.com/rubys/roundhouse/issues/30)).
-   Option-carrying forms (`strict_loading:`), concern-body residue on the
-   HasMarkdown installer, `#body` through `Relation[Leaf|Edit]`, Markdown
-   rendering, attachments and unmodeled gems remain separate obligations.
+   autosave (including blanks), dependent destroy, and preload scopes.
+   Assign/save/reload (including blank autosave) is pinned by abstract
+   `emit_and_run`; destroy/preload synthesis by lowering unit tests — not by
+   expanding the concern's interpolatable `class_eval` / leftover `has_one`
+   template (generic string eval stays unsupported per
+   [issue #30](https://github.com/rubys/roundhouse/issues/30)). Option-carrying
+   forms (`strict_loading:`), Markdown rendering, attachments and unmodeled
+   gems remain separate obligations.
 4. **Original tests.** Run Writebook's own tests against the Ruby output,
    starting with positioning and Page behavior. Record total tests and named
    failures; ratchet passing tests upward. Add negative authorization tests
@@ -102,20 +103,22 @@ Writebook pin, or relaxing error, gap, emission or corpus checks.
 At pin `f3fadd21907ad9b18cb23800d971c2cc25045e2a`, bare `has_markdown :body` on
 `Page` is claimed by `lower::plain_text_attr` (ingest skips concern `class_eval`
 expansion for that form so leftover interpolated `has_one`/scopes do not
-fail-close). Association scoping by owner/name, build/assign/save/reload,
-ordinary autosave including blanks, dependent destroy and preload scopes are
-pinned by `tests/plain_text_attr_lowering.rs` and
-`tests/emit_and_run.rs::named_plain_text_attr_assign_save_reload`. Storage for
-`ActionText::Markdown` (table `action_text_markdowns`, attr `content`) was the
-prior prerequisite and remains covered by `tests/action_text_markdown_ingest.rs`
-plus the storage-only emit overlay.
+fail-close). Association scoping by owner/name, build/assign/save/reload, and
+ordinary autosave including blanks are pinned by
+`tests/emit_and_run.rs::named_plain_text_attr_assign_save_reload`. Dependent
+destroy and preload-scope synthesis are pinned by
+`tests/plain_text_attr_lowering.rs` (not yet by a runtime destroy/preload
+overlay). Storage for `ActionText::Markdown` (table `action_text_markdowns`,
+attr `content`) was the prior prerequisite and remains covered by
+`tests/action_text_markdown_ingest.rs` plus the storage-only emit overlay.
+`delegated_type` singular readers composing with the plain-text attr
+(`entry.page.body`) are pinned by
+`tests/relation_delegated_reader_typing.rs` and
+`tests/emit_and_run.rs::delegated_type_singular_reader_plain_text_body_runs`.
 
-Still separate: the HasMarkdown concern's own class-method body residue when
-typed against `ActiveRecord::Base`, `#body` on `Relation[Leaf|Edit]` call sites,
-`delegate :title, to: :leaf` through Leafable (unmasked once the old
-`has_markdown` ingest gap no longer gap-attributes that view diagnostic),
-renderer/Redcarpet, `safe_markdown_attribute`, embeds/uploads, `strict_loading:`,
-and load-hook notifications. Generic string eval stays unsupported.
+Still separate: `delegate :title, to: :leafable` through Leafable,
+renderer/Redcarpet, embeds/uploads, option-carrying `strict_loading:`, and
+load-hook notifications. Generic string eval stays unsupported.
 
 The original Page tests were emitted with `--target ruby --survey
 --allow-unsupported` and attempted with `ruby -Itest -I. test/models/page_test.rb`.
