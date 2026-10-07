@@ -1054,6 +1054,7 @@ end
                 name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
                 is_module: false,
                 parent: None,
+                parent_span: Default::default(),
                 includes: Vec::new(),
                 methods,
                 nullable_columns: Vec::new(),
@@ -5084,6 +5085,7 @@ fn synthesize_redirect_controller(
         // otherwise start challenging a redirect Rails answers
         // unconditionally.
         parent: Some(crate::ident::ClassId(Symbol::from("ActionController::Base"))),
+        parent_span: Default::default(),
         body,
         layout: crate::dialect::LayoutDecl::default(),
         sibling_classes: Vec::new(),
