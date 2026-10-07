@@ -174,9 +174,10 @@ fn rewrite_attach(e: &mut Expr) {
     *e.node = attach_blob_from_attachable(recv_expr, attachable);
 }
 
-/// `recv.attach(io:, filename:, content_type?)` with filename bound
-/// once and a nil `content_type` (literal or evaluated) falling back
-/// to `content_type_for_filename`.
+/// `recv.attach(io:, filename:, content_type?)` with hash values
+/// evaluated in Ruby source order (`io`, then `filename`, then
+/// `content_type`) before byte grounding, and a nil `content_type`
+/// falling back to `content_type_for_filename`.
 fn grounded_io_call(
     recv: Expr,
     method: &str,
@@ -190,8 +191,15 @@ fn grounded_io_call(
         e.ty = Some(ty);
         e
     };
+    // Underscored so a caller's locals are not shadowed. Bind the
+    // IO-side value first: Ruby evaluates hash values in source order,
+    // and `.read` / `File.binread` must not run if a later keyword
+    // expression raises.
+    let io_name = Symbol::from("_attach_io");
     let fn_name = Symbol::from("_attach_filename");
     let ct_name = Symbol::from("_attach_content_type");
+    let (io_bind, mut data) = bind_then_ground_io(io, io_name.clone(), span);
+    data.ty = Some(Ty::Str);
     let fn_var = || syn(
         ExprNode::Var { id: crate::ident::VarId(0), name: fn_name.clone() },
         Ty::Str,
@@ -200,12 +208,17 @@ fn grounded_io_call(
         ExprNode::Var { id: crate::ident::VarId(0), name: ct_name.clone() },
         Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
     );
-    let mut data = ground_io(io);
-    data.ty = Some(Ty::Str);
     let initial_ct = content_type.unwrap_or_else(|| syn(ExprNode::Lit { value: Literal::Nil }, Ty::Nil));
     let ret_ty = if method == "create_and_upload!" { blob_class_ty() } else { Ty::Nil };
     ExprNode::Seq {
         exprs: vec![
+            syn(
+                ExprNode::Assign {
+                    target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: io_name },
+                    value: io_bind,
+                },
+                Ty::Str,
+            ),
             syn(
                 ExprNode::Assign {
                     target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: fn_name.clone() },
@@ -387,27 +400,36 @@ fn attach_io_hash(arg: &Expr) -> Option<(Expr, Expr, Option<Expr>)> {
     Some((io, filename, pick("content_type")))
 }
 
-fn ground_io(io: Expr) -> Expr {
-    let span = io.span;
-    // `StringIO.new(bytes).read` is `bytes`: the wrapper exists only to
-    // give Rails an io, and reading it back through StringIO would put
-    // that class on every target's plate for nothing.
+/// Bind value evaluated first, then the attach-arg expression that
+/// turns the bound local into bytes after `filename` / `content_type`
+/// have run. Recognized wrappers keep the Spinel-friendly grounding
+/// (`StringIO.new` → payload, `path.open` → `File.binread`) without
+/// re-evaluating the payload.
+fn bind_then_ground_io(io: Expr, io_name: Symbol, span: Span) -> (Expr, Expr) {
+    let io_var = || {
+        let mut e = Expr::new(
+            span,
+            ExprNode::Var { id: crate::ident::VarId(0), name: io_name.clone() },
+        );
+        e.ty = Some(Ty::Str);
+        e
+    };
+    // `StringIO.new(bytes).read` is `bytes`: bind the payload once and
+    // pass the bound local through. The wrapper exists only to give
+    // Rails an io; keeping `StringIO` off every target's plate.
     if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*io.node {
         if method.as_str() == "new"
             && args.len() == 1
             && matches!(&*recv.node, ExprNode::Const { path }
                 if path.len() == 1 && path[0].as_str() == "StringIO")
         {
-            return args[0].clone();
+            return (args[0].clone(), io_var());
         }
     }
-    // `file_fixture("moon.jpg").open` is a Pathname opened for reading;
-    // `File.binread(path.to_s)` is the same bytes without an IO in the
-    // middle (spinel's blockless `Pathname#open` has no value to read
-    // from — it yields).
+    // `file_fixture("moon.jpg").open` → bind the path, binread later.
     if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*io.node {
         if method.as_str() == "open" && args.is_empty() {
-            return Expr::new(
+            let data = Expr::new(
                 span,
                 ExprNode::Send {
                     recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("File")] })),
@@ -415,7 +437,7 @@ fn ground_io(io: Expr) -> Expr {
                     args: vec![Expr::new(
                         span,
                         ExprNode::Send {
-                            recv: Some(recv.clone()),
+                            recv: Some(io_var()),
                             method: Symbol::from("to_s"),
                             args: Vec::new(),
                             block: None,
@@ -426,18 +448,20 @@ fn ground_io(io: Expr) -> Expr {
                     parenthesized: true,
                 },
             );
+            return (recv.clone(), data);
         }
     }
-    Expr::new(
+    let data = Expr::new(
         span,
         ExprNode::Send {
-            recv: Some(io),
+            recv: Some(io_var()),
             method: Symbol::from("read"),
             args: Vec::new(),
             block: None,
             parenthesized: false,
         },
-    )
+    );
+    (io, data)
 }
 
 fn content_type_from_filename_expr(filename: Expr) -> Expr {

@@ -66,9 +66,11 @@ end
 "#,
     );
     let body = method_body(&src, "put_literal");
+    let io_at = body.find("_attach_io").expect("_attach_io bind");
+    let fn_at = body.find("_attach_filename").expect("_attach_filename bind");
     assert!(
-        body.contains("_attach_filename") && body.contains("attach(\"bytes\""),
-        "literal io hash must ground io and bind filename:\n{body}"
+        io_at < fn_at && body.contains("\"bytes\"") && body.contains("attach(_attach_io"),
+        "literal io hash must bind io before filename, then attach bytes:\n{body}"
     );
     assert!(
         body.contains("\"image/png\""),
@@ -97,8 +99,8 @@ end
         "missing content_type must be the filename's type:\n{body}"
     );
     assert!(
-        body.contains("attach(\"bytes\""),
-        "io must still be grounded to bytes:\n{body}"
+        body.contains("_attach_io") && body.contains("attach(_attach_io"),
+        "io must bind then attach the bound bytes:\n{body}"
     );
 }
 
