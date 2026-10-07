@@ -452,6 +452,42 @@ fn a_superclass_ruby_family_runtime_constant_is_ledgered() {
     }
 }
 
+/// Test-module inner classes also carry parent Const spans — the gate
+/// must scan them, not only app models/controllers/library classes.
+#[test]
+fn a_test_inner_class_superclass_ruby_family_runtime_constant_is_ledgered() {
+    let tree = [
+        ("config/routes.rb", "Rails.application.routes.draw do\n  root \"probes#index\"\nend\n"),
+        ("app/controllers/probes_controller.rb", "class ProbesController < ActionController::Base\n  def index\n    head :ok\n  end\nend\n"),
+        ("test/models/page_error_test.rb", "require \"test_helper\"\n\nclass PageErrorTest < ActiveSupport::TestCase\n  class PageOutOfBounds < ActionController::RoutingError\n  end\n\n  test \"placeholder\" do\n    assert true\n  end\nend\n"),
+    ].into_iter().map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec())).collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let mut analysis = roundhouse::session::analyze_and_lower(&mut app);
+    analysis.extend(roundhouse::analyze::diagnose(&app));
+    assert!(!analysis.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error), "{analysis:?}");
+    assert!(
+        app.test_modules.iter().any(|m| m.inner_classes.iter().any(|c| {
+            c.name.0.as_str().contains("PageOutOfBounds")
+                && c.parent.as_ref().is_some_and(|p| p.0.as_str() == "ActionController::RoutingError")
+                && !c.parent_span.is_synthetic()
+        })),
+        "expected ingested test inner class with non-synthetic parent_span: {:?}",
+        app.test_modules.iter().map(|m| &m.inner_classes).collect::<Vec<_>>(),
+    );
+    for target in [BuildTarget::Typescript, BuildTarget::Rust] {
+        let (_, diags) = roundhouse::emit::diagnostics::scope(|| {
+            target_files(&app, Path::new("."), target)
+        });
+        let gaps: Vec<_> = diags.iter().filter(|d| matches!(
+            &d.kind,
+            roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+                if construct.as_str() == "ruby_family_runtime_constant"
+        ) && d.message.contains("ActionController::RoutingError")).collect();
+        assert_eq!(gaps.len(), 1, "{target:?}: {gaps:?} / {diags:?}");
+        assert!(!gaps[0].span.is_synthetic(), "{gaps:?}");
+    }
+}
+
 /// A lowers-added MissingTemplate raise (missing render) is typed so
 /// the availability gate sees it on strict targets.
 #[test]

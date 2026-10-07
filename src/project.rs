@@ -4219,6 +4219,18 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             report_unavailable_class_value(app, target, parent.0.as_str(), class.parent_span);
         }
     }
+    for module in &app.test_modules {
+        for class in &module.inner_classes {
+            if let Some(parent) = &class.parent {
+                report_unavailable_class_value(
+                    app,
+                    target,
+                    parent.0.as_str(),
+                    class.parent_span,
+                );
+            }
+        }
+    }
 }
 
 // Return app-emitted test stems separately: merging the scaffold loses
