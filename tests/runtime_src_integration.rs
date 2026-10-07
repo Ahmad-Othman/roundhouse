@@ -800,7 +800,9 @@ fn every_runtime_method_body_concretely_typed() {
     // after the security helpers before changing this number.
     // `ActionController::RoutingError#initialize` adds 2: its
     // `super(message)` is gradual, as in `ParameterMissing`.
-    const CEILING: usize = 301;
+    // `Timeout.timeout` (Spinel port for Campfire tip) adds 3: Pattern D
+    // block/return gradual after `sec: Integer | Float` — polymorphic yield.
+    const CEILING: usize = 304;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
