@@ -6096,6 +6096,47 @@ puts "ok"
         .assert_passes();
 }
 
+/// Campfire's `TimeLimitedVideoPreviewer` subclasses Rails'
+/// `ActiveStorage::Previewer::VideoPreviewer`. Before the nested class
+/// existed in the runtime, `app/models.rb` raised
+/// `uninitialized constant ActiveStorage::Previewer::VideoPreviewer`
+/// at boot. The capture body (Timeout / IO.popen) is a separate ledger
+/// entry; this pins the constant that inheritance needs to load.
+#[test]
+fn time_limited_video_previewer_subclass_boots() {
+    emit_and_run::real_blog()
+        .write(
+            "lib/rails_ext/time_limited_video_previewer.rb",
+            r#"# Campfire's inheritance shape (capture body omitted — Timeout/IO are
+# not yet modeled). The NameError at boot was the missing superclass.
+class TimeLimitedVideoPreviewer < ActiveStorage::Previewer::VideoPreviewer
+  TIME_LIMIT = 10
+end
+"#,
+        )
+        .write(
+            "config/initializers/extensions.rb",
+            r##"%w[ rails_ext ].each do |extensions_dir|
+  Dir["#{Rails.root}/lib/#{extensions_dir}/*"].each { |path| require "#{extensions_dir}/#{File.basename(path)}" }
+end
+"##,
+        )
+        .run_ruby(
+            r#"raise "missing nested class" unless defined?(ActiveStorage::Previewer::VideoPreviewer)
+raise "subclass missing" unless defined?(TimeLimitedVideoPreviewer)
+raise "wrong parent" unless TimeLimitedVideoPreviewer < ActiveStorage::Previewer::VideoPreviewer
+raise "wrong grandparent" unless TimeLimitedVideoPreviewer < ActiveStorage::Previewer
+raise "TIME_LIMIT" unless TimeLimitedVideoPreviewer::TIME_LIMIT == 10
+raise "PreviewError missing" unless defined?(ActiveStorage::PreviewError)
+raise "Error base missing" unless defined?(ActiveStorage::Error)
+raise "PreviewError parent" unless ActiveStorage::PreviewError < ActiveStorage::Error
+raise "Error parent" unless ActiveStorage::Error < StandardError
+puts "time_limited_video_previewer boot ok"
+"#,
+        )
+        .assert_passes();
+}
+
 /// `javascript_include_tag :application` names the source with a
 /// Symbol, as Rails allows. The call is hoisted to a constant, so it
 /// runs at load. Before, the runtime called `include?` on the Symbol,

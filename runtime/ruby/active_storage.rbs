@@ -108,8 +108,17 @@ module ActiveStorage
     def self.dimensions: (String data, String content_type) -> Array[Integer]
   end
 
+  class Error < StandardError
+  end
+
+  class PreviewError < ActiveStorage::Error
+  end
+
   class Previewer
     def self.poster: (String path) -> String
+
+    class VideoPreviewer < ActiveStorage::Previewer
+    end
   end
 
   class Preview
