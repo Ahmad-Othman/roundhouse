@@ -187,3 +187,255 @@ puts "ALL OK"
     );
     assert!(out.status.success(), "driver exited {:?}", out.status.code());
 }
+
+#[test]
+fn join_body_does_not_copy_a_one_part_rack_body() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = r#"
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/gzip_cache"
+part = "x" * 128
+out = GzipCache.join_body([part])
+raise "copied" unless out.equal?(part)
+raise "empty" unless GzipCache.join_body([]) == ""
+raise "joined" unless GzipCache.join_body(["a", "b"]) == "ab"
+puts "ALL OK"
+"#;
+    let out = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .current_dir(root)
+        .output()
+        .expect("ruby is on PATH");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("ALL OK"),
+        "join_body failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+    assert!(out.status.success(), "driver exited {:?}", out.status.code());
+}
+
+#[test]
+fn identical_fresh_strings_gzip_once_via_last_hit() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = r#"
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/gzip_cache"
+
+n = 0
+orig = Zlib.method(:gzip)
+Zlib.define_singleton_method(:gzip) do |raw|
+  n += 1
+  orig.call(raw)
+end
+
+a = "x" * 128
+b = "x" * 128
+raise "same object" if a.equal?(b)
+app = lambda { |_env| [200, { "content-type" => "text/html" }, [a]] }
+# Second call uses a different String of the same bytes — wrk's shape.
+n_at = 0
+wrapped = GzipCache.wrap(lambda { |_env|
+  body = n_at == 0 ? a : b
+  n_at += 1
+  [200, { "content-type" => "text/html" }, [body]]
+})
+env = { "REQUEST_METHOD" => "GET", "HTTP_ACCEPT_ENCODING" => "gzip" }
+wrapped.call(env)
+wrapped.call(env)
+raise "gzipped #{n} times" unless n == 1
+keys = GzipCache.instance_variable_get(:@store).keys
+raise "non-digest key #{keys.inspect}" unless keys.all? { |k| k.is_a?(String) && k.bytesize == 64 }
+puts "ALL OK"
+"#;
+    let out = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .current_dir(root)
+        .output()
+        .expect("ruby is on PATH");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("ALL OK"),
+        "last-hit gzip failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+    assert!(out.status.success(), "driver exited {:?}", out.status.code());
+}
+
+#[test]
+fn last_hit_does_not_follow_a_mutated_source_string() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = r#"
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/gzip_cache"
+
+n = 0
+orig = Zlib.method(:gzip)
+Zlib.define_singleton_method(:gzip) do |raw|
+  n += 1
+  orig.call(raw)
+end
+
+body = "x" * 128
+wrapped = GzipCache.wrap(lambda { |_env|
+  [200, { "content-type" => "text/html" }, [body]]
+})
+env = { "REQUEST_METHOD" => "GET", "HTTP_ACCEPT_ENCODING" => "gzip" }
+first = wrapped.call(env)
+body.replace("y" * 128)
+second = wrapped.call(env)
+raise "gzipped #{n} times" unless n == 2
+raise "mutated source reused gzip" if first[2][0] == second[2][0]
+puts "ALL OK"
+"#;
+    let out = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .current_dir(root)
+        .output()
+        .expect("ruby is on PATH");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("ALL OK"),
+        "last-hit snapshot failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+    assert!(out.status.success(), "driver exited {:?}", out.status.code());
+}
+
+#[test]
+fn digest_fallback_does_not_reuse_gzip_across_distinct_bodies() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = r#"
+require "zlib"
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/gzip_cache"
+
+# Equal size, different bytes — would collide under CRC32+size alone if
+# Zlib.crc32 happened to match; digest keys refuse wrong-body hits either way.
+a_body = "a" * 256
+b_body = "b" * 256
+n = 0
+orig = Zlib.method(:gzip)
+Zlib.define_singleton_method(:gzip) do |raw|
+  n += 1
+  orig.call(raw)
+end
+env = { "REQUEST_METHOD" => "GET", "HTTP_ACCEPT_ENCODING" => "gzip" }
+ga = GzipCache.wrap(lambda { |_e| [200, { "content-type" => "text/html" }, [a_body]] }).call(env)
+# Clear last-hit so the second request must use the Hash fallback.
+GzipCache.instance_variable_set(:@last_raw, nil)
+GzipCache.instance_variable_set(:@last_gz, nil)
+gb = GzipCache.wrap(lambda { |_e| [200, { "content-type" => "text/html" }, [b_body]] }).call(env)
+raise "same gzip across distinct bodies" if ga[2][0] == gb[2][0]
+raise "gzipped #{n} times" unless n == 2
+# Same body again via fallback (last-hit still cleared) must hit the digest store.
+GzipCache.instance_variable_set(:@last_raw, nil)
+GzipCache.instance_variable_set(:@last_gz, nil)
+ga2 = GzipCache.wrap(lambda { |_e| [200, { "content-type" => "text/html" }, [a_body.dup]] }).call(env)
+raise "digest miss" unless ga2[2][0] == ga[2][0]
+raise "gzipped again #{n}" unless n == 2
+puts "ALL OK"
+"#;
+    let out = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .current_dir(root)
+        .output()
+        .expect("ruby is on PATH");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("ALL OK"),
+        "digest fallback failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+    assert!(out.status.success(), "driver exited {:?}", out.status.code());
+}
+
+/// The splice: a page that varies per request (a fresh token in the
+/// layout) around a large cached fragment inflates to exactly its body,
+/// with the fragment deflated once across requests. Non-ASCII text, a
+/// repeated page reusing the last splice, a nested fragment, and a
+/// fragment the body doesn't contain (the whole-body path) are each
+/// covered. Compared as bytes: `Zlib.gunzip` returns BINARY.
+#[test]
+fn spliced_gzip_inflates_to_the_body_and_deflates_a_fragment_once() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = r#"
+module Rails
+  class MemoryStore
+    def initialize; @d = {}; end
+    def read_str(k); @d[k]; end
+    def write_str(k, v, _ttl); @d[k] = v.dup.freeze; end
+  end
+end
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/gzip_cache"
+raise "splice unavailable" unless GzipCache::SPLICE_OK
+
+store = Rails::MemoryStore.new
+msgs = (1..400).map { |i| "<div class=\"message\" id=\"m#{i}\"><p>Message #{i} — héllo #{i * 7}</p></div>\n" }.join
+store.write_str("coll", msgs, 0)
+
+fragment_deflates = 0
+orig = GzipCache.method(:raw_deflate)
+GzipCache.define_singleton_method(:raw_deflate) do |d, dict, lv|
+  fragment_deflates += 1 if lv == Zlib::DEFAULT_COMPRESSION
+  orig.call(d, dict, lv)
+end
+
+bodies = []
+seq = 0
+app = GzipCache.wrap(lambda { |e|
+  tok = e["TOK"] || (seq += 1).to_s * 16
+  body = +"<html><head><meta content=#{tok}></head><body>" << store.read_str("coll") << "<form><input value=#{tok}></form></body></html>"
+  bodies << body.dup
+  [200, { "content-type" => "text/html" }, [body]]
+})
+env = { "REQUEST_METHOD" => "GET", "HTTP_ACCEPT_ENCODING" => "gzip" }
+3.times do |i|
+  _, h, b = app.call(env)
+  raise "encoding #{i}" unless h["content-encoding"] == "gzip"
+  raise "length #{i}" unless h["content-length"] == b[0].bytesize.to_s
+  raise "round trip #{i}" unless Zlib.gunzip(b[0]) == bodies[i].b
+end
+raise "fragment deflated #{fragment_deflates}x" unless fragment_deflates == 1
+whole = Zlib.gzip(bodies.last).bytesize
+_, _, last = app.call(env)
+raise "spliced #{last[0].bytesize} B vs whole #{whole} B" unless last[0].bytesize < whole * 1.10
+
+# The same page again (no per-request token) reuses the last splice.
+GzipCache.instance_variable_set(:@last_raw, nil)
+_, _, r1 = app.call(env.merge("TOK" => "same"))
+GzipCache.instance_variable_set(:@last_raw, nil)
+_, _, r2 = app.call(env.merge("TOK" => "same"))
+raise "repeat not reused" unless r1[0].equal?(r2[0])
+raise "repeat round trip" unless Zlib.gunzip(r2[0]) == bodies.last.b
+
+# A fragment nested in a later one (a collection miss writes its members
+# first) is found in order; the container is skipped.
+member = store.write_str("m1", msgs[0, 6000], 0)
+body = "pre-" + msgs + "-post"
+raise "nested" unless Zlib.gunzip(GzipCache.splice(body, [member, store.read_str("coll")])) == body.b
+
+# Not in the body: no splice, the whole-body path answers.
+raise "spliced a stranger" unless GzipCache.splice("plain page " * 50, [store.read_str("coll")]).nil?
+stray = GzipCache.wrap(lambda { |_e|
+  GzipCache.note_fragment(store.read_str("coll"))
+  [200, { "content-type" => "text/html" }, ["no fragment here " * 50]]
+})
+_, _, sb = stray.call(env)
+raise "fallback round trip" unless Zlib.gunzip(sb[0]) == ("no fragment here " * 50).b
+puts "ALL OK"
+"#;
+    let out = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .current_dir(root)
+        .output()
+        .expect("ruby is on PATH");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("ALL OK"),
+        "spliced gzip failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+    assert!(out.status.success(), "driver exited {:?}", out.status.code());
+}

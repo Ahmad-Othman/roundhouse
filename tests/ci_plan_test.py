@@ -130,30 +130,75 @@ class Routing(unittest.TestCase):
                 self.assertEqual(plan["spinel_tests"], ["framework_tests_spinel"])
                 self.assertEqual(plan["archives"], [])
 
-    def test_draft_without_full_retains_the_small_floor(self):
+    def test_missing_plan_output_fails_gates_without_crashing(self):
+        with (
+            patch.dict(os.environ, {"CI_PLAN": "", "CI_NEEDS": "{}"}, clear=False),
+            patch("sys.argv", ["ci-plan.py", "compact-gate"]),
+            patch.object(ci, "write_outputs") as output,
+        ):
+            self.assertEqual(ci.main(), 1)
+        self.assertEqual(output.call_args.args[0]["complete"], False)
+        with (
+            patch.dict(os.environ, {"CI_PLAN": "", "CI_NEEDS": "{}"}, clear=False),
+            patch("sys.argv", ["ci-plan.py", "gate"]),
+            patch.object(ci, "write_outputs") as output,
+        ):
+            self.assertEqual(ci.main(), 1)
+        self.assertEqual(output.call_args.args[0]["complete"], False)
+
+    def test_spinel_lane_skips_other_languages(self):
         plan = ci.select(
-            ["src/emit/go/expressions.rs", ".github/workflows/ci.yml"],
-            draft=True,
+            ["src/emit/go.rs", "wasm/lib/driver.mjs"],
+            spinel_lane=True,
         )
-        self.assertEqual(plan["required"], ["generate-fixture", "unit"])
-        self.assertNotIn("build-roundhouse", plan["jobs"])
+        self.assertEqual(plan["jobs"], ci.SPINEL_LANE)
+        self.assertEqual(plan["extra_compare"], [])
+        self.assertEqual(plan["smoke"], [])
+        self.assertFalse(plan["wasm"])
+        self.assertFalse(plan["site"])
+        self.assertTrue(plan["spinel"])
+        self.assertEqual(plan["spinel_tests"], ci.SPINEL_TESTS)
+        self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+        self.assertNotIn("compare-extra", plan["jobs"])
+        self.assertNotIn("compare-jruby", plan["jobs"])
+        self.assertNotIn("writebook-inventory", plan["jobs"])
+        self.assertNotIn("build-wasm", plan["jobs"])
 
-    def test_draft_floor_and_gates_do_not_depend_on_base_order(self):
-        with patch.object(ci, "BASE", list(reversed(ci.BASE))):
-            plan = ci.select([], draft=True)
-            self.assertEqual(plan["jobs"], ["generate-fixture", "unit"])
-            needs = {
-                job: {"result": "success"}
-                for job in ["plan", "compact-required", "generate-fixture", "unit"]
+    def test_spinel_compact_gate_only_requires_publication_floor(self):
+        plan = ci.select([], spinel_lane=True)
+        needs = {
+            "plan": {"result": "success"},
+            "generate-fixture": {"result": "success"},
+            "unit": {"result": "success"},
+            "build-roundhouse": {"result": "success"},
+            "store-check": {"result": "success"},
+            "compare-ruby": {"result": "success"},
+            "campfire-conformance": {"result": "success"},
+            "campfire-compare": {"result": "success"},
+            "compare": {"result": "skipped"},
+            "browser-smoke-typescript": {"result": "skipped"},
+        }
+        self.assertEqual(ci.check_results(plan, needs, compact=True), ([], True))
+        # Non-compact still needs the Spinel required set + compact-required.
+        needs["compact-required"] = {"result": "success"}
+        for job in plan["required"]:
+            needs.setdefault(job, {"result": "success"})
+        for job in plan["jobs"]:
+            needs.setdefault(job, {"result": "success", "outputs": {"execution": "success"}})
+        # Advisory Spinel GC matrix needs per-mode outputs when present.
+        if "campfire-compare-spinel" in plan["jobs"]:
+            needs["campfire-compare-spinel"] = {
+                "result": "success",
+                "outputs": {
+                    "default": "success",
+                    "minor-gc": "success",
+                    "verify-gen": "success",
+                },
             }
-            for compact in (False, True):
-                self.assertEqual(ci.check_results(plan, needs, compact=compact), ([], True))
-                needs["unit"]["result"] = "failure"
-                self.assertTrue(ci.check_results(plan, needs, compact=compact)[0])
-                needs["unit"]["result"] = "success"
+        self.assertEqual(ci.check_results(plan, needs, compact=False)[0], [])
 
-    def test_full_overrides_draft_without_enabling_publication(self):
-        plan = ci.select(["README.md"], draft=True, full=True)
+    def test_full_overrides_spinel_without_enabling_publication(self):
+        plan = ci.select(["README.md"], spinel_lane=True, full=True)
         self.assertEqual(plan["smoke"], ci.TARGETS)
         self.assertTrue(plan["site"])
         self.assertTrue(plan["wasm"])
@@ -162,7 +207,7 @@ class Routing(unittest.TestCase):
         self.assertIn("archive-results", plan["required"])
         self.assertNotIn("assemble-site", plan["jobs"])
 
-    def test_canonical_main_push_selects_full_without_a_label(self):
+    def test_canonical_main_push_selects_spinel_lane_without_extra_sdks(self):
         with tempfile.TemporaryDirectory() as directory:
             event = Path(directory) / "event.json"
             event.write_text(json.dumps({"before": "0" * 40}))
@@ -176,16 +221,76 @@ class Routing(unittest.TestCase):
             with (
                 patch.dict(os.environ, env, clear=True),
                 patch("sys.argv", ["ci-plan.py", "plan"]),
+                patch.object(
+                    ci, "changed_inputs", return_value=(["src/emit/go.rs"], None)
+                ),
+                patch.object(ci, "write_outputs") as output,
+            ):
+                self.assertEqual(ci.main(), 0)
+            plan = output.call_args.args[0]["plan"]
+            self.assertEqual(plan["jobs"], ci.SPINEL_LANE)
+            self.assertEqual(plan["extra_compare"], [])
+            self.assertEqual(plan["smoke"], [])
+            self.assertFalse(plan["wasm"])
+            self.assertNotIn("compare-extra", plan["jobs"])
+            self.assertNotIn("compare-jruby", plan["jobs"])
+            self.assertNotIn("assemble-site", plan["jobs"])
+            self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
+
+    def test_full_input_on_main_still_selects_every_sdk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            event = Path(directory) / "event.json"
+            event.write_text(json.dumps({"before": "0" * 40}))
+            env = {
+                "GITHUB_EVENT_PATH": str(event),
+                "GITHUB_EVENT_NAME": "push",
+                "GITHUB_SHA": "1" * 40,
+                "GITHUB_REF": "refs/heads/main",
+                "CI_FULL": "true",
+                "CI_SPINEL_REVISION": "2" * 40,
+            }
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("sys.argv", ["ci-plan.py", "plan"]),
                 patch.object(ci, "changed_inputs", return_value=(["README.md"], None)),
                 patch.object(ci, "write_outputs") as output,
             ):
                 self.assertEqual(ci.main(), 0)
             plan = output.call_args.args[0]["plan"]
             self.assertEqual(plan["smoke"], ci.TARGETS)
+            self.assertTrue(plan["wasm"])
+            self.assertIn("compare-extra", plan["jobs"])
             self.assertTrue(set(ci.SPINEL11).issubset(plan["jobs"]))
-            self.assertNotIn("assemble-site", plan["jobs"])
 
-    def test_draft_label_events_reach_full_selection_and_unlabel_returns_to_floor(self):
+    def test_unknown_changed_inputs_keep_ruby_and_spinel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            event = Path(directory) / "event.json"
+            event.write_text(json.dumps({"pull_request": {"labels": []}}))
+            env = {
+                "GITHUB_EVENT_PATH": str(event),
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_SHA": "1" * 40,
+                "CI_SPINEL_REVISION": "2" * 40,
+            }
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("sys.argv", ["ci-plan.py", "plan"]),
+                patch.object(ci, "changed_inputs", side_effect=ValueError("no tree")),
+                patch.object(ci, "write_outputs") as output,
+            ):
+                self.assertEqual(ci.main(), 0)
+            plan = output.call_args.args[0]["plan"]
+            self.assertEqual(plan["jobs"], ci.SPINEL_LANE)
+            self.assertEqual(plan["extra_compare"], [])
+            self.assertFalse(plan["wasm"])
+            self.assertTrue(
+                any("Unknown changed inputs" in reason for reason in plan["reasons"])
+            )
+            self.assertTrue(
+                any("extra-language SDKs not selected" in reason for reason in plan["reasons"])
+            )
+
+    def test_draft_and_ready_events_use_the_same_paths_and_labels(self):
         with tempfile.TemporaryDirectory() as directory:
             event = Path(directory) / "event.json"
             env = {
@@ -194,21 +299,39 @@ class Routing(unittest.TestCase):
                 "GITHUB_SHA": "1" * 40,
                 "CI_SPINEL_REVISION": "2" * 40,
             }
-            for labels, expected_smoke in [([{"name": "ci:full"}], ci.TARGETS), ([], [])]:
-                with self.subTest(labels=labels):
-                    event.write_text(json.dumps({
-                        "pull_request": {"draft": True, "labels": labels}
-                    }))
-                    with (
-                        patch.dict(os.environ, env, clear=True),
-                        patch("sys.argv", ["ci-plan.py", "plan"]),
-                        patch.object(ci, "changed_inputs", return_value=(["README.md"], None)),
-                        patch.object(ci, "write_outputs") as output,
-                    ):
-                        self.assertEqual(ci.main(), 0)
-                    plan = output.call_args.args[0]["plan"]
-                    self.assertEqual(plan["smoke"], expected_smoke)
-                    self.assertNotIn("assemble-site", plan["jobs"])
+            cases = [
+                (["README.md"], [], [], False),
+                (["README.md"], ["ci:draft"], [], False),
+                (["src/emit/go.rs"], [], ["go"], False),
+                (["README.md"], ["ci:spinel"], [], True),
+                (["README.md"], ["ci:full", "ci:spinel"], ci.TARGETS, True),
+                ([".github/workflows/ci.yml"], [], [], False),
+            ]
+            for paths, labels, expected_smoke, expect_spinel in cases:
+                for draft in (False, True):
+                    with self.subTest(paths=paths, labels=labels, draft=draft):
+                        event.write_text(json.dumps({
+                            "pull_request": {
+                                "draft": draft,
+                                "labels": [{"name": label} for label in labels],
+                            }
+                        }))
+                        with (
+                            patch.dict(os.environ, env, clear=True),
+                            patch("sys.argv", ["ci-plan.py", "plan"]),
+                            patch.object(ci, "changed_inputs", return_value=(paths, None)),
+                            patch.object(ci, "write_outputs") as output,
+                        ):
+                            self.assertEqual(ci.main(), 0)
+                        plan = output.call_args.args[0]["plan"]
+                        self.assertEqual(plan["smoke"], expected_smoke)
+                        self.assertEqual(plan["spinel"], expect_spinel)
+                        self.assertTrue(set(ci.BASE).issubset(plan["required"]))
+                        self.assertNotIn("assemble-site", plan["jobs"])
+                        if paths == ["README.md"] and labels in ([], ["ci:draft"]):
+                            self.assertEqual(plan["jobs"], ci.BASE)
+                        elif labels == ["ci:spinel"]:
+                            self.assertEqual(plan["jobs"], ci.SPINEL_LANE)
 
     def test_contract_tests_do_not_expand_the_exercised_workflows(self):
         paths = [
@@ -222,10 +345,9 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(ci.select([path])["jobs"], ci.BASE)
         self.assertEqual(ci.select(paths)["archives"], [])
-        # Test-only narrowing cannot hide a changed workflow or real owner.
-        self.assertEqual(
-            ci.select(paths + [".github/workflows/ci.yml"])["smoke"], ci.TARGETS
-        )
+        # CI workflow edits stay on the Ruby floor; a real owner still adds its lane.
+        self.assertEqual(ci.select(paths + [".github/workflows/ci.yml"])["jobs"], ci.BASE)
+        self.assertEqual(ci.select(paths + [".github/workflows/ci.yml"])["smoke"], [])
         partial = ci.select(paths + ["src/emit/go.rs"])
         self.assertEqual(partial["extra_compare"], ["go"])
         self.assertEqual(partial["smoke"], ["go"])
@@ -275,6 +397,7 @@ class Routing(unittest.TestCase):
             "src/lower/model_to_library/adapter_emit.rs",
             "tests/param_binds.rs",
             "tests/param_binds_emit.rb",
+            "tests/param_binds_raw_where.rb",
             "tests/param_binds_runtime.rb",
             "tests/support/emit_and_run.rs",
         ]:
@@ -284,12 +407,25 @@ class Routing(unittest.TestCase):
                 self.assertEqual(
                     self.extras(plan), set(ci.CORE) | {"framework-tests-spinel"}
                 )
-        for path in ["runtime/spinel/db.rb", "runtime/spinel/sqlite_adapter.rb"]:
-            with self.subTest(path=path):
-                self.assertEqual(
-                    ci.select([path])["spinel_tests"],
-                    ["spinel_db_lease", "param_binds", "spinel_stmt_cache_lru"],
-                )
+        self.assertEqual(
+            ci.select(["runtime/spinel/db.rb"])["spinel_tests"],
+            [
+                "spinel_db_lease",
+                "param_binds",
+                "spinel_stmt_cache_lru",
+                "db_sqlite_concurrency",
+            ],
+        )
+        self.assertEqual(
+            ci.select(["runtime/spinel/sqlite_adapter.rb"])["spinel_tests"],
+            [
+                "date_columns_spinel",
+                "spinel_db_lease",
+                "param_binds",
+                "spinel_stmt_cache_lru",
+                "db_sqlite_concurrency",
+            ],
+        )
         for path in [
             "README.md",
             "src/analyze/call.rs",
@@ -306,6 +442,8 @@ class Routing(unittest.TestCase):
             "runtime/spinel/active_record_equality_spinel.rb": "framework_tests_spinel",
             "runtime/spinel/param_builder.rb": "spinel_param_builder",
             "runtime/spinel/multipart.rb": "spinel_param_builder",
+            "runtime/spinel/date.rb": "date_columns_spinel",
+            "runtime/spinel/active_support_date_parsing.rb": "date_columns_spinel",
         }
         for path, binary in cases.items():
             with self.subTest(path=path):
@@ -342,14 +480,32 @@ class Routing(unittest.TestCase):
             ],
             "tests/spinel_db_lease.rb": ["spinel_db_lease"],
             "tests/spinel_stmt_cache_lru.rb": ["spinel_stmt_cache_lru"],
+            "tests/support/db_concurrency_spinel.rb": ["db_sqlite_concurrency"],
             "runtime/spinel/db.rb": [
-                "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru"
+                "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru",
+                "db_sqlite_concurrency",
             ],
             "runtime/spinel/sqlite_adapter.rb": [
-                "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru"
+                "date_columns_spinel",
+                "spinel_db_lease",
+                "param_binds",
+                "spinel_stmt_cache_lru",
+                "db_sqlite_concurrency",
             ],
             "runtime/spinel/active_support_time_parsing.rb": [
-                "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru"
+                "spinel_db_lease", "param_binds", "spinel_stmt_cache_lru",
+                "db_sqlite_concurrency",
+            ],
+            "runtime/spinel/date.rb": ["date_columns_spinel"],
+            "runtime/spinel/date.rbs": ["date_columns_spinel"],
+            "runtime/spinel/active_support_date_parsing.rb": ["date_columns_spinel"],
+            "runtime/spinel/active_support_date_parsing.rbs": ["date_columns_spinel"],
+            "runtime/spinel/active_record_date_serialization.rb": [
+                "date_columns_spinel",
+                "framework_tests_spinel",
+            ],
+            "runtime/spinel/active_record_date_serialization.rbs": [
+                "date_columns_spinel"
             ],
             "tests/params_vectors/canon.rb": ["spinel_param_builder"],
             "tests/rails_compat_vectors.rb": ["rails_compat_vectors_spinel"],
@@ -381,10 +537,12 @@ class Routing(unittest.TestCase):
         self.assertEqual(
             plan["spinel_tests"],
             [
+                "date_columns_spinel",
                 "spinel_web_push_crypto",
                 "spinel_db_lease",
                 "param_binds",
                 "spinel_stmt_cache_lru",
+                "db_sqlite_concurrency",
             ],
         )
 
@@ -394,7 +552,7 @@ class Routing(unittest.TestCase):
         self.assertIn("browser-smoke-ide", plan["required"])
         self.assertNotIn("build-site", plan["jobs"])
 
-    def test_packaging_and_unknown_target_changes_expand_to_full(self):
+    def test_packaging_and_unknown_target_changes_keep_the_ruby_floor(self):
         for path in [
             "src/project.rs",
             "src/emit/newlang.rs",
@@ -406,7 +564,11 @@ class Routing(unittest.TestCase):
             ".github/workflows/ci.yml",
         ]:
             with self.subTest(path=path):
-                self.assertEqual(ci.select([path])["smoke"], ci.TARGETS)
+                plan = ci.select([path])
+                self.assertEqual(plan["jobs"], ci.BASE)
+                self.assertEqual(plan["smoke"], [])
+                self.assertEqual(plan["extra_compare"], [])
+                self.assertFalse(plan["wasm"])
 
     def test_proven_project_owners_keep_their_consumers_without_other_targets(self):
         for scope in ["interpreted", "ruby-family"]:
@@ -435,8 +597,12 @@ class Routing(unittest.TestCase):
                 ci.TARGETS,
             )
         self.assertEqual(
+            ci.select(["src/project.rs"], project_scope="unknown")["jobs"],
+            ci.BASE,
+        )
+        self.assertEqual(
             ci.select(["src/project.rs"], project_scope="unknown")["smoke"],
-            ci.TARGETS,
+            [],
         )
 
     def test_cli_binary_does_not_expand_to_full(self):
@@ -597,15 +763,17 @@ class Results(unittest.TestCase):
                     self.assertEqual(ci.check_results(plan, needs), ([], False))
 
     def test_unselected_jobs_may_skip_but_planner_must_succeed(self):
-        plan = ci.select([])
-        needs = self.needs(plan)
-        needs["build-wasm"] = {"result": "skipped"}
-        needs["compare"] = {"result": "skipped"}
-        needs["browser-smoke-typescript"] = {"result": "skipped"}
-        self.assertEqual(ci.check_results(plan, needs), ([], True))
-        self.assertEqual(ci.check_results(plan, needs, compact=True), ([], True))
-        needs["plan"]["result"] = "failure"
-        self.assertTrue(ci.check_results(plan, needs)[0])
+        for lane in ({}, {"spinel_lane": True}, {"full": True}):
+            with self.subTest(lane=lane):
+                plan = ci.select([], **lane)
+                needs = self.needs(plan)
+                for job in ["build-wasm", "compare", "browser-smoke-typescript", "assemble-site"]:
+                    if job not in plan["jobs"]:
+                        needs[job] = {"result": "skipped"}
+                self.assertEqual(ci.check_results(plan, needs), ([], True))
+                self.assertEqual(ci.check_results(plan, needs, compact=True), ([], True))
+                needs["plan"]["result"] = "failure"
+                self.assertTrue(ci.check_results(plan, needs)[0])
 
     def test_compact_gate_ignores_unselected_publication_lanes(self):
         plan = ci.select(["src/analyze/call.rs"])
@@ -659,7 +827,7 @@ class MergeTree(unittest.TestCase):
                             **os.environ,
                             "GITHUB_EVENT_PATH": str(event_path),
                             "GITHUB_EVENT_NAME": "push",
-                            # Not inherited: on main's own CI run GITHUB_REF is main, whose pushes select full validation.
+                            # Not inherited: canonical main selects the Spinel lane, not this feature ref.
                             "GITHUB_REF": "refs/heads/feature",
                             "GITHUB_SHA": head,
                             "GITHUB_OUTPUT": os.devnull,
@@ -799,7 +967,7 @@ class ProjectScope(unittest.TestCase):
                         with self.subTest(name=name, raw=raw, first=first):
                             self.assertIsNone(ci.project_change_scope(first, second))
 
-    def test_unknown_shared_signatures_and_ambiguous_shapes_stay_full(self):
+    def test_unknown_shared_signatures_and_ambiguous_shapes_do_not_narrow(self):
         for changed in [
             self.source.replace("shared();", "new_shared();"),
             self.source.replace("spinel_files()", "spinel_files(app: &App)"),
@@ -822,6 +990,10 @@ class ProjectScope(unittest.TestCase):
                     "shared();", "new_shared();"
                 ),
             )
+        )
+        self.assertEqual(
+            ci.select(["src/project.rs"], project_scope=None)["jobs"],
+            ci.BASE,
         )
 
     def test_builder_text_inside_strings_or_comments_is_not_a_rust_item(self):
@@ -898,7 +1070,7 @@ class ProjectScope(unittest.TestCase):
                     **os.environ,
                     "GITHUB_EVENT_PATH": str(event_path),
                     "GITHUB_EVENT_NAME": "push",
-                    # Not inherited: on main's own CI run GITHUB_REF is main, whose pushes select full validation.
+                    # Not inherited: canonical main selects the Spinel lane, not this feature ref.
                     "GITHUB_REF": "refs/heads/feature",
                     "GITHUB_SHA": native,
                     "GITHUB_OUTPUT": os.devnull,

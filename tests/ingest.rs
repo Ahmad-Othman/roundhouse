@@ -931,7 +931,7 @@ fn classifies_models_vs_library_classes() {
 /// Survey-mode ingest must recover from an unsupported construct (rather
 /// than aborting the whole app) and must record skipped view templates.
 /// This is the behavior the LSP/MCP rely on to stay usable on real apps,
-/// and the surfacing that keeps unsupported (Slim/`.text.erb`/`.ruby`)
+/// and the surfacing that keeps unsupported (RABL/`.text.erb`/`.ruby`)
 /// views from vanishing silently.
 #[test]
 fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
@@ -948,8 +948,8 @@ fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
         ),
         // A HAML view: now ingested through the shared view pipeline.
         ("app/views/widgets/show.html.haml", "%h1= @widget.name\n"),
-        // A Slim view: still an unsupported engine the analyzer skips.
-        ("app/views/widgets/show.html.slim", "h1 = @widget.name\n"),
+        // A RABL view: still an unsupported engine the analyzer skips.
+        ("app/views/widgets/index.html.rabl", "object @widget\n"),
     ];
     let tree = || -> HashMap<PathBuf, Vec<u8>> {
         files
@@ -987,8 +987,8 @@ fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
     assert!(
         messages
             .iter()
-            .any(|m| m.contains("view template not ingested: slim")),
-        "skipped Slim view should be recorded as a gap, got: {messages:?}"
+            .any(|m| m.contains("view template not ingested: rabl")),
+        "skipped RABL view should be recorded as a gap, got: {messages:?}"
     );
     assert!(
         !messages.is_empty(),
@@ -1975,4 +1975,29 @@ fn nested_class_methods_cannot_relocate_native_initializers() {
     ).unwrap();
     let probe = classes.iter().find(|class| class.name.0.as_str() == "Probe").unwrap();
     assert_eq!(probe.class_ivar_initializers.len(), 1);
+}
+
+/// Parameters after a rest (`->(*, payload)`, `|*rest, a, b|`) used to
+/// vanish: Lambda IR has no slot for them, so `->(*, payload) {
+/// payload[:sql] }` emitted as `-> { payload[:sql] }`, a body reading a
+/// name nothing bound, and the expression IR diverged across a round
+/// trip. They are now popped off the rest, last first, which is Ruby's
+/// own rule, and the emitted form reaches a fixed point.
+#[test]
+fn parameters_after_a_rest_are_popped_off_it() {
+    use roundhouse::emit::ruby::emit_expr;
+    let cases: &[(&[u8], &[&str])] = &[
+        (b"cb = ->(*, payload) { payload[:sql] }", &["->(*__rest)", "payload = __rest.pop"]),
+        (b"cb = ->(*rest, a, b) { [rest, a, b] }", &["->(*rest)", "b = rest.pop", "a = rest.pop"]),
+        (b"cb = ->(*args) { args }", &["->(*args)"]),
+        (b"xs.each { |*, last| p last }", &["|*__rest|", "last = __rest.pop"]),
+    ];
+    for (source, wants) in cases {
+        let first = emit_expr(&ingest_snippet(source));
+        for want in *wants {
+            assert!(first.contains(want), "{}: expected `{want}` in:\n{first}", String::from_utf8_lossy(source));
+        }
+        let second = emit_expr(&ingest_snippet(first.as_bytes()));
+        assert_eq!(first, second, "{} is not a fixed point", String::from_utf8_lossy(source));
+    }
 }
