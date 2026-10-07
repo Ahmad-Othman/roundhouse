@@ -2191,11 +2191,8 @@ puts "ok"
         .assert_passes();
 }
 
-/// `cached: true` on a collection render is one store read of the
-/// concatenated partials. A second render of the same records must not
-/// run the inner fragment bodies.
-#[test]
-fn cached_true_collection_skips_partial_bodies_on_hit() {
+/// Overlay for the `cached: true` collection-cache gate probes.
+fn cached_collection_probe() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
         .edit(
             "app/models/article.rb",
@@ -2230,23 +2227,52 @@ fn cached_true_collection_skips_partial_bodies_on_hit() {
             "app/views/articles/probe.html.erb",
             "<%= render partial: \"articles/probe_row\", collection: @articles, cached: true %>\n",
         )
-        .run_ruby(
+}
+
+/// `n` rows, `second` bumps on the second render (`0` = store hit).
+fn assert_cached_collection_probe(n: i64, second: i64) {
+    cached_collection_probe()
+        .run_ruby(&format!(
             r#"
 Article.delete_all
-Article.create!(title: "one", body: "long enough body")
-Article.create!(title: "two", body: "long enough body")
-rows = ActiveRecord::Relation.new(Article).to_a.sort_by { |a| a.title }
+{n}.times {{ |i| Article.create!(title: "row-#{{i}}", body: "long enough body") }}
+rows = ActiveRecord::Relation.new(Article).to_a.sort_by {{ |a| a.title }}
 Article.reset_render_count
 a = Views::Articles.probe(rows)
-raise "first #{Article.render_count}: #{a}" unless Article.render_count == 2
+raise "first #{{Article.render_count}}: #{{a}}" unless Article.render_count == {n}
 Article.reset_render_count
 b = Views::Articles.probe(rows)
-raise "second #{Article.render_count}: #{b}" unless Article.render_count == 0
-raise "html drifted #{a.inspect} vs #{b.inspect}" unless a == b
+raise "second #{{Article.render_count}}: #{{b}}" unless Article.render_count == {second}
+raise "html drifted #{{a.inspect}} vs #{{b.inspect}}" unless a == b
 puts "ok"
-"#,
-        )
+"#
+        ))
         .assert_passes();
+}
+
+/// `cached: true` on a collection render is one store read of the
+/// concatenated partials. A second render of the same records must not
+/// run the inner fragment bodies. Needs more than
+/// `MAX_UNCACHED_COLLECTION_LENGTH` rows — at or below that the cost
+/// gate skips the store.
+#[test]
+fn cached_true_collection_skips_partial_bodies_on_hit() {
+    let n = roundhouse::lower::MAX_UNCACHED_COLLECTION_LENGTH + 1;
+    assert_cached_collection_probe(n, 0);
+}
+
+/// Small `cached: true` collections skip the store: key-build + read
+/// would cost more than rendering (Campfire sidebar after #488).
+#[test]
+fn cached_true_small_collection_skips_the_store() {
+    assert_cached_collection_probe(2, 2);
+}
+
+/// The exclusive gate: length == MAX is still uncached.
+#[test]
+fn cached_true_collection_at_gate_skips_the_store() {
+    let n = roundhouse::lower::MAX_UNCACHED_COLLECTION_LENGTH;
+    assert_cached_collection_probe(n, n);
 }
 
 /// `rel.more_than?(n)` is `SELECT 1 LIMIT 1 OFFSET n` with the same
