@@ -7,11 +7,11 @@ module ActionController
   def self.header_key_ok?(k)
     return false if k.nil?
     return false if k.length == 0
-    !k.match?(HEADER_KEY_ILLEGAL)
+    !k.b.match?(HEADER_KEY_ILLEGAL)
   end
 
   def self.header_value_ok?(v)
     return false if v.nil?
-    !v.match?(HEADER_VALUE_ILLEGAL)
+    !v.b.match?(HEADER_VALUE_ILLEGAL)
   end
 end

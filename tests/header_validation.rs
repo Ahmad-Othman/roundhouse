@@ -11,7 +11,12 @@ shared_value = ActionController.method(:header_value_ok?)
 require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/header_validation_cruby"
 checks = [[nil, false, false], ["", false, true], ["Café", true, true],
           ["X:\u0301", false, true], ["X \u0301", false, true],
-          ["X\"\u0301", false, true], ["X-e\u0301", true, true]]
+          ["X\"\u0301", false, true], ["X-e\u0301", true, true],
+          ["X-\xFF".force_encoding("UTF-8"), true, true],
+          ["X:\xFF".force_encoding("UTF-8"), false, true],
+          ["a\xFF\n".force_encoding("UTF-8"), false, false],
+          ["X-\xFF".b, true, true], ["X:\xFF".b, false, true],
+          ["a\xFF\n".b, false, false]]
 128.times do |byte|
   text = "a" + byte.chr + "b"
   checks << [text, byte > 32 && byte != 127 && byte != 34 && byte != 58,
