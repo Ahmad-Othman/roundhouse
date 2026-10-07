@@ -4390,6 +4390,93 @@ fn store_shapes_type_without_errors() {
     assert_eq!(errors_of(&app), Vec::<String>::new());
 }
 
+/// A uuid-keyed model's tokens are not modeled: Rails writes the key into
+/// the payload as a JSON string, which the token runtime does not read
+/// back. So `find_by_token_for` stays an error there rather than typing
+/// a method nothing defines; the Integer-keyed store model still types.
+#[test]
+fn a_string_keyed_models_token_finder_stays_unsupported() {
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/invites_controller.rb",
+            "class InvitesController < ApplicationController\n  def show\n    @invite = Invite.find_by_token_for(:accept, params[:token])\n    @subscriber = Subscriber.find_by_token_for(:unsubscribe, params[:token])\n  end\nend\n",
+        ),
+        ("app/models/invite.rb", "class Invite < ApplicationRecord\n  generates_token_for :accept\nend\n"),
+        ("app/models/subscriber.rb", "class Subscriber < ApplicationRecord\n  generates_token_for :unsubscribe\nend\n"),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "invites", id: :uuid, force: :cascade do |t|
+    t.string "email"
+  end
+  create_table "subscribers", force: :cascade do |t|
+    t.string "email"
+  end
+end
+"#,
+        ),
+    ]);
+    let errors = errors_of(&app);
+    assert_eq!(errors.len(), 1, "only the uuid model's finder errors; got {errors:?}");
+    assert!(errors[0].contains("find_by_token_for") && errors[0].contains("Invite"), "got {errors:?}");
+}
+
+/// A model's token methods are all or nothing, since they dispatch on a
+/// purpose passed at runtime. Rails keeps the LAST declaration of a
+/// purpose, so one redeclared in a form the lowering cannot expand
+/// (`expires_at:`) declines the model rather than letting the earlier
+/// form stand in. So does a quoted Symbol purpose, which the synthesized
+/// source cannot spell, even beside a purpose that could be expanded.
+/// A model whose redeclaration CAN be expanded still types.
+#[test]
+fn a_token_purpose_the_lowering_cannot_expand_declines_the_model() {
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/links_controller.rb",
+            "class LinksController < ApplicationController\n  def show\n    @a = Redeclared.find_by_token_for(:share, params[:token])\n    @b = Quoted.find_by_token_for(:plain, params[:token])\n    @c = Superseded.find_by_token_for(:share, params[:token])\n  end\nend\n",
+        ),
+        (
+            "app/models/redeclared.rb",
+            "class Redeclared < ApplicationRecord\n  generates_token_for :share\n  generates_token_for :share, expires_at: Time.now\nend\n",
+        ),
+        (
+            "app/models/quoted.rb",
+            "class Quoted < ApplicationRecord\n  generates_token_for :plain\n  generates_token_for :\"share-link\"\nend\n",
+        ),
+        (
+            "app/models/superseded.rb",
+            "class Superseded < ApplicationRecord\n  generates_token_for :share, expires_at: Time.now\n  generates_token_for :share\nend\n",
+        ),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table "redeclareds", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "quoteds", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "supersededs", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        ),
+    ]);
+    let errors = errors_of(&app);
+    assert_eq!(errors.len(), 2, "the two declined models' finders error; got {errors:?}");
+    assert!(errors.iter().any(|e| e.contains("Redeclared")), "got {errors:?}");
+    assert!(errors.iter().any(|e| e.contains("Quoted")), "got {errors:?}");
+}
+
 /// `ProductMailer.with(product:, subscriber:)` makes `params[:subscriber]`
 /// a Subscriber inside the mailer AND in its template — the `.with`
 /// row, not the request's params.

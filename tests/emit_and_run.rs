@@ -2275,6 +2275,136 @@ fn a_keyword_bundle_reaches_a_keyword_callee_from_an_included_concern() {
         .assert_passes();
 }
 
+/// real-blog's Article with two token purposes declared from a concern's
+/// `included do`: `:share` (a day's expiry, the title as its value) and
+/// `:plain` (the id alone, never expiring).
+fn article_with_shareable_tokens() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/shareable.rb",
+            "module Shareable\n  extend ActiveSupport::Concern\n\n  included do\n    generates_token_for :share, expires_in: 1.day do\n      title\n    end\n    generates_token_for :plain\n  end\nend\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  include Shareable\n",
+        )
+}
+
+/// `generates_token_for :purpose, expires_in: D do <value> end` (Rails
+/// 7.1), synthesized over `ActiveRecord::TokenFor`: a token finds its
+/// record, stops verifying when the block's value changes (Rails'
+/// contract), rejects tampering and a wrong purpose, the bang form
+/// raises InvalidSignature as Rails' does, and the declaration is
+/// honored from a concern's `included do` too.
+#[test]
+fn a_generated_token_finds_its_record_until_its_value_changes() {
+    article_with_shareable_tokens()
+        .run_ruby(
+            "a = Article.create!(title: \"Hello\", body: \"Body text here\")\ntoken = a.generate_token_for(:share)\nraise \"find\" unless Article.find_by_token_for(:share, token)&.id == a.id\nraise \"bang\" unless Article.find_by_token_for!(:share, token).id == a.id\nraise \"purpose\" unless Article.find_by_token_for(:plain, token).nil?\nraise \"tamper\" unless Article.find_by_token_for(:share, token + \"x\").nil?\nplain = a.generate_token_for(:plain)\nraise \"plain\" unless Article.find_by_token_for(:plain, plain)&.id == a.id\na.update!(title: \"Changed\")\nraise \"stale\" unless Article.find_by_token_for(:share, token).nil?\nraise \"plain survives\" unless Article.find_by_token_for(:plain, plain)&.id == a.id\nbegin\n  Article.find_by_token_for!(:share, token)\n  raise \"no raise\"\nrescue ActiveSupport::MessageVerifier::InvalidSignature\nend\nputs \"PASS token_for\"",
+        )
+        .assert_passes();
+}
+
+/// A block value goes into the payload as the JSON Rails' `as_json`
+/// writes for its type: an Integer is a number (`[1,1]`) and a boolean
+/// is `true`/`false` (`[1,false]`), not a quoted string. Both tokens
+/// were minted by Rails 8.1.4 (`SECRET_KEY_BASE=test-secret`) and are
+/// unexpiring, so the emitted app must mint the same bytes and accept
+/// Rails' own.
+#[test]
+fn a_non_string_token_value_is_the_json_rails_writes() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  generates_token_for :counted do\n    id\n  end\n  generates_token_for :flagged do\n    title.nil?\n  end\n",
+        )
+        .run_ruby(
+            r#"
+Rails.secret_key_base = "test-secret"
+counted = "eyJfcmFpbHMiOnsiZGF0YSI6WzEsMV0sInB1ciI6IkFydGljbGVcbmNvdW50ZWRcbiJ9fQ==--d02f8c1104bf97b778253f734d7156c48eb98e88"
+flagged = "eyJfcmFpbHMiOnsiZGF0YSI6WzEsZmFsc2VdLCJwdXIiOiJBcnRpY2xlXG5mbGFnZ2VkXG4ifX0=--fb27c1ecd775cb15bc0966020341a5c07c7ab57e"
+a = Article.create!(title: "Hello", body: "Body text here")
+raise "expected the first row" unless a.id == 1
+raise "integer value differs from rails" unless a.generate_token_for(:counted) == counted
+raise "boolean value differs from rails" unless a.generate_token_for(:flagged) == flagged
+raise "rails integer token rejected" unless Article.find_by_token_for(:counted, counted)&.id == 1
+raise "rails boolean token rejected" unless Article.find_by_token_for(:flagged, flagged)&.id == 1
+puts "PASS typed values"
+"#,
+        )
+        .assert_passes();
+}
+
+/// A multi-statement block body must still synthesize: the typed
+/// payload writers parenthesize the emitted expression so a Seq (or a
+/// modifier-`if`) is legal as a call argument. Without that, prism
+/// rejects the synthesized source, methods stay typed but undefined
+/// (invariant 6), and `generate_token_for` raises NoMethodError.
+#[test]
+fn a_multi_statement_token_block_still_synthesizes() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  generates_token_for :share do\n    t = title\n    t\n  end\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hello\", body: \"Body text here\")\ntoken = a.generate_token_for(:share)\nraise \"find\" unless Article.find_by_token_for(:share, token)&.id == a.id\na.update!(title: \"Changed\")\nraise \"stale\" unless Article.find_by_token_for(:share, token).nil?\nputs \"PASS multi-statement token block\"",
+        )
+        .assert_passes();
+}
+
+/// Declaring a purpose twice keeps the last declaration, as Rails'
+/// `token_definitions.merge` does: the token carries the second block's
+/// value, so changing the first block's value leaves it valid.
+#[test]
+fn a_redeclared_token_purpose_uses_the_last_declaration() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  generates_token_for :share do\n    title\n  end\n  generates_token_for :share, expires_in: 1.hour do\n    body\n  end\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hello\", body: \"Body text here\")\ntoken = a.generate_token_for(:share)\na.update!(title: \"Changed\")\nraise \"first declaration used\" unless Article.find_by_token_for(:share, token)&.id == a.id\na.update!(body: \"Other body text\")\nraise \"last declaration ignored\" unless Article.find_by_token_for(:share, token).nil?\nputs \"PASS redeclared\"",
+        )
+        .assert_passes();
+}
+
+/// The tokens are Rails' own: ones minted by Rails 8.1.4 for the same
+/// declarations verify here, with `SECRET_KEY_BASE=test-secret` and the
+/// clock at 2100-01-01 so the day's expiry is still ahead:
+///
+///   {"_rails":{"data":[1,"Hello"],"exp":"2100-01-02T00:00:00.000Z",
+///    "pur":"Article\nshare\n86400"}}
+///   {"_rails":{"data":[1],"pur":"Article\nplain\n"}}
+///
+/// and a token minted here is the bytes Rails mints for the same record
+/// at the same instant, since the purpose, payload and absent `exp` are
+/// all Rails' choices.
+#[test]
+fn a_generated_token_minted_by_rails_verifies() {
+    article_with_shareable_tokens()
+        .run_ruby(
+            r#"
+Rails.secret_key_base = "test-secret"
+share = "eyJfcmFpbHMiOnsiZGF0YSI6WzEsIkhlbGxvIl0sImV4cCI6IjIxMDAtMDEtMDJUMDA6MDA6MDAuMDAwWiIsInB1ciI6IkFydGljbGVcbnNoYXJlXG44NjQwMCJ9fQ==--b944fbcc044254e17f4d952e9a1c1e63ec185093"
+plain = "eyJfcmFpbHMiOnsiZGF0YSI6WzFdLCJwdXIiOiJBcnRpY2xlXG5wbGFpblxuIn19--5a8e42fe42d686af11a02e972f7e5e1c88bb57db"
+a = Article.create!(title: "Hello", body: "Body text here")
+raise "expected the first row" unless a.id == 1
+raise "rails share token rejected" unless Article.find_by_token_for(:share, share)&.id == 1
+raise "rails plain token rejected" unless Article.find_by_token_for!(:plain, plain).id == 1
+raise "unexpiring token differs from rails" unless a.generate_token_for(:plain) == plain
+a.update!(title: "Changed")
+raise "stale rails token accepted" unless Article.find_by_token_for(:share, share).nil?
+puts "PASS rails tokens"
+"#,
+        )
+        .assert_passes();
+}
+
 /// Integer serialization is not blindly String#to_i: nonnumeric labels
 /// must not alias an existing row zero. Invalid IDs still count toward the
 /// array finder's required cardinality, except when pagination excludes them.
