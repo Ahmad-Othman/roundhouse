@@ -437,6 +437,7 @@ fn actions_without_db_calls_stay_pure() {
         app.controllers.push(roundhouse::dialect::Controller {
             name: ClassId(Symbol::from("NoopController")),
             parent: None,
+            parent_span: Default::default(),
             body: vec![roundhouse::ControllerBodyItem::Action {
                 action: action.clone(),
                 leading_comments: vec![],
@@ -761,6 +762,7 @@ fn analyze_action_body(body: roundhouse::expr::Expr) -> roundhouse::expr::Expr {
     app.controllers.push(Controller {
         name: ClassId(Symbol::from("TestController")),
         parent: None,
+        parent_span: Default::default(),
         body: vec![ControllerBodyItem::Action {
             action,
             leading_comments: vec![],

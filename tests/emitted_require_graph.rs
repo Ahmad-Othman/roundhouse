@@ -424,3 +424,66 @@ fn mapped_json_receivers_do_not_hide_unsupported_arguments_or_methods() {
         }
     }
 }
+
+/// A superclass reference to a ruby-family runtime exception is
+/// ledgered on strict targets (parent Const span from ingest).
+#[test]
+fn a_superclass_ruby_family_runtime_constant_is_ledgered() {
+    let tree = [
+        ("config/routes.rb", "Rails.application.routes.draw do\n  resources :probes, only: %i[index]\nend\n"),
+        ("app/models/page_out_of_bounds.rb", "class PageOutOfBounds < ActionController::RoutingError\nend\n"),
+        ("app/controllers/probes_controller.rb", "class ProbesController < ActionController::Base\n  def index\n    raise PageOutOfBounds.new(\"page out of bounds\") if params[:page] == \"0\"\n    head :ok\n  end\nend\n"),
+    ].into_iter().map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec())).collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    let mut analysis = roundhouse::session::analyze_and_lower(&mut app);
+    analysis.extend(roundhouse::analyze::diagnose(&app));
+    assert!(!analysis.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error), "{analysis:?}");
+    for target in [BuildTarget::Typescript, BuildTarget::Rust] {
+        let (_, diags) = roundhouse::emit::diagnostics::scope(|| {
+            target_files(&app, Path::new("."), target)
+        });
+        let gaps: Vec<_> = diags.iter().filter(|d| matches!(
+            &d.kind,
+            roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+                if construct.as_str() == "ruby_family_runtime_constant"
+        ) && d.message.contains("ActionController::RoutingError")).collect();
+        assert_eq!(gaps.len(), 1, "{target:?}: {gaps:?} / {diags:?}");
+        assert!(!gaps[0].span.is_synthetic(), "{gaps:?}");
+    }
+}
+
+/// A lowers-added MissingTemplate raise (missing render) is typed so
+/// the availability gate sees it on strict targets.
+#[test]
+fn a_lowering_added_missing_template_is_ledgered_on_strict_targets() {
+    let tree = [
+        ("config/routes.rb", "Rails.application.routes.draw do
+  resources :probes, only: %i[show]
+end
+"),
+        ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base
+end
+"),
+        ("app/controllers/probes_controller.rb", "class ProbesController < ApplicationController
+  def show
+    render :missing
+  end
+end
+"),
+    ].into_iter().map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec())).collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    for target in [BuildTarget::Typescript, BuildTarget::Go] {
+        let (_, diags) = roundhouse::emit::diagnostics::scope(|| {
+            target_files(&app, Path::new("."), target)
+        });
+        let gaps: Vec<_> = diags.iter().filter(|d| matches!(
+            &d.kind,
+            roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+                if construct.as_str() == "ruby_family_runtime_constant"
+        ) && d.message.contains("ActionView::MissingTemplate")).collect();
+        assert!(!gaps.is_empty(), "{target:?}: expected MissingTemplate ledger, got {diags:?}");
+        assert!(gaps.iter().all(|g| !g.span.is_synthetic()), "{gaps:?}");
+    }
+}
+

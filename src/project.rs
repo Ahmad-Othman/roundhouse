@@ -4008,6 +4008,7 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             if let Some(crate::ty::Ty::Class { id, .. }) = &expr.ty {
                 let name = id.0.as_str();
                 if let Some(construct) = unavailable_class_module_construct(name, target)
+                    && !expr.span.is_synthetic()
                     && !app.library_classes.iter().any(|class| class.name == *id)
                     && !app.models.iter().any(|model| model.name == *id)
                     && !app.controllers.iter().any(|controller| controller.name == *id)
@@ -4046,6 +4047,27 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     }
     let mut visit = |expr: &crate::expr::Expr| visit(expr, app, target.as_str());
     crate::lower::for_each_hook_body_ref(app, &mut visit);
+    // Controller `render` → `MissingTemplate` rewriting lives in
+    // `controller_to_library`, which runs at emit time after this gate.
+    // Survey a throwaway lower so lowers-added exception Consts (now
+    // typed) are still ledgered on strict targets.
+    let lowered_controllers =
+        crate::lower::controller_to_library::lower_controllers_with_arel_and_views(
+            &app.controllers,
+            Vec::new(),
+            Some(&app.schema),
+            &app.views,
+        );
+    for class in &lowered_controllers {
+        for method in &class.methods {
+            visit(&method.body);
+            for param in &method.params {
+                if let Some(default) = &param.default {
+                    visit(default);
+                }
+            }
+        }
+    }
     // Like the Date gate, include roots outside the app-body survey.
     for controller in &app.controllers {
         for action in controller.actions() {
@@ -4139,6 +4161,51 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                     }
                 }
             }
+        }
+    }
+
+    // Superclass Consts are ClassIds with a captured parent_span, not
+    // Exprs in a method body — visit them explicitly so
+    // `class X < ActionController::RoutingError` is ledgered.
+    let target = target.as_str();
+    let report_parent = |name: &str, span: crate::span::Span| {
+        if span.is_synthetic() {
+            return;
+        }
+        let id = crate::ident::ClassId(crate::ident::Symbol::from(name));
+        if let Some(construct) = unavailable_class_module_construct(name, target)
+            && !app.library_classes.iter().any(|class| class.name == id)
+            && !app.models.iter().any(|model| model.name == id)
+            && !app.controllers.iter().any(|controller| controller.name == id)
+            && !app.rails_application.as_ref().is_some_and(|class| class.name == id)
+            && !app.test_modules.iter().any(|module| {
+                module.inner_classes.iter().any(|class| class.name == id)
+            })
+        {
+            emit::diagnostics::report_unsupported(
+                span,
+                target,
+                construct,
+                format!("{name} is not available as a class/module value on {target}"),
+            );
+        }
+    };
+    for model in &app.models {
+        if let Some(parent) = &model.parent {
+            report_parent(parent.0.as_str(), model.parent_span);
+        }
+    }
+    for controller in &app.controllers {
+        if let Some(parent) = &controller.parent {
+            report_parent(parent.0.as_str(), controller.parent_span);
+        }
+        for sibling in &controller.sibling_classes {
+            report_parent(sibling.parent.as_str(), sibling.parent_span);
+        }
+    }
+    for class in app.library_classes.iter().chain(app.rails_application.iter()) {
+        if let Some(parent) = &class.parent {
+            report_parent(parent.0.as_str(), class.parent_span);
         }
     }
 }
@@ -8258,6 +8325,7 @@ mod tests {
             name: ClassId(Symbol::from(name)),
             is_module: false,
             parent: Some(ClassId(Symbol::from("ActionCable::Connection::Base"))),
+            parent_span: Default::default(),
             includes: Vec::new(),
             methods: Vec::new(),
             nullable_columns: Vec::new(),
@@ -8430,6 +8498,7 @@ mod tests {
             name: crate::ident::ClassId(Symbol::from("Greetable")),
             is_module: true,
             parent: None,
+            parent_span: Default::default(),
             includes: Vec::new(),
             methods: Vec::new(),
             nullable_columns: Vec::new(),

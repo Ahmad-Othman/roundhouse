@@ -52,6 +52,7 @@ fn application_record_lowers_with_abstract_marker() {
     assert_eq!(lc.name.0.as_str(), "ApplicationRecord");
     let parent = lc.parent.as_ref().map(|p| p.0.as_str()).unwrap_or("(none)");
     assert_eq!(parent, "ActiveRecord::Base", "parent: {parent}");
+    parent_span: Default::default(),
     assert!(!lc.is_module);
     assert_eq!(method_names(&lc), vec!["abstract?"]);
     let m = &lc.methods[0];

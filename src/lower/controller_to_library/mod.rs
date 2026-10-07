@@ -549,6 +549,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             name: controller.name.clone(),
             is_module: false,
             parent: controller.parent.clone(),
+            parent_span: Default::default(),
             includes: Vec::new(),
             methods,
             nullable_columns: Vec::new(),
@@ -620,6 +621,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         name: controller.name.clone(),
         is_module: false,
         parent: controller.parent.clone(),
+        parent_span: Default::default(),
         includes: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
@@ -925,11 +927,9 @@ fn subclass_template_hooks(
                         value: Expr::new(
                             span,
                             ExprNode::Send {
-                                recv: Some(Expr::new(
+                                recv: Some(rewrites::typed_exception_const(
+                                    &["ActionView", "MissingTemplate"],
                                     span,
-                                    ExprNode::Const {
-                                        path: vec![Symbol::from("ActionView"), Symbol::from("MissingTemplate")],
-                                    },
                                 )),
                                 method: Symbol::from("new"),
                                 args: vec![Expr::new(
