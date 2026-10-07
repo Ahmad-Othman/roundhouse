@@ -63,6 +63,7 @@
 # block: random base64 does not compress. Correctness never depends on
 # finding every token: a run is looked up by its bytes, so a run holding
 # an unnoticed token just misses and is deflated, as before.
+require "weakref"
 require "zlib"
 
 module GzipCache
@@ -521,10 +522,21 @@ module GzipCache
       else
         EMPTY
       end
-      c << prev << g
+      # WeakRef: a WeakKeyMap value must not strongly hold a fragment
+      # that is also a map key (same fragment twice in a run, or a
+      # predecessor that is itself cached). Strong refs would pin the
+      # key after the fragment cache drops it.
+      c << WeakRef.new(prev) << g
       j -= 1
     end
     c.freeze
+  end
+
+  def self.chain_pred_is?(stored, prev)
+    return false unless stored.is_a?(WeakRef)
+    stored.weakref_alive? && stored.__getobj__.equal?(prev)
+  rescue WeakRef::RefError
+    false
   end
 
   def self.same_chain?(chain, found, k, dict_start, raw)
@@ -535,7 +547,7 @@ module GzipCache
       off = found[j * 2]
       prev = found[j * 2 + 1]
       break if off + prev.bytesize <= dict_start
-      return false if i >= chain.length || !chain[i].equal?(prev)
+      return false if i >= chain.length || !chain_pred_is?(chain[i], prev)
       prev_end = j > 0 ? found[(j - 1) * 2] + found[(j - 1) * 2 + 1].bytesize : off
       glue_len = off > prev_end && off > dict_start ? off - prev_end : 0
       g = chain[i + 1]

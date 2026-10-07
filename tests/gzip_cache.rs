@@ -829,3 +829,46 @@ puts "ALL OK"
     );
     assert!(fb.status.success(), "fallback driver exited {:?}", fb.status.code());
 }
+
+/// The same frozen fragment twice in one run (self-predecessor) must
+/// still inflate, and the WeakKeyMap value must not strongly retain the
+/// key (CodeRabbit outside-diff on #546).
+#[test]
+fn repeated_fragment_chain_does_not_pin_weak_map_key() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = r#"
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/gzip_cache"
+raise "splice unavailable" unless GzipCache::SPLICE_OK
+frag = ("<turbo-frame id=\"dup\">" + ("<p>same row markup</p>\n" * 80) + "</turbo-frame>\n").freeze
+body = frag + "\n" + frag
+gz = GzipCache.splice(body, [frag, frag])
+raise "nil" if gz.nil?
+raise "round trip" unless Zlib.gunzip(gz) == body.b
+list = GzipCache.instance_variable_get(:@pieces)[frag]
+raise "no piece" if list.nil? || list.empty?
+list.each do |e|
+  chain = e[0]
+  i = 0
+  while i < chain.length
+    pred = chain[i]
+    raise "strong pred #{pred.class}" unless pred.is_a?(WeakRef)
+    raise "dead self-pred" unless pred.weakref_alive? && pred.__getobj__.equal?(frag)
+    i += 2
+  end
+end
+puts "ALL OK"
+"#;
+    let out = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .current_dir(root)
+        .output()
+        .expect("ruby is on PATH");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("ALL OK"),
+        "weak chain pin failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+    assert!(out.status.success(), "driver exited {:?}", out.status.code());
+}
