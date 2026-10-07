@@ -41,6 +41,7 @@
 # target compiles against.
 
 require "sqlite3"
+require "fileutils"
 
 module Db
   @pool    = nil
@@ -121,6 +122,16 @@ module Db
     # compile-time accident is not agreement, so each states it.
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA synchronous=NORMAL")
+    # Page cache + mmap — same measured knobs as runtime/spinel/db.rb
+    # (roundhouse#17 CRuby half). SQLite's default cache is 2 MB; a
+    # long-lived serving process re-reads the working set from the OS
+    # on every visit. Spinel measured ~400 pread64s per /top visit at
+    # the default vs a large cache; tip CRuby still opened at
+    # cache_size=-2000 / mmap_size=0. Negative cache_size is a KiB
+    # budget (-65536 = 64 MiB); mmap_size maps the file so hits skip
+    # the read() copy. Harmless on :memory: (pages are already heap).
+    db.execute("PRAGMA cache_size=-65536")
+    db.execute("PRAGMA mmap_size=268435456")
     # The gem's default is 0: a second writer fails at once with
     # SQLITE_BUSY. Rails' database.yml says `timeout: 5000`, and so do
     # the binary's PRAGMAS — the harness's file database (see
@@ -567,11 +578,46 @@ module Db
     end
   end
 
+  # One checkpointer across WEB_CONCURRENCY / Resque siblings (the bit
+  # Campfire once-campfire#319 adds on top of the same PASSIVE loop).
+  # Without a flock every forked worker runs its own 250ms PASSIVE and
+  # they contend on the WAL; with it, losers skip the tick. Lock file
+  # sits next to the database so each file-backed DB has its own.
+  def self.checkpoint_lock_path(path)
+    File.join(File.dirname(path), ".#{File.basename(path)}.wal_checkpoint.lock")
+  end
+
+  def self.try_checkpoint_lock(lock_path)
+    FileUtils.mkdir_p(File.dirname(lock_path))
+    file = File.open(lock_path, File::RDWR | File::CREAT, 0644)
+    if file.flock(File::LOCK_EX | File::LOCK_NB)
+      file
+    else
+      file.close
+      nil
+    end
+  rescue StandardError
+    nil
+  end
+
+  def self.release_checkpoint_lock(file)
+    return if file.nil?
+    begin
+      file.flock(File::LOCK_UN)
+    ensure
+      file.close
+    end
+  rescue StandardError
+  end
+
   def self.checkpoint_loop(path)
     conn = SQLite3::Database.new(path)
     conn.busy_handler_timeout = 100
+    lock_path = checkpoint_lock_path(path)
     loop do
       sleep CHECKPOINT_INTERVAL
+      lock = try_checkpoint_lock(lock_path)
+      next if lock.nil?
       begin
         row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)")[0]
         log_frames = row.nil? ? 0 : row[1].to_i
@@ -587,6 +633,8 @@ module Db
       rescue StandardError
         # A busy or failed checkpoint is retried on the next tick; the
         # log only grows meanwhile.
+      ensure
+        release_checkpoint_lock(lock)
       end
     end
   end

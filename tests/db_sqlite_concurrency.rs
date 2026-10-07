@@ -182,6 +182,53 @@ check("the abandoned insert rolled back", count("t") == 1)
     );
 }
 
+/// Serving connections pin the measured page-cache / mmap knobs
+/// (roundhouse#17 CRuby half). Tip used to inherit SQLite defaults
+/// (`cache_size=-2000`, `mmap_size=0`) while the Spinel shim already
+/// set the 64 MiB / 256 MiB budget — same working-set win, every
+/// RH CRuby app, not Campfire-specific.
+#[test]
+fn open_connection_sets_cache_and_mmap() {
+    run(
+        "pragmas",
+        r#"
+Db.with_connection do
+  c = Db.current_dbh
+  check("journal_mode=WAL", c.execute("PRAGMA journal_mode")[0][0].to_s.downcase == "wal")
+  check("synchronous=NORMAL", c.execute("PRAGMA synchronous")[0][0] == 1)
+  check("cache_size=-65536", c.execute("PRAGMA cache_size")[0][0] == -65536)
+  check("mmap_size=256MiB", c.execute("PRAGMA mmap_size")[0][0] == 268435456)
+end
+"#,
+    );
+}
+
+/// Multi-worker checkpointing takes a non-blocking flock so only one
+/// process copies the WAL (Campfire once-campfire#319's generalizable
+/// bit). A second holder must fail while the first still holds it.
+#[test]
+fn checkpoint_flock_is_exclusive_across_processes() {
+    run(
+        "checkpoint_flock",
+        r#"
+path = Db.instance_variable_get(:@path)
+lock_path = Db.checkpoint_lock_path(path)
+held = Db.try_checkpoint_lock(lock_path)
+check("first holder acquired", !held.nil?)
+pid = fork do
+  other = Db.try_checkpoint_lock(lock_path)
+  exit(other.nil? ? 0 : 1)
+end
+_pid, status = Process.wait2(pid)
+check("sibling failed to take the flock", status.exitstatus == 0)
+Db.release_checkpoint_lock(held)
+again = Db.try_checkpoint_lock(lock_path)
+check("lock free after release", !again.nil?)
+Db.release_checkpoint_lock(again)
+"#,
+    );
+}
+
 /// Once the server asks, serving connections stop checkpointing inside
 /// COMMIT and a background thread copies the log into the database
 /// file instead: the file grows without any request checkpointing.
