@@ -44,6 +44,7 @@ mod diagnostics;
 pub(crate) mod forwarding;
 mod filter_targets;
 pub mod graphql;
+mod harvest_return;
 mod inferred_types;
 pub mod inquiry;
 pub use inferred_types::inferred_types;
@@ -4483,12 +4484,7 @@ impl Analyzer {
         method: &Symbol,
         ty: Ty,
     ) {
-        match table.get(method) {
-            Some(Ty::Fn { .. }) => return,
-            Some(existing) if !matches!(existing, Ty::Var { .. }) && existing == &ty => return,
-            _ => {}
-        }
-        table.insert(method.clone(), ty);
+        harvest_return::insert_inferred_return(table, method, ty);
     }
 
     /// Walk every Send across the app, look up each call's target
@@ -6206,7 +6202,6 @@ fn unify_param_ty(stored: Ty, observed: Ty) -> Ty {
     }
     crate::analyze::body::union_of(stored, observed)
 }
-
 
 /// Convert a controller class name into the view-path prefix.
 /// `ArticlesController` → `articles`; namespaced controllers map each
