@@ -489,3 +489,71 @@ end
     }
 }
 
+/// Subclass-template-hook raises (campfire `MessagesController` shape)
+/// must reuse the `render` call span so the gate ledgers them — not
+/// `Span::synthetic()`, which would skip while emit still throws.
+#[test]
+fn a_subclass_template_hook_missing_template_is_ledgered_on_strict_targets() {
+    let tree = [
+        ("db/schema.rb", "ActiveRecord::Schema.define do
+  create_table \"messages\", force: :cascade do |t|
+    t.string \"body\", null: false
+  end
+end
+"),
+        ("config/routes.rb", "Rails.application.routes.draw do
+  resources :messages, only: %i[update]
+  scope path: \":bot_key\", as: :bot, defaults: { format: :json } do
+    resources :messages, controller: \"messages/by_bots\", only: %i[update]
+  end
+end
+"),
+        ("app/models/message.rb", "class Message < ApplicationRecord
+end
+"),
+        ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base
+end
+"),
+        ("app/controllers/messages_controller.rb", "class MessagesController < ApplicationController
+  before_action :set_message
+
+  def update
+    @message.update!(body: params[:body])
+
+    respond_to do |format|
+      format.html { redirect_to message_url(@message) }
+      format.json { render :show }
+    end
+  end
+
+  private
+    def set_message
+      @message = Message.find(params[:id])
+    end
+end
+"),
+        ("app/controllers/messages/by_bots_controller.rb", "class Messages::ByBotsController < MessagesController
+end
+"),
+        ("app/views/messages/by_bots/show.json.jbuilder", "json.id @message.id
+json.body @message.body
+"),
+    ].into_iter().map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec())).collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    // Campfire-shaped fixture: jbuilder `@message` may still carry
+    // ivar_unresolved residue. This pin is the gate ledger, not clean typing.
+    roundhouse::session::analyze_and_lower(&mut app);
+    for target in [BuildTarget::Typescript, BuildTarget::Go] {
+        let (_, diags) = roundhouse::emit::diagnostics::scope(|| {
+            target_files(&app, Path::new("."), target)
+        });
+        let gaps: Vec<_> = diags.iter().filter(|d| matches!(
+            &d.kind,
+            roundhouse::diagnostic::DiagnosticKind::Unsupported { construct, .. }
+                if construct.as_str() == "ruby_family_runtime_constant"
+        ) && d.message.contains("ActionView::MissingTemplate")).collect();
+        assert!(!gaps.is_empty(), "{target:?}: expected subclass-hook MissingTemplate ledger, got {diags:?}");
+        assert!(gaps.iter().all(|g| !g.span.is_synthetic()), "{gaps:?}");
+    }
+}
+
