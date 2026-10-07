@@ -265,6 +265,8 @@ module ActiveRecord
 
     # Keep public input intact until schema-selected normalization, then raise
     # the same RecordNotFound for an invalid key or an absent record.
+    # Reject nil before a key-typed adapter can coerce it to a real
+    # zero/empty-string key.
     def self.find(id)
       raise RecordNotFound, "Couldn't find #{name} with id=#{id}" if id.nil?
       result = _find_primary_key_input(id)
@@ -288,6 +290,15 @@ module ActiveRecord
       return IntegerKeyCast.input_text(id) if _string_primary_key
       cast = IntegerKeyCast.parse(id)
       cast.valid ? cast.value : nil
+    end
+
+    # Reject nil before a key-typed adapter can coerce it; cast request
+    # values so Spinel never sees String at an Integer adapter slot.
+    def self.exists?(id)
+      return false if id.nil?
+      key = _cast_primary_key(id)
+      return false if key.nil?
+      _adapter_exists_by_id?(key)
     end
 
     # Stateless facade — every member delegates straight to `Db`, so a
