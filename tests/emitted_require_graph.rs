@@ -294,6 +294,26 @@ end
     }
 }
 
+/// Both Spinel dispatchers rescue `ActionController::RoutingError`
+/// beside `ActiveRecord::RecordNotFound` and answer 404. The CRuby
+/// overlay path is covered by
+/// `emit_and_run::an_action_that_raises_routing_error_answers_404`; this
+/// pins the native Spinel scaffold the same way without needing a
+/// Spinel binary in the unit job.
+#[test]
+fn spinel_dispatchers_rescue_routing_error_as_404() {
+    for path in [
+        "runtime/spinel/scaffold/main.rb",
+        "runtime/spinel/scaffold/ruby_overlay/main.rb",
+    ] {
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        assert!(
+            src.contains("rescue ActiveRecord::RecordNotFound, ActionController::RoutingError"),
+            "{path} must rescue RoutingError beside RecordNotFound:\n{src}"
+        );
+    }
+}
+
 /// An app that defines one of these classes itself ships the class, so
 /// the reference is not an error on any target.
 #[test]
