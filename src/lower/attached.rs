@@ -139,29 +139,29 @@ fn rewrite_attach(e: &mut Expr) {
     if args.len() != 1 {
         return;
     }
+    // Only Active Storage receivers — an unrelated `attach` /
+    // `create_and_upload!` must not be rewritten.
+    let on_attached = name == "attach" && recv_is_attached(recv);
+    let on_blob = name == "create_and_upload!" && recv_is_blob_class(recv);
+    if !on_attached && !on_blob {
+        return;
+    }
     if let Some((io, filename, content_type)) = attach_io_hash(&args[0]) {
-        let mut data = ground_io(io);
-        data.ty = Some(Ty::Str);
-        let content_type = match content_type {
-            Some(ct) if !expr_is_nil(&ct) => ct,
-            _ => content_type_from_filename(&filename),
-        };
+        let Some(recv_expr) = recv.clone() else { return };
         e.diagnostic = None;
-        *args = vec![data, filename, content_type];
+        e.ty = Some(if on_blob { blob_class_ty() } else { Ty::Nil });
+        *e.node = grounded_io_call(recv_expr, name, io, filename, content_type);
         return;
     }
     // A Hash bag that is not a literal `io:`/`filename:` shape, or
     // any other one-argument attachable on the proxy: Rails' attach
     // goes through `from_attachable`. `create_and_upload!` of a Hash
     // is that same coercion (it already creates the blob).
-    if name == "create_and_upload!" {
+    if on_blob {
         if expr_is_hash(&args[0]) {
             e.diagnostic = None;
             *method = Symbol::from("from_attachable");
         }
-        return;
-    }
-    if !(recv_is_attached(recv) || expr_is_hash(&args[0])) {
         return;
     }
     let Some(recv_expr) = recv.clone() else { return };
@@ -172,6 +172,92 @@ fn rewrite_attach(e: &mut Expr) {
     e.diagnostic = None;
     e.ty = Some(Ty::Nil);
     *e.node = attach_blob_from_attachable(recv_expr, attachable);
+}
+
+/// `recv.attach(io:, filename:, content_type?)` with filename bound
+/// once and a nil `content_type` (literal or evaluated) falling back
+/// to `content_type_for_filename`.
+fn grounded_io_call(
+    recv: Expr,
+    method: &str,
+    io: Expr,
+    filename: Expr,
+    content_type: Option<Expr>,
+) -> ExprNode {
+    let span = recv.span;
+    let syn = |node: ExprNode, ty: Ty| {
+        let mut e = Expr::new(span, node);
+        e.ty = Some(ty);
+        e
+    };
+    let fn_name = Symbol::from("_attach_filename");
+    let ct_name = Symbol::from("_attach_content_type");
+    let fn_var = || syn(
+        ExprNode::Var { id: crate::ident::VarId(0), name: fn_name.clone() },
+        Ty::Str,
+    );
+    let ct_var = || syn(
+        ExprNode::Var { id: crate::ident::VarId(0), name: ct_name.clone() },
+        Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+    );
+    let mut data = ground_io(io);
+    data.ty = Some(Ty::Str);
+    let initial_ct = content_type.unwrap_or_else(|| syn(ExprNode::Lit { value: Literal::Nil }, Ty::Nil));
+    let ret_ty = if method == "create_and_upload!" { blob_class_ty() } else { Ty::Nil };
+    ExprNode::Seq {
+        exprs: vec![
+            syn(
+                ExprNode::Assign {
+                    target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: fn_name.clone() },
+                    value: filename,
+                },
+                Ty::Str,
+            ),
+            syn(
+                ExprNode::Assign {
+                    target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: ct_name.clone() },
+                    value: initial_ct,
+                },
+                Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+            ),
+            syn(
+                ExprNode::If {
+                    cond: syn(
+                        ExprNode::Send {
+                            recv: Some(ct_var()),
+                            method: Symbol::from("nil?"),
+                            args: vec![],
+                            block: None,
+                            parenthesized: false,
+                        },
+                        Ty::Bool,
+                    ),
+                    then_branch: syn(
+                        ExprNode::Assign {
+                            target: crate::expr::LValue::Var {
+                                id: crate::ident::VarId(0),
+                                name: ct_name.clone(),
+                            },
+                            value: content_type_from_filename_expr(fn_var()),
+                        },
+                        Ty::Str,
+                    ),
+                    else_branch: syn(ExprNode::Lit { value: Literal::Nil }, Ty::Nil),
+                },
+                Ty::Nil,
+            ),
+            syn(
+                ExprNode::Send {
+                    recv: Some(recv),
+                    method: Symbol::from(method),
+                    args: vec![data, fn_var(), ct_var()],
+                    block: None,
+                    parenthesized: true,
+                },
+                ret_ty,
+            ),
+        ],
+    }
 }
 
 fn attach_blob_from_attachable(recv: Expr, attachable: Expr) -> ExprNode {
@@ -186,17 +272,22 @@ fn attach_blob_from_attachable(recv: Expr, attachable: Expr) -> ExprNode {
         e.ty = Some(ty);
         e
     };
-    // Underscored so a caller's `blob` local is not shadowed.
+    // Underscored so a caller's locals are not shadowed. Bind the
+    // receiver first: Ruby evaluates `recv.attach(x)` left-to-right,
+    // and coercing before `recv` would upload an orphaned blob if
+    // `recv` then raised.
+    let recv_name = Symbol::from("_attach_recv");
     let blob = Symbol::from("_attachable_blob");
     let blob_ty = Ty::Union {
-        variants: vec![
-            Ty::Class {
-                id: ClassId(Symbol::from("ActiveStorage::Blob")),
-                args: vec![],
-            },
-            Ty::Nil,
-        ],
+        variants: vec![blob_class_ty(), Ty::Nil],
     };
+    let recv_var = || typed(
+        ExprNode::Var { id: crate::ident::VarId(0), name: recv_name.clone() },
+        Ty::Class {
+            id: ClassId(Symbol::from("ActiveStorage::Attached")),
+            args: vec![],
+        },
+    );
     let var = || typed(
         ExprNode::Var { id: crate::ident::VarId(0), name: blob.clone() },
         blob_ty.clone(),
@@ -207,10 +298,7 @@ fn attach_blob_from_attachable(recv: Expr, attachable: Expr) -> ExprNode {
                 ExprNode::Const {
                     path: vec![Symbol::from("ActiveStorage"), Symbol::from("Blob")],
                 },
-                Ty::Class {
-                    id: ClassId(Symbol::from("ActiveStorage::Blob")),
-                    args: vec![],
-                },
+                blob_class_ty(),
             )),
             method: Symbol::from("from_attachable"),
             args: vec![attachable],
@@ -221,6 +309,10 @@ fn attach_blob_from_attachable(recv: Expr, attachable: Expr) -> ExprNode {
     );
     ExprNode::Seq {
         exprs: vec![
+            syn(ExprNode::Assign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: recv_name.clone() },
+                value: recv,
+            }),
             syn(ExprNode::Assign {
                 target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: blob.clone() },
                 value: coerce,
@@ -239,7 +331,7 @@ fn attach_blob_from_attachable(recv: Expr, attachable: Expr) -> ExprNode {
                     ),
                     then_branch: syn(ExprNode::Lit { value: Literal::Nil }),
                     else_branch: syn(ExprNode::Send {
-                        recv: Some(recv),
+                        recv: Some(recv_var()),
                         method: Symbol::from("attach_blob"),
                         args: vec![var()],
                         block: None,
@@ -249,6 +341,13 @@ fn attach_blob_from_attachable(recv: Expr, attachable: Expr) -> ExprNode {
                 Ty::Nil,
             ),
         ],
+    }
+}
+
+fn blob_class_ty() -> Ty {
+    Ty::Class {
+        id: ClassId(Symbol::from("ActiveStorage::Blob")),
+        args: vec![],
     }
 }
 
@@ -341,7 +440,7 @@ fn ground_io(io: Expr) -> Expr {
     )
 }
 
-fn content_type_from_filename(filename: &Expr) -> Expr {
+fn content_type_from_filename_expr(filename: Expr) -> Expr {
     let span = filename.span;
     let mut expr = Expr::new(
         span,
@@ -351,7 +450,7 @@ fn content_type_from_filename(filename: &Expr) -> Expr {
                 ExprNode::Const { path: vec![Symbol::from("ActiveStorage")] },
             )),
             method: Symbol::from("content_type_for_filename"),
-            args: vec![filename.clone()],
+            args: vec![filename],
             block: None,
             parenthesized: true,
         },
@@ -362,6 +461,16 @@ fn content_type_from_filename(filename: &Expr) -> Expr {
 
 fn recv_is_attached(recv: &Option<Expr>) -> bool {
     recv.as_ref().and_then(|r| r.ty.as_ref()).is_some_and(ty_is_attached)
+}
+
+fn recv_is_blob_class(recv: &Option<Expr>) -> bool {
+    let Some(r) = recv else { return false };
+    if let ExprNode::Const { path } = &*r.node {
+        if path.last().is_some_and(|s| s.as_str() == "Blob") {
+            return true;
+        }
+    }
+    r.ty.as_ref().is_some_and(ty_is_blob_class)
 }
 
 fn ty_is_attached(ty: &Ty) -> bool {
@@ -375,12 +484,19 @@ fn ty_is_attached(ty: &Ty) -> bool {
     }
 }
 
-fn expr_is_hash(e: &Expr) -> bool {
-    matches!(&*e.node, ExprNode::Hash { .. }) || e.ty.as_ref().is_some_and(ty_is_hash)
+fn ty_is_blob_class(ty: &Ty) -> bool {
+    match ty {
+        Ty::Class { id, .. } => {
+            let name = id.0.as_str();
+            name == "ActiveStorage::Blob" || name == "Blob"
+        }
+        Ty::Union { variants } => variants.iter().any(ty_is_blob_class),
+        _ => false,
+    }
 }
 
-fn expr_is_nil(e: &Expr) -> bool {
-    matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
+fn expr_is_hash(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Hash { .. }) || e.ty.as_ref().is_some_and(ty_is_hash)
 }
 
 fn ty_is_hash(ty: &Ty) -> bool {

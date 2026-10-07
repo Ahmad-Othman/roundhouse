@@ -125,11 +125,12 @@ module ActiveStorage
   end
 
   # Marcel's filename half when `attach(io:, filename:)` omits
-  # `content_type:` — the extension's registered type, or the same
-  # octet-stream `content_type_for_format` uses for an unknown format.
+  # `content_type:` — the MIME registry by extension, else octet-stream.
   # Byte sniffing stays with `ImageAnalyzer` after the bytes exist.
   def self.content_type_for_filename(filename)
-    content_type_for_format(Filename.new(filename).extension_without_delimiter)
+    ext = Filename.new(filename).extension_without_delimiter
+    looked = Mime::Type.lookup_by_extension(ext)
+    looked.nil? ? "application/octet-stream" : looked.to_s
   end
 
   # Where the blob's file lives, keyed by the blob's `key` column.
@@ -1239,8 +1240,14 @@ module ActiveStorage
     # first. Rails detaches the old blob and leaves it for a purge job;
     # there is no job here and an orphaned blob row would make
     # `attached?` answer for a file no longer attached, so the row and
-    # its bytes go with it.
+    # its bytes go with it — except when `blob` is ALREADY attached:
+    # re-attaching the same Blob must not purge its bytes.
     def attach_blob(blob)
+      load_row
+      current = @blob
+      if !(current.nil?) && current.id == blob.id
+        return nil
+      end
       purge
       ActiveRecord.adapter.insert("active_storage_attachments", {
         "name" => @name,

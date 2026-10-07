@@ -86,6 +86,23 @@ fn app() -> emit_and_run::Overlay {
     end
     doc
   end
+
+  def self.attach_pdf_by_filename
+    doc = create!(name: "pdf")
+    File.write("report.bin", "hello-bytes")
+    File.open("report.bin", "rb") do |file|
+      doc.file.attach(io: file, filename: "report.pdf")
+    end
+    doc
+  end
+
+  def self.reattach_same_blob
+    doc = attach_positional
+    blob = doc.file.blob
+    raise "missing blob" if blob.nil?
+    doc.file.attach_blob(blob)
+    doc
+  end
 end
 "#,
         )
@@ -110,8 +127,18 @@ check(Doc.attach_positional, "positional")
 check(Doc.attach_literal, "literal")
 check(Doc.attach_from_yield, "bag")
 check(Doc.attach_from_kwargs_yield, "kwargs")
+
+pdf = Doc.attach_pdf_by_filename
+raise "pdf type #{pdf.file.content_type}" unless pdf.file.content_type == "application/pdf"
+
+same = Doc.reattach_same_blob
+raise "same-blob still attached?" unless same.file.attached?
+blob = same.file.blob
+raise "same-blob missing" if blob.nil?
+raise "same-blob bytes lost" unless blob.download == "hello-bytes"
+
 puts "attach forms passed"
-"##,
+"##
         )
         .assert_passes();
 }

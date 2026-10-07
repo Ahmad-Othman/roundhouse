@@ -67,9 +67,12 @@ end
     );
     let body = method_body(&src, "put_literal");
     assert!(
-        body.contains(r#"file.attach("bytes", "a.png", "image/png")"#)
-            || body.contains("attach(\"bytes\", \"a.png\", \"image/png\")"),
-        "literal io hash must ground to three strings:\n{body}"
+        body.contains("_attach_filename") && body.contains("attach(\"bytes\""),
+        "literal io hash must ground io and bind filename:\n{body}"
+    );
+    assert!(
+        body.contains("\"image/png\""),
+        "supplied content_type must be kept:\n{body}"
     );
     assert!(
         !body.contains("from_attachable"),
@@ -94,7 +97,7 @@ end
         "missing content_type must be the filename's type:\n{body}"
     );
     assert!(
-        body.contains("attach(\"bytes\"") || body.contains("attach(\"bytes\","),
+        body.contains("attach(\"bytes\""),
         "io must still be grounded to bytes:\n{body}"
     );
 }
@@ -112,7 +115,7 @@ end
     );
     let body = method_body(&src, "put_nil_type");
     assert!(
-        body.contains("content_type_for_filename"),
+        body.contains("content_type_for_filename") && body.contains("_attach_content_type.nil?"),
         "nil content_type must fall back to the filename:\n{body}"
     );
 }
@@ -128,9 +131,12 @@ fn a_hash_bag_becomes_attach_attachable() {
 end
 "#,
     );
+    let body = method_body(&src, "put_bag");
     assert!(
-        src.contains("from_attachable(attachment)") && src.contains("attach_blob"),
-        "a Hash/attachable value must go through from_attachable:\n{src}"
+        body.contains("_attach_recv")
+            && body.contains("from_attachable(attachment)")
+            && body.contains("attach_blob"),
+        "bag must bind recv first then from_attachable:\n{body}"
     );
 }
 
@@ -157,7 +163,7 @@ end
 }
 
 fn method_body<'a>(src: &'a str, name: &str) -> &'a str {
-    let needle = format!("def {name}\n");
+    let needle = format!("def {name}");
     let at = src.find(&needle).unwrap_or_else(|| panic!("missing {name} in\n{src}"));
     let rest = &src[at..];
     rest.split("\n  def ").next().unwrap_or(rest)
