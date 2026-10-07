@@ -104,11 +104,20 @@ module Rails
       entry = @shards[s][k]
       return nil if entry.nil?
       if expired?(entry)
+        # Re-check under the shard lock. A write that landed after the
+        # first observation must be returned, not discarded as a miss.
+        encoded = nil
         @mutexes[s].synchronize do
           entry = @shards[s][k]
-          @shards[s].delete(k) if entry && expired?(entry)
+          if entry.nil?
+            # miss
+          elsif expired?(entry)
+            @shards[s].delete(k)
+          else
+            encoded = entry[0]
+          end
         end
-        return nil
+        return encoded.is_a?(String) ? encoded : nil
       end
       encoded = entry[0]
       encoded.is_a?(String) ? encoded : nil
@@ -154,11 +163,18 @@ module Rails
       entry = @shards[s][k]
       return nil if entry.nil?
       if expired?(entry)
+        encoded = nil
         @mutexes[s].synchronize do
           entry = @shards[s][k]
-          @shards[s].delete(k) if entry && expired?(entry)
+          if entry.nil?
+            # miss
+          elsif expired?(entry)
+            @shards[s].delete(k)
+          else
+            encoded = entry[0]
+          end
         end
-        return nil
+        return encoded.nil? ? nil : decode(encoded)
       end
       decode(entry[0])
     end

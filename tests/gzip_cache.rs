@@ -293,27 +293,35 @@ raise "ttl prime" unless store.read_str("ttl-k") == "old"
 sleep 1.05
 raise "ttl still live" unless store.read_str("ttl-k").nil?
 
-# Expired-eviction re-check: plant a stale entry, race a fresh write
-# against read_str's lazy delete — the fresh value must survive.
+# Expired-eviction re-check: reader observes stale, blocks on the shard
+# lock, a fresher entry is installed before the lock is released — must
+# return the fresh String, not nil (the bug if delete's miss path always
+# returned after the re-check).
 k = "race-ttl"
 s = store.send(:shard_of, k)
 past = Process.clock_gettime(Process::CLOCK_MONOTONIC) - 10
-store.instance_variable_get(:@shards)[s][k] = ["stale".freeze, past]
-ready = Queue.new
-t_write = Thread.new do
-  ready.pop
-  store.write_str(k, "fresh", 0)
+shards = store.instance_variable_get(:@shards)
+mutexes = store.instance_variable_get(:@mutexes)
+shards[s][k] = ["stale".freeze, past]
+held = Queue.new
+release = Queue.new
+results = Queue.new
+locker = Thread.new do
+  mutexes[s].synchronize do
+    held << true
+    release.pop
+  end
 end
-t_read = Thread.new do
-  ready.pop
-  store.read_str(k)
-end
-ready << true
-ready << true
-t_write.join
-t_read.join
-final = store.read_str(k)
-raise "lost fresh write: #{final.inspect}" unless final == "fresh"
+held.pop
+reader = Thread.new { results << store.read_str(k) }
+sleep 0.05
+shards[s][k] = ["fresh".freeze, nil]
+release << true
+locker.join
+reader.join
+got = results.pop
+raise "recheck missed fresh: #{got.inspect}" unless got == "fresh"
+raise "store lost fresh" unless store.read_str(k) == "fresh"
 
 # Multi-thread Puma shape: many keys across shards, RMW increment, mixed
 # read_str / write_str. No lost increments; every written key readable.
