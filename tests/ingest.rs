@@ -592,34 +592,129 @@ end
     );
 }
 
+/// A route omission is an error on the recovered table, not a fatal parse.
 #[test]
-fn routes_mount_drops_as_recognized_gap() {
-    // `mount SomeEngine` is external code, never part of the
-    // transpiled app: strict ingest drops the route (the modeled
-    // truth, like `to: redirect(...)`), survey runs get a ledger
-    // line so the drop stays visible.
+fn routes_mount_diagnostic_preserves_siblings_in_every_mode() {
     let source = br#"Rails.application.routes.draw do
   mount Sidekiq::Web, at: "sidekiq"
   get "/posts", to: "posts#index"
 end
 "#;
-
-    let (strict, _) = roundhouse::ingest::prism::scope(|| {
-        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
-    });
-    let table = strict.expect("strict ingest tolerates mount");
-    assert_eq!(table.entries.len(), 1, "mount drops, the sibling route survives");
+    let strict = roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+        .expect("mount diagnostics do not abort ingest");
+    assert_eq!(strict.entries.len(), 1);
+    assert_eq!(strict.diagnostics.len(), 1);
+    let diagnostic = &strict.diagnostics[0];
+    assert_eq!(diagnostic.severity, roundhouse::diagnostic::Severity::Error);
+    assert!(!diagnostic.span.is_synthetic());
+    assert_eq!(&source[diagnostic.span.start as usize..diagnostic.span.end as usize],
+        br#"mount Sidekiq::Web, at: "sidekiq""#);
 
     roundhouse::ingest::survey::activate();
-    let (result, _) = roundhouse::ingest::prism::scope(|| {
-        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
-    });
+    let result = roundhouse::ingest::ingest_routes(source, "config/routes.rb");
     let gaps = roundhouse::ingest::survey::drain();
-    result.expect("survey ingest succeeds");
-    assert!(
-        gaps.iter().any(|g| format!("{g:?}").contains("mount")),
-        "the mount drop is ledgered, not silent: {gaps:?}"
-    );
+    let surveyed = result.expect("survey ingest succeeds");
+    assert_eq!(surveyed.entries, strict.entries);
+    assert_eq!(surveyed.diagnostics, strict.diagnostics);
+    assert_eq!(gaps.len(), 1, "one survey ledger entry: {gaps:?}");
+}
+
+/// Draw files retain their own source attribution and share mount recovery.
+#[test]
+fn mounts_in_split_route_files_keep_the_split_file_span() {
+    let table = roundhouse::ingest::routes::ingest_routes_with_draws(
+        b"Rails.application.routes.draw do\n  draw :admin\nend\n",
+        "config/routes.rb",
+        &std::collections::HashMap::from([("admin".to_string(), (
+            b"mount Catalog::Engine, at: '/catalog'\nget '/ok', to: 'posts#index'\n".to_vec(),
+            "config/routes/admin.rb".to_string(),
+        ))]),
+    ).unwrap();
+    assert_eq!(table.entries.len(), 1);
+    assert_eq!(table.diagnostics.len(), 1);
+    assert_eq!(table.diagnostics[0].span.file,
+        roundhouse::ingest::sources::file_id("config/routes/admin.rb"));
+}
+
+/// A top-level draw is transparent to the fixed runtime cable mount.
+#[test]
+fn top_level_draw_preserves_runtime_cable_mount_context() {
+    let table = roundhouse::ingest::routes::ingest_routes_with_draws(
+        b"Rails.application.routes.draw do\n  draw :cable\nend\n",
+        "config/routes.rb",
+        &std::collections::HashMap::from([("cable".to_string(), (
+            b"mount ActionCable.server => '/cable'\n".to_vec(),
+            "config/routes/cable.rb".to_string(),
+        ))]),
+    ).unwrap();
+    assert!(table.diagnostics.is_empty(), "{table:?}");
+}
+
+/// Transparent draw/concern expansion inherits its invocation's mount scope.
+#[test]
+fn cable_mounts_inherit_draw_and_concern_scope() {
+    let draws = std::collections::HashMap::from([("cable".to_string(), (
+        b"mount ActionCable.server => '/cable'\n".to_vec(),
+        "config/routes/cable.rb".to_string(),
+    ))]);
+    for (body, expected) in [
+        ("draw :cable", 0),
+        ("namespace :admin do\n draw :cable\nend", 1),
+        ("concern :live do\n mount ActionCable.server => '/cable'\nend\nconcerns :live", 0),
+        ("concern :live do\n mount ActionCable.server => '/cable'\nend\nnamespace :admin do\n concerns :live\nend", 1),
+        ("concern :live do\n mount ActionCable.server => '/cable'\nend\nresources :widgets, concerns: :live", 1),
+        ("constraints id: /[0-9]+/ do\n mount ActionCable.server => '/cable'\nend", 1),
+        ("authenticated :user do\n mount ActionCable.server => '/cable'\nend", 1),
+        ("unauthenticated :user do\n mount ActionCable.server => '/cable'\nend", 1),
+        ("devise_scope :user do\n mount ActionCable.server => '/cable'\nend", 1),
+        ("if Rails.env.development?\n mount ActionCable.server => '/cable'\nend", 1),
+    ] {
+        let source = format!("Rails.application.routes.draw do\n{body}\nend\n");
+        let table = roundhouse::ingest::routes::ingest_routes_with_draws(
+            source.as_bytes(), "config/routes.rb", &draws,
+        ).unwrap();
+        assert_eq!(table.diagnostics.len(), expected, "{body}: {table:?}");
+        for diagnostic in &table.diagnostics {
+            let span = diagnostic.span;
+            let origin = if span.file == roundhouse::ingest::sources::file_id("config/routes/cable.rb") {
+                draws["cable"].0.as_slice()
+            } else {
+                source.as_bytes()
+            };
+            assert_eq!(&origin[span.start as usize..span.end as usize],
+                b"mount ActionCable.server => '/cable'", "{body}: located mount");
+        }
+    }
+}
+
+/// A loaded file's own draw opens a fresh mapper, then restores the caller's
+/// scope. Draw inclusion instead keeps the caller's mapper.
+#[test]
+fn loaded_route_draw_resets_and_restores_mount_scope() {
+    let loaded = b"Rails.application.routes.draw do\n mount ActionCable.server => '/cable'\n mount Catalog::Engine, at: '/catalog'\n get '/ok', to: 'posts#index'\nend\n";
+    for include in [
+        "load Rails.root.join('config/routes/cable.rb')",
+        "instance_eval(File.read(Rails.root.join('config/routes/cable.rb')))",
+    ] {
+        let source = format!("Rails.application.routes.draw do\n namespace :admin do\n  {include}\n  mount ActionCable.server => '/cable'\n end\n mount ActionCable.server => '/cable'\nend\n");
+        let table = roundhouse::ingest::routes::ingest_routes_with_draws(
+            source.as_bytes(), "config/routes.rb",
+            &std::collections::HashMap::from([("cable".to_string(), (
+                loaded.to_vec(), "config/routes/cable.rb".to_string(),
+            ))]),
+        ).unwrap();
+        assert_eq!(table.diagnostics.len(), 2, "{include}: {table:?}");
+        assert_eq!(table.diagnostics[0].span.file,
+            roundhouse::ingest::sources::file_id("config/routes/cable.rb"));
+        let span = table.diagnostics[0].span;
+        assert_eq!(&loaded[span.start as usize..span.end as usize],
+            b"mount Catalog::Engine, at: '/catalog'");
+        assert_eq!(table.diagnostics[1].span.file,
+            roundhouse::ingest::sources::file_id("config/routes.rb"));
+        assert!(table.entries.iter().any(|r| matches!(r,
+            roundhouse::RouteSpec::Explicit { path, .. } if path == "/ok")),
+            "the loaded sibling stays at top scope: {table:?}");
+    }
 }
 
 #[test]
