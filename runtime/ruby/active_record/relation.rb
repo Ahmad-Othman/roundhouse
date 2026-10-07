@@ -885,11 +885,7 @@ module ActiveRecord
       end
       if @includes.length > 0 && !@skip_preloading && records.length > 0
         pending = ActiveRecord::PendingPreload.new(@model, records, @includes.dup)
-        i = 0
-        while i < records.length
-          records[i]._pend_preload(pending)
-          i += 1
-        end
+        records.each { |record| record._pend_preload(pending) }
       end
       records
     end
