@@ -412,10 +412,12 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ClassId(Symbol::from("ActiveStorage::Previewer::VideoPreviewer")),
             video_previewer,
         );
-        classes.insert(
-            ClassId(Symbol::from("ActiveStorage::PreviewError")),
-            ClassInfo::default(),
-        );
+        // Rails' error hierarchy: `PreviewError < Error < StandardError`.
+        let as_error_id = ClassId(Symbol::from("ActiveStorage::Error"));
+        classes.insert(as_error_id.clone(), ClassInfo::default());
+        let mut preview_error = ClassInfo::default();
+        preview_error.parent = Some(as_error_id);
+        classes.insert(ClassId(Symbol::from("ActiveStorage::PreviewError")), preview_error);
 
         // The multipart part a permitted `has_one_attached` field
         // carries (`runtime/spinel/multipart.rbs` verbatim): what the

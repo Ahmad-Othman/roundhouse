@@ -195,11 +195,17 @@ module ActiveStorage
     end
   end
 
+  # Rails' generic Active Storage exception base (`activestorage/errors.rb`).
+  # Concrete errors hang off this so `rescue ActiveStorage::Error` matches.
+  class Error < StandardError
+  end
+
   # Rails' `ActiveStorage::PreviewError` — raised when a previewer cannot
   # draw a poster (ffmpeg failed, timed out, …). Apps and railties rescue
   # or raise it; campfire's `TimeLimitedVideoPreviewer` raises it when
-  # the wall-clock limit trips.
-  class PreviewError < StandardError
+  # the wall-clock limit trips. Parent is `Error`, not bare StandardError,
+  # matching Rails.
+  class PreviewError < Error
   end
 
   # The video previewer's swap point. Drawing is the class-side

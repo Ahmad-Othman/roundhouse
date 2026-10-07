@@ -6100,6 +6100,9 @@ raise "wrong parent" unless TimeLimitedVideoPreviewer < ActiveStorage::Previewer
 raise "wrong grandparent" unless TimeLimitedVideoPreviewer < ActiveStorage::Previewer
 raise "TIME_LIMIT" unless TimeLimitedVideoPreviewer::TIME_LIMIT == 10
 raise "PreviewError missing" unless defined?(ActiveStorage::PreviewError)
+raise "Error base missing" unless defined?(ActiveStorage::Error)
+raise "PreviewError parent" unless ActiveStorage::PreviewError < ActiveStorage::Error
+raise "Error parent" unless ActiveStorage::Error < StandardError
 puts "time_limited_video_previewer boot ok"
 "#,
         )
