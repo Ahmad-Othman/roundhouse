@@ -598,18 +598,16 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // in indexed app source (`time_limited_video_previewer`, web-push
     // connection pool, unfurl deadline). They were listed in
     // `RUBY_TOP_LEVEL` (declared-type noise) but never registered, so
-    // Const resolution raised Unsupported. Runtime code already calls
-    // `Process.pid` / `clock_gettime` on every lane; register the class
-    // objects so app Consts resolve the same way. Nested value Consts
-    // (`IO::NULL`, `Process::CLOCK_MONOTONIC`) are empty ClassIds the
-    // way `URI::HTTP` is — enough for Const resolution; method returns
-    // come from the class_methods / send special-cases below.
+    // Const resolution raised Unsupported. Register the class objects
+    // for Const resolution only. Class-method returns for `Process.*`,
+    // `Timeout.timeout`, and `IO.popen` / `copy_stream` live in the
+    // send special-cases (`body/send.rs`) — catalog entries would win
+    // before those cases and kill unit-aware `clock_gettime` (Float for
+    // `:millisecond`). Nested value Consts (`IO::NULL`,
+    // `Process::CLOCK_MONOTONIC`) are empty ClassIds the way `URI::HTTP`
+    // is. Instance methods on an `IO` handle still belong here.
     let io = Ty::Class { id: ClassId(Symbol::from("IO")), args: vec![] };
-    register_stdlib_class(classes, "IO", &[
-        // Block form answers the block; no-block answers the handle.
-        ("popen", Ty::Untyped),
-        ("copy_stream", Ty::Int),
-    ], &[
+    register_stdlib_class(classes, "IO", &[], &[
         ("pid", Ty::Int),
         ("read", Ty::Str),
         ("rewind", Ty::Int),
@@ -617,21 +615,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("close", Ty::Nil),
     ]);
     register_stdlib_class(classes, "IO::NULL", &[], &[]);
-    register_stdlib_class(classes, "Process", &[
-        ("pid", Ty::Int),
-        ("kill", Ty::Int),
-        // Default (no unit / `:float_*`) is Float; send special-case
-        // narrows integer units. Catalog default matches the common path.
-        ("clock_gettime", Ty::Float),
-    ], &[]);
+    register_stdlib_class(classes, "Process", &[], &[]);
     register_stdlib_class(classes, "Process::CLOCK_MONOTONIC", &[], &[]);
     register_stdlib_class(classes, "Process::CLOCK_REALTIME", &[], &[]);
-    // Module + `timeout` class method. Exception is `Timeout::Error`
-    // above. CRuby loads via BUNDLED `require "timeout"`; Spinel gets
-    // `runtime/ruby/timeout.rb`.
-    register_stdlib_class(classes, "Timeout", &[
-        ("timeout", Ty::Untyped),
-    ], &[]);
+    // Module Const only — `timeout` return is the send special-case.
+    // Exception is `Timeout::Error` above. CRuby loads via BUNDLED
+    // `require "timeout"`; Spinel gets `runtime/ruby/timeout.rb`.
+    register_stdlib_class(classes, "Timeout", &[], &[]);
     // JSON dispatch is already intrinsic in BodyTyper and the emitters;
     // a source-backed reference must also recognize its exact namespace.
     register_stdlib_class(classes, "JSON", &[], &[]);

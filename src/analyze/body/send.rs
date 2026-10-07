@@ -573,24 +573,41 @@ impl<'a> BodyTyper<'a> {
             return None;
         }
         let flat = Symbol::from(format!("{}_loaded?", assoc.as_str()));
-        let typed_owner = match owner.ty.as_ref() {
-            Some(Ty::Class { id, .. }) => Some(id),
-            Some(Ty::Union { variants }) => variants.iter().find_map(|v| match v {
-                Ty::Class { id, .. } => Some(id),
-                _ => None,
-            }),
-            _ => None,
-        };
-        if let Some(id) = typed_owner {
+        let has_flat = |id: &ClassId| -> bool {
             let mut current = Some(id);
             for _ in 0..32 {
-                let cls = self.classes().get(current?)?;
+                let Some(cid) = current else { return false };
+                let Some(cls) = self.classes().get(cid) else { return false };
                 if cls.instance_methods.contains_key(&flat) {
-                    return Some(Ty::Bool);
+                    return true;
                 }
                 current = cls.parent.as_ref();
             }
-            return None;
+            false
+        };
+        // Mirror `lower::assoc_loaded::owner_from_typed_recv`: a single
+        // Class admits when it has `<assoc>_loaded?`; a Union admits
+        // only when *every* class alternative does (no first-member
+        // find_map — that would quiet check while emit still refuses).
+        // Typed owners that miss the flat predicate return None — do
+        // not fall through to the unique-name path (that is for
+        // untyped view locals only).
+        match owner.ty.as_ref() {
+            Some(Ty::Class { id, .. }) => {
+                return has_flat(id).then_some(Ty::Bool);
+            }
+            Some(Ty::Union { variants }) => {
+                let ids: Vec<&ClassId> = variants
+                    .iter()
+                    .filter_map(|v| match v {
+                        Ty::Class { id, .. } => Some(id),
+                        _ => None,
+                    })
+                    .collect();
+                return (!ids.is_empty() && ids.iter().all(|id| has_flat(id)))
+                    .then_some(Ty::Bool);
+            }
+            _ => {}
         }
         // Untyped / missing owner type (view local): unique `<assoc>_loaded?`
         // across modeled classes, matching `lower::assoc_loaded`'s

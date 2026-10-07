@@ -3,9 +3,11 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use roundhouse::expr::ExprNode;
 use roundhouse::ingest::ingest_app_from_tree;
+use roundhouse::ty::Ty;
 
-fn diagnostics_for(body: &str) -> Vec<String> {
+fn ingest_index(body: &str) -> roundhouse::App {
     let controller = format!(
         "class XController < ApplicationController\n  def index\n{body}\n    head :ok\n  end\nend\n"
     );
@@ -19,13 +21,47 @@ fn diagnostics_for(body: &str) -> Vec<String> {
         .iter()
         .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
         .collect();
-    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    ingest_app_from_tree(tree).expect("ingest")
+}
+
+fn diagnostics_for(body: &str) -> Vec<String> {
+    let mut app = ingest_index(body);
     let residue = roundhouse::session::analyze_and_lower(&mut app);
     residue
         .iter()
         .chain(roundhouse::analyze::diagnose(&app).iter())
         .map(roundhouse::diagnostic::Diagnostic::to_string)
         .collect()
+}
+
+fn assign_ty(app: &roundhouse::App, name: &str) -> Ty {
+    let ctrl = app
+        .controllers
+        .iter()
+        .find(|c| c.name.0.as_str() == "XController")
+        .expect("XController");
+    let action = ctrl
+        .actions()
+        .find(|a| a.name.as_str() == "index")
+        .expect("index");
+    let ExprNode::Seq { exprs } = &*action.body.node else {
+        panic!("expected Seq body");
+    };
+    for e in exprs {
+        if let ExprNode::Assign {
+            target: roundhouse::expr::LValue::Var { name: n, .. },
+            value,
+        } = &*e.node
+        {
+            if n.as_str() == name {
+                return value
+                    .ty
+                    .clone()
+                    .unwrap_or_else(|| panic!("no ty on {name}"));
+            }
+        }
+    }
+    panic!("no assignment to {name}");
 }
 
 #[test]
@@ -80,4 +116,22 @@ fn process_clock_and_timeout_consts_resolve() {
             "{name} should resolve: {diags:?}"
         );
     }
+}
+
+#[test]
+fn process_clock_gettime_unit_narrows() {
+    // Catalog must not register a fixed Float for clock_gettime — the
+    // send special-case owns unit narrowing (`:millisecond` → Int).
+    let mut app = ingest_index(
+        r#"    t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    ms = Process.clock_gettime(Process::CLOCK_MONOTONIC, :millisecond)
+    fm = Process.clock_gettime(Process::CLOCK_MONOTONIC, :float_millisecond)
+    n = Process.pid
+    [t, ms, fm, n]"#,
+    );
+    let _ = roundhouse::session::analyze_and_lower(&mut app);
+    assert_eq!(assign_ty(&app, "t"), Ty::Float);
+    assert_eq!(assign_ty(&app, "ms"), Ty::Int);
+    assert_eq!(assign_ty(&app, "fm"), Ty::Float);
+    assert_eq!(assign_ty(&app, "n"), Ty::Int);
 }
