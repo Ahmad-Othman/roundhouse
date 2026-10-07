@@ -716,6 +716,14 @@ impl Analyzer {
                             .entry((name.clone(), m.name.clone()))
                             .or_insert(Ty::Untyped);
                     }
+                    // Flat `<name>_loaded?` — same Bool `model_to_library`
+                    // synthesizes for emit. Registered here so `check`
+                    // (no post-analyze lower) can type
+                    // `message.boosts.loaded?` via `assoc_loaded_ty`
+                    // without cataloguing Relation `#loaded?`.
+                    cls.instance_methods
+                        .entry(Symbol::from(format!("{}_loaded?", name.as_str())))
+                        .or_insert(Ty::Bool);
                 }
                 cls.instance_methods.insert(name, ty.clone());
                 cls.instance_methods.entry(writer).or_insert(ty);
@@ -753,6 +761,17 @@ impl Analyzer {
                             ModelBodyItem::Association { assoc, .. } => {
                                 let (name, ty) = association_member_ty(assoc);
                                 let writer = Symbol::from(format!("{}=", name.as_str()));
+                                if matches!(
+                                    assoc,
+                                    crate::dialect::Association::HasMany { .. }
+                                ) {
+                                    cls.instance_methods
+                                        .entry(Symbol::from(format!(
+                                            "{}_loaded?",
+                                            name.as_str()
+                                        )))
+                                        .or_insert(Ty::Bool);
+                                }
                                 cls.instance_methods.entry(name).or_insert(ty.clone());
                                 cls.instance_methods.entry(writer).or_insert(ty);
                                 for (name, ty) in association_builder_members(assoc) {

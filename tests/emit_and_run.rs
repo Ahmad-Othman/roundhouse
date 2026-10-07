@@ -7717,6 +7717,79 @@ fn controller_name_instance_variable_set_runs_on_show() {
 }
 
 #[test]
+fn campfire_capture_stdlib_consts_run() {
+    // Campfire tip's TimeLimitedVideoPreviewer#capture and web-push pool
+    // name IO / Timeout / Process. Registering them clears check errors;
+    // this pin proves the emitted Ruby actually runs those Consts
+    // (invariant 6) — without claiming the full ActiveStorage capture
+    // path (#557 lands VideoPreviewer separately).
+    emit_and_run::real_blog()
+        .write(
+            "app/models/capture_stdlib_probe.rb",
+            r#"class CaptureStdlibProbe
+  def self.exercise
+    timed_out = false
+    begin
+      Timeout.timeout(0.05) { sleep 1 }
+    rescue Timeout::Error
+      timed_out = true
+    end
+    raise "Timeout.timeout did not fire" unless timed_out
+
+    pid = Process.pid
+    raise "Process.pid" unless pid.is_a?(Integer) && pid > 0
+
+    clock = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    raise "CLOCK_MONOTONIC" unless clock.is_a?(Float)
+
+    out = IO.popen(["echo", "hi"], in: IO::NULL, err: IO::NULL) { |io| io.read }
+    raise "IO.popen" unless out.to_s.include?("hi")
+
+    killed = false
+    IO.popen(["sleep", "30"]) do |io|
+      Process.kill(:KILL, io.pid)
+      killed = true
+    end
+    raise "Process.kill" unless killed
+
+    src = StringIO.new("xy")
+    dst = StringIO.new
+    n = IO.copy_stream(src, dst)
+    raise "IO.copy_stream" unless n == 2 && dst.string == "xy"
+
+    rescued = false
+    begin
+      raise SystemCallError, "x"
+    rescue SystemCallError
+      rescued = true
+    end
+    raise "SystemCallError" unless rescued
+
+    rescued = false
+    begin
+      raise OpenSSL::SSL::SSLError, "x"
+    rescue OpenSSL::SSL::SSLError
+      rescued = true
+    end
+    raise "OpenSSL::SSL::SSLError" unless rescued
+
+    # Vips::Error is registered for Campfire's attachment rescue; the
+    # constant is supplied by ruby-vips at runtime, not by this probe.
+
+    "ok"
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"
+raise "probe" unless CaptureStdlibProbe.exercise == "ok"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
 fn campfire_video_preview_config_runs() {
     // Campfire tip initializer sets video_preview_arguments (gte(t,5))
     // and swaps previewers VideoPreviewer → TimeLimitedVideoPreviewer.
