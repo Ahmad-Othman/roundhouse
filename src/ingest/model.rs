@@ -2496,13 +2496,14 @@ fn parse_association(
             let Some(key) = symbol_value(&assoc.key()) else { continue };
             let value = assoc.value();
             match key.as_str() {
-                "class_name" => class_name = string_value(&value),
+                // `"::Portal"` names the top-level class `Portal`; kept as written it is a class no one defines.
+                "class_name" => class_name = string_value(&value).map(|s| s.trim_start_matches("::").to_string()),
                 "foreign_key" => {
                     foreign_key = string_value(&value).or_else(|| symbol_value(&value))
                 }
                 "through" => through = symbol_value(&value),
                 "source" => source = symbol_value(&value),
-                "source_type" => source_type = string_value(&value),
+                "source_type" => source_type = string_value(&value).map(|s| s.trim_start_matches("::").to_string()),
                 "dependent" => {
                     dependent = symbol_value(&value).and_then(|s| dependent_from_sym(&s))
                 }

@@ -3,6 +3,65 @@
 use std::path::Path;
 use std::process::Command;
 
+const RAW_DICTIONARY_RESPONSE: &str = r#"
+require "zlib"
+if ENV["REJECT_RAW_DICTIONARY"] == "1"
+  # Reproduce JRuby's raw-stream restriction on the default MRI lane.
+  Zlib::Deflate.prepend(Module.new do
+    def set_dictionary(_dictionary)
+      raise Zlib::StreamError, "raw dictionaries unsupported"
+    end
+  end)
+end
+require File.expand_path("runtime/spinel/scaffold/ruby_overlay/runtime/gzip_cache", Dir.pwd)
+
+fragment = ("<p>cached fragment</p>" * 100).freeze
+env = {"REQUEST_METHOD" => "GET", "HTTP_ACCEPT_ENCODING" => "gzip"}
+[false, true].each do |with_fragment|
+  ["A" * 86, "B" * 86].each do |token|
+    raw = ("<p>layout</p>" * 100) + token + ("<p>footer</p>" * 100)
+    raw += fragment + ("<p>tail</p>" * 100) if with_fragment
+    app = lambda do |_env|
+      GzipCache.note_token(token)
+      GzipCache.note_fragment(fragment) if with_fragment
+      [200, {"content-type" => "text/html"}, [raw]]
+    end
+    wrapped = GzipCache.wrap(app)
+    2.times do
+      status, headers, body = wrapped.call(env)
+      raise "status" unless status == 200
+      raise "encoding" unless headers["content-encoding"] == "gzip"
+      raise "round trip" unless Zlib.gunzip(body.join) == raw
+    end
+  end
+end
+puts "ALL OK"
+"#;
+
+fn check_raw_dictionary_response(interpreter: &str, reject_dictionary: bool) {
+    let output = Command::new(interpreter)
+        .args(["-e", RAW_DICTIONARY_RESPONSE])
+        .env("REJECT_RAW_DICTIONARY", if reject_dictionary { "1" } else { "0" })
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("Ruby interpreter available");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "gzip response failed:\n{stdout}\n{stderr}");
+    assert!(stdout.contains("ALL OK"), "gzip response cases did not execute:\n{stdout}");
+}
+
+#[test]
+fn gzip_splicing_survives_missing_raw_dictionary_support() {
+    check_raw_dictionary_response("ruby", true);
+}
+
+#[test]
+#[ignore = "requires JRuby 10 and Java 21+"]
+fn gzip_splicing_executes_on_jruby() {
+    check_raw_dictionary_response("jruby", false);
+}
+
 #[test]
 fn identical_bodies_gzip_once() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -437,6 +496,116 @@ puts "ALL OK"
     assert!(
         stdout.contains("ALL OK"),
         "spliced gzip failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+    assert!(out.status.success(), "driver exited {:?}", out.status.code());
+}
+
+/// The layout text around per-request CSRF tokens: each token the request
+/// mints is cut out (a stored block) and the constant runs between tokens
+/// are deflated once, so after the first request a page whose only
+/// difference is its tokens deflates nothing. Covered: a token used twice,
+/// a page with tokens and no fragment, and a minted token that is not in
+/// the body (the whole-body path, unchanged).
+#[test]
+fn token_cut_text_runs_deflate_once_across_requests() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = r##"
+module Rails
+  class MemoryStore
+    def initialize; @d = {}; end
+    def read_str(k); @d[k]; end
+    def write_str(k, v, _ttl); @d[k] = v.dup.freeze; end
+  end
+end
+require "securerandom"
+require "base64"
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/gzip_cache"
+raise "splice unavailable" unless GzipCache::SPLICE_OK
+
+store = Rails::MemoryStore.new
+store.write_str("coll", (1..300).map { |i| "<div id=\"m#{i}\">Message #{i} — héllo</div>\n" }.join, 0)
+head = (1..80).map { |i| "<link rel=\"stylesheet\" href=\"/assets/s#{i}.css\">\n" }.join
+nav = (1..60).map { |i| "<a href=\"/rooms/#{i}\">Room #{i}</a>\n" }.join
+
+deflates = 0
+orig = GzipCache.method(:raw_deflate)
+GzipCache.define_singleton_method(:raw_deflate) { |d, dict, lv| deflates += 1; orig.call(d, dict, lv) }
+
+bodies = []
+page = lambda do |frag|
+  GzipCache.wrap(lambda { |_e|
+    t1 = Base64.urlsafe_encode64(SecureRandom.random_bytes(64), padding: false)
+    t2 = Base64.urlsafe_encode64(SecureRandom.random_bytes(64), padding: false)
+    GzipCache.note_token(t1)
+    GzipCache.note_token(t2)
+    body = +"<html><head><meta name=\"csrf-token\" content=\"#{t1}\">" << head << "</head><body>" << nav
+    body << store.read_str("coll") if frag
+    body << "<form><input name=\"authenticity_token\" value=\"#{t2}\"></form>" << nav << "<p data-t=\"#{t1}\">x</p></body></html>"
+    bodies << body.dup
+    [200, { "content-type" => "text/html" }, [body]]
+  })
+end
+env = { "REQUEST_METHOD" => "GET", "HTTP_ACCEPT_ENCODING" => "gzip" }
+
+[true, false].each do |frag|
+  app = page.call(frag)
+  _, _, b = app.call(env)
+  raise "round trip first frag=#{frag}" unless Zlib.gunzip(b[0]) == bodies.last.b
+  before = deflates
+  3.times do |i|
+    _, h, b = app.call(env)
+    raise "length #{i}" unless h["content-length"] == b[0].bytesize.to_s
+    raise "round trip #{i} frag=#{frag}" unless Zlib.gunzip(b[0]) == bodies.last.b
+  end
+  raise "deflated #{deflates - before}x after the first request (frag=#{frag})" unless deflates == before
+  whole = Zlib.gzip(bodies.last).bytesize
+  raise "spliced #{b[0].bytesize} B vs whole #{whole} B" unless b[0].bytesize < whole * 1.25
+end
+
+# A minted token that is not in the body, and no fragment: the whole-body path.
+stray = GzipCache.wrap(lambda { |_e|
+  GzipCache.note_token("not-in-the-body-token")
+  [200, { "content-type" => "text/html" }, ["plain page " * 200]]
+})
+_, _, sb = stray.call(env)
+raise "fallback round trip" unless Zlib.gunzip(sb[0]) == ("plain page " * 200).b
+raise "spliced a token-free body" unless GzipCache.splice("plain page " * 200, [], ["not-in-the-body-token"]).nil?
+
+# Randomized: runs from a small vocabulary recur after different
+# predecessors and gaps (tokens of varying length, short stored runs
+# between them, now and then a NUL), so cached pieces are reused under
+# every combination; each body must inflate to itself.
+rng = Random.new(42)
+vocab = (0...6).map { |k| (1..(5 + k * 40)).map { |i| "<li class=\"v#{k}\">item #{i} of #{k}</li>" }.join }
+vocab << "short"
+vocab << ("<p>nul\0inside</p>" * 30)
+400.times do |it|
+  toks = []
+  body = +""
+  (2 + rng.rand(6)).times do
+    body << vocab[rng.rand(vocab.length)]
+    tok = Base64.urlsafe_encode64(SecureRandom.random_bytes(8 + rng.rand(70)), padding: false)
+    toks << tok
+    body << tok
+  end
+  body << vocab[rng.rand(vocab.length)]
+  gz = GzipCache.splice(body, [], toks)
+  next if gz.nil?
+  raise "random round trip #{it}" unless Zlib.gunzip(gz) == body.b
+end
+puts "ALL OK"
+"##;
+    let out = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .current_dir(root)
+        .output()
+        .expect("ruby is on PATH");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("ALL OK"),
+        "token-cut splice failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
     );
     assert!(out.status.success(), "driver exited {:?}", out.status.code());
 }

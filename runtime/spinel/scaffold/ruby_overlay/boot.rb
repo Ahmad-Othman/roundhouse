@@ -107,6 +107,8 @@ require_relative "runtime/action_controller"
 require_relative "runtime/header_validation_cruby"
 # Signed cookies verified once per value per thread, not per request.
 require_relative "runtime/message_verifier_cruby"
+# Masked CSRF tokens XORed with pack/unpack, not 32 `chr`s.
+require_relative "runtime/authenticity_token_cruby"
 # `Hash#to_query`'s nested bracket grammar — a reopen of the shared
 # ViewHelpers' scalar `to_query_value`, so AFTER action_controller's
 # require chain has defined the shared one; the spinel boot's twin line.
@@ -149,6 +151,8 @@ require_relative "runtime/rails_executor"
 # the `UploadedFile` it defines.
 require_relative "runtime/multipart"
 require_relative "runtime/active_storage"
+# Column list and metadata reads without per-load String building.
+require_relative "runtime/active_storage_cruby"
 require_relative "runtime/active_storage_disk"
 # The video previewer over ffmpeg — see the file.
 require_relative "runtime/active_storage_previewer"
@@ -160,6 +164,8 @@ require_relative "runtime/active_storage_previewer"
 # String-identity case, and this overlay's polymorphic is_a? version
 # must redefine it for CRuby's residual dynamic sites.
 require_relative "runtime/action_view_safe_buffer"
+# Set lookup, one regexp scan and appends for the attribute helpers.
+require_relative "runtime/action_view_helpers_cruby"
 # `sanitize` / `strip_tags` / `auto_link` on the REAL rails-html-sanitizer
 # (guarded — an app that never sanitizes boots without the gem, and the
 # shared runtime's scanner stands). AFTER the safe buffer: these return
@@ -201,6 +207,9 @@ require_relative "runtime/active_job"
 # Per-request state per THREAD -- reopens Current, the view slots, the
 # broadcast log, the job queue and the store memo (see the file).
 require_relative "runtime/thread_state"
+# A drain thread per serving process, registered by config.ru. After
+# thread_state: it wraps that file's locked queue methods.
+require_relative "runtime/active_job_cruby"
 # `Turbo::StreamsChannel` — the channel a `<turbo-cable-stream-source>`
 # names, AND the `broadcast_*_to` class methods a model's after_commit
 # reaches (and an app's own tests mock). One constant, both halves, the

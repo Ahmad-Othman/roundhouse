@@ -217,7 +217,8 @@ validates the calendar date.
 
 This is not Ruby's stdlib `date` package. `DateTime`, Julian/Italian
 calendar modes, natural-language and non-ISO parsing, schema date
-defaults, ActiveSupport date extensions, date picker helpers, and
+defaults, ActiveSupport date extensions beyond `Date.current` and the
+month/day edges `time_calendar` lowers, date picker helpers, and
 `require "date"` are not included. `strftime` implements the date
 directives used by the admitted runtime contract and raises on other
 directives. The compiler continues diagnosing those unsupported paths.
