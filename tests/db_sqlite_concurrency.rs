@@ -235,6 +235,40 @@ check("setup failure is nil so checkpoint still runs", got.nil?)
     );
 }
 
+/// After fork, the child must close the inherited checkpoint-lock FD
+/// without LOCK_UN. Otherwise a surviving worker keeps the OFD open
+/// after the parent exits and its new checkpointer stays `:busy` forever
+/// while `wal_autocheckpoint=0` (CodeRabbit on #548 / Puma preload).
+#[test]
+fn adopt_after_fork_closes_inherited_checkpoint_lock() {
+    run(
+        "checkpoint_flock_fork",
+        r#"
+path = Db.instance_variable_get(:@path)
+lock_path = Db.checkpoint_lock_path(path)
+held = Db.try_checkpoint_lock(lock_path)
+check("parent acquired", held.is_a?(File))
+check("Db retained lock file", Db.instance_variable_get(:@checkpoint_lock_file).equal?(held))
+r, w = IO.pipe
+pid = fork do
+  w.close
+  r.read(1)
+  Db.adopt_after_fork
+  got = Db.try_checkpoint_lock(lock_path)
+  exit(got.is_a?(File) ? 0 : 1)
+end
+r.close
+# Drop the parent's FD without unlocking — same as the parent exiting
+# while the child still holds an inherited copy of the OFD.
+held.close
+w.write("x")
+w.close
+_pid, status = Process.wait2(pid)
+check("child acquired after adopt closed inherited FD", status.exitstatus == 0)
+"#,
+    );
+}
+
 /// Once the server asks, serving connections stop checkpointing inside
 /// COMMIT and a background thread copies the log into the database
 /// file instead: the file grows without any request checkpointing.

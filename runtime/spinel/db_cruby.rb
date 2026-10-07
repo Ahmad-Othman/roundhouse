@@ -64,6 +64,10 @@ module Db
   # lease. See `start_checkpointer`.
   @checkpoint_wanted = false
   @checkpointer_pid  = nil
+  # The process-shared flock File while this process holds it. Retained
+  # so `adopt_after_fork` can close the child's inherited copy without
+  # LOCK_UN (parent keeps the lock). Cleared on release.
+  @checkpoint_lock_file = nil
   # Failed resources stay reachable, but never re-enter the free list.
   @quarantined = []
   @missing_connections = 0
@@ -179,6 +183,19 @@ module Db
       # Re-checked under the lock: every worker thread in a fresh child
       # reaches this together on the first request.
       if @owner_pid != Process.pid
+        # Drop the inherited checkpoint-lock FD without LOCK_UN. The
+        # parent may still hold the flock via its own descriptor; if we
+        # unlocked here we would release the parent's hold. Closing the
+        # child copy lets a surviving worker acquire after the parent
+        # exits (Puma preload / clustered fork after checkpointer start).
+        inherited = @checkpoint_lock_file
+        if inherited && !inherited.closed?
+          begin
+            inherited.close
+          rescue StandardError
+          end
+        end
+        @checkpoint_lock_file = nil
         # The parent's handles are simply dropped. They are already
         # discarded by the gem's fork safety, and closing a descriptor
         # this process shares with its parent is not ours to do.
@@ -595,7 +612,10 @@ module Db
     file = nil
     FileUtils.mkdir_p(File.dirname(lock_path))
     file = File.open(lock_path, File::RDWR | File::CREAT, 0644)
-    return file if file.flock(File::LOCK_EX | File::LOCK_NB)
+    if file.flock(File::LOCK_EX | File::LOCK_NB)
+      @checkpoint_lock_file = file
+      return file
+    end
     file.close
     :busy
   rescue StandardError
@@ -607,11 +627,12 @@ module Db
   end
 
   def self.release_checkpoint_lock(file)
-    return if file.nil?
+    return if file.nil? || !file.is_a?(File)
     begin
       file.flock(File::LOCK_UN)
     ensure
       file.close
+      @checkpoint_lock_file = nil if @checkpoint_lock_file.equal?(file)
     end
   rescue StandardError
   end
