@@ -751,17 +751,26 @@ end
 end
 raise "fragment deflated #{fragment_deflates}x (want 2 — once each, not per token)" unless fragment_deflates == 2
 
-# Control: token-free short glue still folds (second fragment uses a dict).
+# Control: token-free short glue still folds. Fold is the second piece
+# being glue+frag (`\n` + turbo-frame). A dictionary is only required
+# when raw dictionaries work; JRuby / #526 passes nil and still folds.
+folded = 0
 dicts = 0
 GzipCache.define_singleton_method(:raw_deflate) do |d, dict, lv|
-  dicts += 1 if lv == Zlib::DEFAULT_COMPRESSION && !dict.nil? && d.include?("turbo-frame")
+  if lv == Zlib::DEFAULT_COMPRESSION && d.start_with?("\n") && d.include?("turbo-frame")
+    folded += 1
+    dicts += 1 unless dict.nil?
+  end
   orig.call(d, dict, lv)
 end
 c = tmpl.call(3)
 d = tmpl.call(4)
 gz = GzipCache.splice(c + "\n" + d, [c, d])
 raise "fold rt" unless Zlib.gunzip(gz) == (c + "\n" + d).b
-raise "token-free glue did not fold (dicts=#{dicts})" unless dicts >= 1
+raise "token-free glue did not fold (folded=#{folded})" unless folded >= 1
+if GzipCache::RAW_DICTIONARY_OK
+  raise "expected dict on fold (dicts=#{dicts})" unless dicts >= 1
+end
 puts "ALL OK"
 "##;
     let out = Command::new("ruby")
@@ -777,4 +786,46 @@ puts "ALL OK"
         "token-bearing glue fold failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
     );
     assert!(out.status.success(), "driver exited {:?}", out.status.code());
+
+    // Same fold control with raw dictionaries refused (#526 / JRuby).
+    let fallback = r#"
+require "zlib"
+Zlib::Deflate.prepend(Module.new do
+  def set_dictionary(_dictionary)
+    raise Zlib::StreamError, "raw dictionaries unsupported"
+  end
+end)
+require File.expand_path("runtime/spinel/scaffold/ruby_overlay/runtime/gzip_cache", Dir.pwd)
+raise "expected no raw dict" if GzipCache::RAW_DICTIONARY_OK
+c = ("<turbo-frame id=\"c\">" + ("<p>x</p>\n" * 80) + "</turbo-frame>\n").freeze
+d = ("<turbo-frame id=\"d\">" + ("<p>y</p>\n" * 80) + "</turbo-frame>\n").freeze
+folded = 0
+dicts = 0
+orig = GzipCache.method(:raw_deflate)
+GzipCache.define_singleton_method(:raw_deflate) do |data, dict, lv|
+  if lv == Zlib::DEFAULT_COMPRESSION && data.start_with?("\n") && data.include?("turbo-frame")
+    folded += 1
+    dicts += 1 unless dict.nil?
+  end
+  orig.call(data, dict, lv)
+end
+body = c + "\n" + d
+raise "fold rt" unless Zlib.gunzip(GzipCache.splice(body, [c, d])) == body.b
+raise "fallback did not fold (folded=#{folded})" unless folded >= 1
+raise "fallback passed a dict (dicts=#{dicts})" unless dicts.zero?
+puts "ALL OK"
+"#;
+    let fb = Command::new("ruby")
+        .arg("-e")
+        .arg(fallback)
+        .current_dir(root)
+        .output()
+        .expect("ruby is on PATH");
+    let fb_out = String::from_utf8_lossy(&fb.stdout);
+    let fb_err = String::from_utf8_lossy(&fb.stderr);
+    assert!(
+        fb_out.contains("ALL OK"),
+        "no-dict fold control failed\n=== stdout ===\n{fb_out}\n=== stderr ===\n{fb_err}"
+    );
+    assert!(fb.status.success(), "fallback driver exited {:?}", fb.status.code());
 }
