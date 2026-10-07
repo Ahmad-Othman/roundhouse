@@ -620,6 +620,7 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
         let synthesized: std::collections::HashSet<String> =
             crate::lower::rich_text::preload_scope_names(model)
                 .into_iter()
+                .chain(crate::lower::plain_text_attr::preload_scope_names(model))
                 .chain(crate::lower::attached::preload_scope_names(model))
                 .map(|n| n.as_str().to_string())
                 .collect();
@@ -635,13 +636,13 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
                 .push((&model.name, per[n].as_slice()));
         }
     }
-    // The SYNTHESIZED preload scopes — `with_attached_<attr>` and
-    // `with_rich_text_<attr>` — which Rails declares beside the
-    // attachment macro and this compiler adds at emit time
-    // (`attached::push_preload_scope_methods` and its rich-text twin).
-    // They never pass through `build_scope_registry`, which reads the
-    // app's own `scope` declarations, so a call CHAINED ON A RELATION
-    // had no delegate at all: campfire's
+    // The SYNTHESIZED preload scopes — `with_attached_<attr>`,
+    // `with_rich_text_<attr>`, `with_markdown_<attr>` — which Rails
+    // declares beside the attachment / Action Text macros and this
+    // compiler adds at emit time. They never pass through
+    // `build_scope_registry`, which reads the app's own `scope`
+    // declarations, so a call CHAINED ON A RELATION had no delegate at
+    // all: campfire's
     // `find_autocompletable_users.with_attached_avatar.ordered` is a
     // NoMethodError on a class method that plainly exists, because the
     // receiver is a relation value and not the class.
@@ -649,16 +650,17 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
     // The delegate is `preload(:<assoc>)`, with no `__scope_` dispatch
     // behind it: there is no arity to detect and no model to pick,
     // because every model that declares the attachment preloads the
-    // same named association (`<attr>_attachment`, `rich_text_<attr>`),
-    // and a model that does not never has the name reached on it. It
-    // used to answer `self` — the scopes were identity while the
-    // readers queried per record — and a delegate that preloads is
-    // what lets the batch loader run when the scope is reached
-    // mid-chain, not only from the class.
+    // same named association (`<attr>_attachment`, `rich_text_<attr>`,
+    // `markdown_<attr>`), and a model that does not never has the name
+    // reached on it. It used to answer `self` — the scopes were
+    // identity while the readers queried per record — and a delegate
+    // that preloads is what lets the batch loader run when the scope is
+    // reached mid-chain, not only from the class.
     let mut preloads: std::collections::BTreeMap<String, String> = Default::default();
     for model in &app.models {
         let scopes = crate::lower::rich_text::preload_scopes(model)
             .into_iter()
+            .chain(crate::lower::plain_text_attr::preload_scopes(model))
             .chain(crate::lower::attached::preload_scopes(model));
         for (n, assoc) in scopes {
             let n = n.as_str().to_string();

@@ -133,6 +133,13 @@ pub struct Ctx {
     /// implicit-self `new` answers "an instance of whichever class
     /// received the call", not of the class the `def` sits in.
     pub class_side: bool,
+    /// Set while typing a class-method whose name is a first-class model
+    /// DSL lowerer (`has_markdown`, `has_rich_text`, …). Those bodies are
+    /// macro templates: association/`scope`/`class_eval` leftovers are
+    /// claimed by the dedicated lowerer at call sites, so attaching
+    /// `ActiveRecord::Base … lacks a shared runtime` on the template
+    /// itself is noise that hides the real ledger.
+    pub claimed_macro_template: bool,
 }
 
 /// User-class dispatch data: table name (if any), instance shape,
@@ -1457,7 +1464,12 @@ impl<'a> BodyTyper<'a> {
                     && !self.owns_operator(recv_ty.as_ref(), method, class_object_receiver) {
                     let gap = match recv_ty.as_ref() {
                         Some(Ty::Class { id, .. }) if matches!(id.0.as_str(), "ActiveModel::Errors" | "ActiveModel::Error") => Some(id.0.as_str()),
-                        Some(Ty::Class { id, .. }) if matches!(id.0.as_str(), "Rails" | "ActiveRecord::Base") => Some(id.0.as_str()),
+                        Some(Ty::Class { id, .. })
+                            if matches!(id.0.as_str(), "Rails" | "ActiveRecord::Base")
+                                && !ctx.claimed_macro_template =>
+                        {
+                            Some(id.0.as_str())
+                        }
                         Some(Ty::Str) if matches!(method.as_str(), "to_date" | "to_time" | "to_datetime" | "in_time_zone" | "to_d" | "as_json") => Some("String extension"),
                         Some(Ty::Hash { .. }) if method.as_str() == "to_sentence" => Some("Hash extension"),
                         _ if method.as_str() == "not_nil!" => Some("not_nil!"),
