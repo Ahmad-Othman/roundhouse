@@ -5127,3 +5127,71 @@ end
         "a runtime instance_variable_set name must stay fail-closed; unresolved = {unresolved:?}"
     );
 }
+
+#[test]
+fn namespaced_class_underscore_instance_variable_set_stays_unresolved() {
+    // `Admin::WidgetsController`.to_s.underscore → `admin/widgets_controller`
+    // at runtime; flattening `/` to `_` would seed the wrong ivar.
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/admin/widgets_controller.rb",
+            r#"class Admin::WidgetsController < ApplicationController
+  def show
+    instance_variable_set("@#{self.class.to_s.underscore}", Widget.find(params[:id]))
+  end
+end
+"#,
+        ),
+        ("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n"),
+        (
+            "app/views/admin/widgets/show.html.erb",
+            "<p><%= @admin_widgets_controller.title %></p>\n",
+        ),
+        ("db/schema.rb", widget_schema()),
+    ]);
+    let unresolved = ivar_unresolved_names(&app);
+    assert!(
+        unresolved.iter().any(|n| n == "admin_widgets_controller"),
+        "namespaced underscore must not flatten `/` into a false ivar; unresolved = {unresolved:?}"
+    );
+}
+
+#[test]
+fn irregular_singularize_instance_variable_set_stays_unresolved() {
+    // App irregular `leaf`/`leaves`: naming → `leaf`, runtime chop → `leave`.
+    // Folding the naming answer would clear a diagnostic the emit cannot honor.
+    let app = app_from_files(&[
+        (
+            "config/initializers/inflections.rb",
+            "ActiveSupport::Inflector.inflections(:en) do |inflect|\n  inflect.irregular \"leaf\", \"leaves\"\nend\n",
+        ),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/leaves_controller.rb",
+            r#"class LeavesController < ApplicationController
+  def show
+    instance_variable_set("@#{controller_name.singularize}", Leaf.find(params[:id]))
+  end
+end
+"#,
+        ),
+        ("app/models/leaf.rb", "class Leaf < ApplicationRecord\nend\n"),
+        ("app/views/leaves/show.html.erb", "<p><%= @leaf.title %></p>\n"),
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table :leaves do |t|\n    t.string :title\n  end\nend\n",
+        ),
+    ]);
+    let unresolved = ivar_unresolved_names(&app);
+    assert!(
+        unresolved.iter().any(|n| n == "leaf"),
+        "irregular singularize must stay fail-closed until runtime matches naming; unresolved = {unresolved:?}"
+    );
+}

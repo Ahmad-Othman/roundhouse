@@ -2228,16 +2228,13 @@ impl Analyzer {
                 }
             }
 
-            // Snapshot each action's ivar bindings (this controller's
-            // own actions only — parent's actions get layered in by
-            // Phase B's `chained_bindings` builder).
+            // Own-action name keys only — ivar bindings are harvested
+            // once below after `action_bodies` is complete (so
+            // `instance_variable_set "@#{helper}"` can fold sibling
+            // methods). Parent actions are layered in by Phase B.
             let mut action_bindings: HashMap<Symbol, HashMap<Symbol, Ty>> = controller
                 .actions()
-                .map(|a| {
-                    let mut ivars = HashMap::new();
-                    extract_ivar_assignments(&a.body, &mut ivars);
-                    (a.name.clone(), ivars)
-                })
+                .map(|a| (a.name.clone(), HashMap::new()))
                 .collect();
             // Body-carrying twin of `action_bindings` — see the field
             // doc on `ControllerMeta::action_bodies`. Seeded
@@ -2308,25 +2305,19 @@ impl Analyzer {
                         if action_bindings.contains_key(&method.name) {
                             continue;
                         }
+                        // Reserve the name so a later concern cannot
+                        // overwrite; bindings come from the harvest
+                        // below once every body is registered.
+                        action_bindings.entry(method.name.clone()).or_default();
                         let mut body = method.body.clone();
                         self.body_typer().analyze_expr(&mut body, &ctx);
-                        let mut ivars = HashMap::new();
-                        extract_ivar_assignments(&body, &mut ivars);
-                        if !ivars.is_empty() {
-                            action_bindings.insert(method.name.clone(), ivars);
-                        }
-                        // Unconditional, unlike `action_bindings` above: a
-                        // concern method with no DIRECT write of its own
-                        // (`authorize`) still needs its typed body on hand
-                        // as a resolution target for
+                        // Unconditional: a concern method with no DIRECT
+                        // write of its own (`authorize`) still needs its
+                        // typed body as a resolution target for
                         // `collect_transitive_filter_ivars`.
                         action_bodies.entry(method.name.clone()).or_insert_with(|| body.clone());
                     }
                 }
-                self.controller_action_meta_cache.insert(
-                    controller.name.clone(),
-                    (action_bindings.clone(), action_bodies.clone()),
-                );
             } else if let Some((cached_bindings, cached_bodies)) =
                 self.controller_action_meta_cache.get(&controller.name)
             {
@@ -2350,11 +2341,10 @@ impl Analyzer {
                 }
             }
 
-            // Re-harvest every method now that `action_bodies` holds the
-            // full includer table. `instance_variable_set "@#{helper}"`
-            // folds against sibling methods (`instance_name`) and this
-            // controller's class name; a first-pass extract that ran
-            // before a later helper was registered would miss it.
+            // Harvest every method once `action_bodies` holds the full
+            // includer table. `instance_variable_set "@#{helper}"` folds
+            // against sibling methods (`instance_name`) and this
+            // controller's class name.
             {
                 let env = ivar_set::IvarNameEnv {
                     self_class: Some(&controller.name),
@@ -2576,7 +2566,9 @@ impl Analyzer {
             // receiver class, so re-fold `instance_variable_set` names
             // against THIS controller. Parent harvest used the class
             // that wrote `include`, which is the wrong demodulize for
-            // a subclass that only inherits the filter.
+            // a subclass that only inherits the filter. Replace the
+            // method's map (do not merge): a stale `@leaf_record` from
+            // the parent's class name must not sit beside `@widget`.
             {
                 let lookup = |n: &Symbol| chained_bodies.get(n).copied();
                 let env = ivar_set::IvarNameEnv {
@@ -2588,15 +2580,11 @@ impl Analyzer {
                 for (name, body) in &chained_bodies {
                     let mut ivars = HashMap::new();
                     extract_ivar_assignments_in(body, &mut ivars, &env);
+                    ivars.retain(|_, v| !v.is_open());
                     if ivars.is_empty() {
                         continue;
                     }
-                    let entry = chained_bindings.entry(name.clone()).or_default();
-                    for (k, v) in ivars {
-                        if !v.is_open() {
-                            entry.insert(k, v);
-                        }
-                    }
+                    chained_bindings.insert(name.clone(), ivars);
                 }
             }
 
@@ -3587,13 +3575,12 @@ impl Analyzer {
     fn type_views_and_tests(&mut self, app: &mut App, global_constants: &body::ConstScope) {
         let ViewSeeds {
             action_ivars_by_view,
-            layout_ivars_by_view,
+            mut layout_ivars_by_view,
             content_partial_ivars,
             mailer_params_by_view,
             mut view_feeders,
             controller_resolutions,
         } = self.view_seeds.take().expect("view seeds after production");
-        let mut layout_ivars_by_view = layout_ivars_by_view;
 
         // Partial-locals channel: we need action/top-level views analyzed first
         // so their expression types are known at each `render` call site. We

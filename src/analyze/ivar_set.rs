@@ -211,6 +211,22 @@ fn fold_send(
         ));
     }
 
+    // `self.controller_name` is the same Kernel method as a receiverless
+    // call — Rails style often writes the explicit form.
+    if matches!(&*recv.node, ExprNode::SelfRef) && args.is_empty() {
+        if let Some(class) = env.self_class {
+            match name {
+                "controller_name" => {
+                    return Some(Folded::Str(controller_name_of(class)));
+                }
+                "controller_path" => {
+                    return Some(Folded::Str(super::controller_view_prefix(class)));
+                }
+                _ => {}
+            }
+        }
+    }
+
     let recv_s = fold_value(recv, env, depth + 1, visiting)?;
     let s = recv_s.as_str();
     let out = match name {
@@ -219,8 +235,20 @@ fn fold_send(
             Some((head, _)) => head.to_string(),
             None => String::new(),
         },
-        "underscore" if args.is_empty() => naming::underscore(s).replace('/', "_"),
-        "singularize" if args.is_empty() => naming::singularize(s),
+        // Keep `/` from `naming::underscore` (matches runtime). A path
+        // segment is not an ivar ident — `is_ivar_ident` fails closed
+        // rather than flattening to `_` and seeding the wrong name.
+        "underscore" if args.is_empty() => naming::underscore(s),
+        // Fold only when `naming` agrees with the grounded runtime's
+        // regular-suffix chop. Irregular / uncountable answers must
+        // stay unresolved until the runtime table matches (inv. 6).
+        "singularize" if args.is_empty() => {
+            let named = naming::singularize(s);
+            if named != runtime_singularize(s) {
+                return None;
+            }
+            named
+        }
         "camelize" | "camelcase" if args.is_empty() => naming::camelize(s),
         "downcase" if args.is_empty() => s.to_ascii_lowercase(),
         "upcase" if args.is_empty() => s.to_ascii_uppercase(),
@@ -251,6 +279,29 @@ fn fold_send(
         _ => return None,
     };
     Some(Folded::Str(out))
+}
+
+/// Regular-suffix singularize — must stay byte-identical to
+/// `ActiveSupport.singularize` in `runtime/ruby/active_support_ext.rb`.
+fn runtime_singularize(s: &str) -> String {
+    if s.is_empty() {
+        return s.to_string();
+    }
+    if s.len() > 3 && s.ends_with("ies") {
+        return format!("{}y", &s[..s.len() - 3]);
+    }
+    if s.ends_with("ses")
+        || s.ends_with("xes")
+        || s.ends_with("zes")
+        || s.ends_with("ches")
+        || s.ends_with("shes")
+    {
+        return s[..s.len() - 2].to_string();
+    }
+    if s.ends_with('s') && !s.ends_with("ss") {
+        return s[..s.len() - 1].to_string();
+    }
+    s.to_string()
 }
 
 fn controller_name_of(class: &ClassId) -> String {
@@ -290,10 +341,13 @@ pub(crate) fn harvest_ivar_set(
 }
 
 /// When the folded ivar name is exactly one model's conventional
-/// name and the RHS is a union that includes that model, keep the
-/// model (and Nil if the union had it). Polymorphic `leaf.leafable`
-/// writes through `instance_variable_set "@#{instance_name}", …`
-/// otherwise leave `@page` as `Page | Section | Picture | nil`.
+/// name and the RHS is a union that includes that model, keep only
+/// that model — Nil and sibling leafable variants are dropped.
+/// Polymorphic `leaf.leafable` written through
+/// `instance_variable_set "@#{instance_name}", …` would otherwise
+/// leave `@page` as `Page | Section | Picture | nil`. After the
+/// filter ran under that name, the template reads a concrete model;
+/// association nilability is not part of the ivar binding.
 fn narrow_to_named_model(
     name: &Symbol,
     ty: Ty,
@@ -318,11 +372,6 @@ fn narrow_to_named_model(
             if !has_model {
                 return ty;
             }
-            // Drop Nil: the ivar holds what `instance_variable_set`
-            // wrote under a name that names this model. A nilable
-            // association type on the RHS is about the association,
-            // not about a template that reads `@page.title` after the
-            // filter ran.
             model_ty
         }
         _ => ty,
@@ -337,9 +386,18 @@ pub(crate) fn models_by_conventional_ivar<'a>(
     for id in models {
         let leaf = naming::demodulize(id.0.as_str());
         let key = Symbol::from(naming::snake_case(leaf).as_str());
-        // First writer wins — a later `Admin::Page` shouldn't steal
-        // the top-level `page` ivar convention from `Page`.
-        out.entry(key).or_insert_with(|| id.clone());
+        let namespaced = id.0.as_str().contains("::");
+        match out.get(&key) {
+            None => {
+                out.insert(key, id.clone());
+            }
+            // Prefer the top-level model when both `Page` and
+            // `Admin::Page` claim `page`, regardless of ingest order.
+            Some(existing) if existing.0.as_str().contains("::") && !namespaced => {
+                out.insert(key, id.clone());
+            }
+            _ => {}
+        }
     }
     out
 }

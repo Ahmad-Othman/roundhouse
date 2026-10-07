@@ -833,8 +833,9 @@ module ActiveSupport
     idx ? s[(idx + 2)..-1].to_s : s
   end
 
-  # Regular-suffix singularize only — the same subset `naming::singularize`
-  # covers for controller→resource folding. Irregular tables stay out.
+  # Regular-suffix singularize only. Analyze folds `String#singularize`
+  # into an ivar name only when this answer matches `naming::singularize`
+  # (irregular / uncountable tables); otherwise the ivar stays unresolved.
   def self.singularize(text)
     s = text.to_s
     return s if s.empty?
