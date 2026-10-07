@@ -11,11 +11,13 @@
 #   * Last-identity compare (`bytesize` then `==`) is ~7 µs; MRI string
 #     hash of a fresh 420 KB body is ~294 µs. wrk hammers one URL, so
 #     the last-hit wins.
-#   * The Hash fallback keys by SHA-256 hex of the body (64 chars), not
-#     the identity bytes and not CRC32. Holding 64 × 420 KB strings as
-#     Hash keys was the RSS cost; CRC32+size could return another body's
-#     gzip on a collision. Digest keys keep the store small and refuse
-#     wrong-body hits. SHA-256 runs only when last-hit misses.
+#   * The Hash fallback keys by the body's String#hash, its size and its
+#     CRC-32 — not the identity bytes (holding 64 × 420 KB strings as Hash
+#     keys was the RSS cost). A wrong-body hit needs a 64-bit hash, the
+#     size and a CRC-32 to collide at once. It used to be SHA-256, which
+#     at 3.5 ms per 460 KB (2 GHz) was a quarter of a request that missed
+#     — and a page with a per-request token always misses. Both String#hash
+#     and Zlib.crc32 are C and run once each per miss.
 #
 # Gzip itself runs outside the lock. HTML only, same skips as tep.
 #
@@ -43,7 +45,6 @@
 # not an offset in the body. A fragment nested inside a later one (a
 # collection miss writes its members, then the collection) is found in
 # order and the container skipped. No fragment found: the paths above.
-require "digest"
 require "zlib"
 
 module GzipCache
@@ -103,7 +104,7 @@ module GzipCache
       spliced = splice(raw, fragments)
       return spliced unless spliced.nil?
     end
-    dig = Digest::SHA256.hexdigest(raw)
+    dig = [raw.hash, raw.bytesize, Zlib.crc32(raw)]
     hit = nil
     @mutex.synchronize do
       hit = @store[dig]
@@ -128,9 +129,14 @@ module GzipCache
 
   # Fragments smaller than this are left in the per-request text: a piece
   # costs a WeakKeyMap lookup (one hash of the fragment) and a flush.
-  SPLICE_MIN = 4096
+  SPLICE_MIN = 1024
   # Deflate's window, and so the most preset dictionary that can matter.
   WINDOW = 32 * 1024
+  # Text pieces shorter than this go out as stored (uncompressed) deflate
+  # blocks. Between consecutive fragments (search results, a message list)
+  # the text is a few bytes of glue, and a Deflate per piece spent its time
+  # in set_dictionary on 32 KB it would barely use: 26% of the search page.
+  STORE_MAX = 1024
   # gzip member header: deflate, no flags, mtime 0, no extra flags, Unix.
   GZIP_HEADER = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03".b.freeze
   # A final, empty, fixed-Huffman block: ends the deflate stream after
@@ -243,9 +249,16 @@ module GzipCache
   # The per-request text `data`, starting at byte `pos`: fastest level, with the
   # body's real preceding bytes (up to the window) as its dictionary.
   def self.splice_text(out, raw, pos, data, crc)
-    start = pos > WINDOW ? pos - WINDOW : 0
-    dict = pos.zero? ? nil : raw.byteslice(start, pos - start)
-    out << raw_deflate(data, dict, Zlib::BEST_SPEED)
+    if data.bytesize < STORE_MAX
+      # A stored block: BFINAL 0, BTYPE 00, padded to the byte boundary the
+      # previous piece's SYNC_FLUSH left, then LEN, ~LEN and the bytes.
+      n = data.bytesize
+      out << [0, n, n ^ 0xffff].pack("Cvv") << data.b
+    else
+      start = pos > WINDOW ? pos - WINDOW : 0
+      dict = pos.zero? ? nil : raw.byteslice(start, pos - start)
+      out << raw_deflate(data, dict, Zlib::BEST_SPEED)
+    end
     Zlib.crc32_combine(crc, Zlib.crc32(data), data.bytesize)
   end
 

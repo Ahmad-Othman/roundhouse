@@ -243,8 +243,9 @@ env = { "REQUEST_METHOD" => "GET", "HTTP_ACCEPT_ENCODING" => "gzip" }
 wrapped.call(env)
 wrapped.call(env)
 raise "gzipped #{n} times" unless n == 1
+# Keys are [String#hash, bytesize, CRC-32] — small, never the body itself.
 keys = GzipCache.instance_variable_get(:@store).keys
-raise "non-digest key #{keys.inspect}" unless keys.all? { |k| k.is_a?(String) && k.bytesize == 64 }
+raise "key holds a body #{keys.inspect}" unless keys.all? { |k| k.is_a?(Array) && k.length == 3 && k.all?(Integer) }
 puts "ALL OK"
 "#;
     let out = Command::new("ruby")
