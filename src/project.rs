@@ -4377,6 +4377,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         files.push((format!("sig/runtime/{stem}.rbs"), rbs));
     }
 
+    // View buffer capacity memo — returning wrappers call
+    // ViewBufferCap.alloc/store (lower::view_buffer_passing). Spinel
+    // stub + CRuby overlay share this contract.
+    {
+        let rbs = crate::runtime_files::read_to_string("runtime/spinel/view_buffer_cap.rbs")
+            .map_err(|e| format!("read runtime/spinel/view_buffer_cap.rbs: {e}"))?;
+        files.push(("sig/runtime/view_buffer_cap.rbs".to_string(), rbs));
+    }
+
     // `db_jruby.rb` is the JRuby/JDBC Db backend — it uses Java interop
     // (`java_import`, `Java::`) that the CRuby and Spinel toolchains (and
     // the spinel-subset compliance gate) must never see. It is injected
