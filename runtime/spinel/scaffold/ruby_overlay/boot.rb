@@ -210,6 +210,10 @@ require_relative "runtime/thread_state"
 # A drain thread per serving process, registered by config.ru. After
 # thread_state: it wraps that file's locked queue methods.
 require_relative "runtime/active_job_cruby"
+# Returning view wrappers call ViewBufferCap.alloc/store (see
+# lower::view_buffer_passing). Overlay: Thread.current memo +
+# String.new(capacity:) from the last render of that page/action.
+require_relative "runtime/view_buffer_cap"
 # `Turbo::StreamsChannel` — the channel a `<turbo-cable-stream-source>`
 # names, AND the `broadcast_*_to` class methods a model's after_commit
 # reaches (and an app's own tests mock). One constant, both halves, the
