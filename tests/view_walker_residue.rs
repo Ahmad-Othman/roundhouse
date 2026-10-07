@@ -206,6 +206,10 @@ end
         "small collections skip the store (cost gate):\n{body}"
     );
     assert!(
+        body.contains("__cc_collection_"),
+        "collection expression is bound once before the gate:\n{body}"
+    );
+    assert!(
         residues(&diags).is_empty(),
         "cached: true is not residue: {diags:?}"
     );

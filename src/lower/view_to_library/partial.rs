@@ -401,6 +401,10 @@ fn wrap_cached_collection(
     }
 
     let uniq = span.start;
+    // Bind once: `collection:` may be a stateful expression (e.g. `next_batch()`).
+    // The length gate, cache key walk, and each-paths must all see the same value.
+    let collection_name = Symbol::from(format!("__cc_collection_{uniq}"));
+    let collection_ref = || var_ref(collection_name.clone());
     let key_name = Symbol::from(format!("__cc_key_{uniq}"));
     let hit_name = Symbol::from(format!("__cc_hit_{uniq}"));
     let rec_name = Symbol::from(format!("__cc_r_{uniq}"));
@@ -486,7 +490,7 @@ fn wrap_cached_collection(
         },
     );
     let build_key = send(
-        Some(collection.clone()),
+        Some(collection_ref()),
         "each",
         Vec::new(),
         Some(key_lambda),
@@ -530,7 +534,13 @@ fn wrap_cached_collection(
         accumulator: cap.clone(),
         ..ctx.clone()
     };
-    let miss_each = emit_named_collection_each(collection, partial, as_name, locals, &miss_ctx)?;
+    let miss_each = emit_named_collection_each(
+        &collection_ref(),
+        partial,
+        as_name,
+        locals,
+        &miss_ctx,
+    )?;
     let miss = vec![
         assign_accumulator_string_new(&cap),
         miss_each,
@@ -564,9 +574,10 @@ fn wrap_cached_collection(
         },
     ));
     let cached = seq(prelude);
-    let uncached = emit_named_collection_each(collection, partial, as_name, locals, ctx)?;
+    let uncached =
+        emit_named_collection_each(&collection_ref(), partial, as_name, locals, ctx)?;
     let length = send(
-        Some(collection.clone()),
+        Some(collection_ref()),
         "length",
         Vec::new(),
         None,
@@ -580,14 +591,27 @@ fn wrap_cached_collection(
             },
         },
     );
-    Some(Expr::new(
+    let choose_path = Expr::new(
         span,
         ExprNode::If {
             cond: send(Some(length), ">", vec![threshold], None, false),
             then_branch: cached,
             else_branch: uncached,
         },
-    ))
+    );
+    Some(seq(vec![
+        Expr::new(
+            span,
+            ExprNode::Assign {
+                target: LValue::Var {
+                    id: VarId(0),
+                    name: collection_name.clone(),
+                },
+                value: collection.clone(),
+            },
+        ),
+        choose_path,
+    ]))
 }
 
 /// Literal Symbol/String name of a `locals:` key, or None when dynamic.
