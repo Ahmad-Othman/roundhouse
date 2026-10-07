@@ -76,6 +76,12 @@ fn untie(ty: &Ty, prior: &Ty) -> Ty {
         Ty::Hash { key, value } => Ty::Hash { key: Box::new(go(key)), value: Box::new(go(value)) },
         Ty::Tuple { elems } => Ty::Tuple { elems: elems.iter().map(go).collect() },
         Ty::Union { variants } => Ty::Union { variants: variants.iter().map(go).collect() },
+        Ty::Record { row } => Ty::Record {
+            row: crate::ty::Row {
+                fields: row.fields.iter().map(|(name, field)| (name.clone(), go(field))).collect(),
+                rest: row.rest.clone(),
+            },
+        },
         Ty::Class { id, args } => Ty::Class { id: id.clone(), args: args.iter().map(go).collect() },
         other => other.clone(),
     }
@@ -86,7 +92,10 @@ fn untie(ty: &Ty, prior: &Ty) -> Ty {
 /// doubles every round and never converges. The nested copy is cut to
 /// `untyped`. A scalar previous return is too weak a witness to cut on.
 fn untie_recursive_return(existing: &Ty, new: &Ty) -> Option<Ty> {
-    if !matches!(existing, Ty::Union { .. } | Ty::Array { .. } | Ty::Hash { .. } | Ty::Tuple { .. })
+    if !matches!(
+        existing,
+        Ty::Union { .. } | Ty::Array { .. } | Ty::Hash { .. } | Ty::Tuple { .. } | Ty::Record { .. }
+    )
         && !matches!(existing, Ty::Class { args, .. } if !args.is_empty())
     {
         return None;
@@ -303,6 +312,20 @@ mod tests {
         assert_eq!(table.get(&method), Some(&cut));
         insert_inferred_return(&mut table, &method, union(vec![Ty::Str, sym_hash(union(vec![Ty::Str, sym_hash(union(vec![Ty::Int, Ty::Untyped])), Ty::Int]))]));
         assert_eq!(table.get(&method), Some(&cut));
+    }
+
+    // `def wrap(v) = { nested: wrap(v.inner) }`
+    #[test]
+    fn insert_recursive_return_nested_in_a_record_keeps_the_previous() {
+        let method = Symbol::from("wrap");
+        let record = |field: Ty| Ty::Record {
+            row: crate::ty::Row { fields: [(Symbol::from("nested"), field)].into_iter().collect(), rest: None },
+        };
+        let mut table = HashMap::new();
+        let first = record(Ty::Untyped);
+        insert_inferred_return(&mut table, &method, first.clone());
+        insert_inferred_return(&mut table, &method, record(first.clone()));
+        assert_eq!(table.get(&method), Some(&first));
     }
 
     #[test]
