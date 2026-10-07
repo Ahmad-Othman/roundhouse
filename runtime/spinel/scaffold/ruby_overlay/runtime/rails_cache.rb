@@ -103,23 +103,7 @@ module Rails
       s = shard_of(k)
       entry = @shards[s][k]
       return nil if entry.nil?
-      if expired?(entry)
-        # Re-check under the shard lock. A write that landed after the
-        # first observation must be returned, not discarded as a miss.
-        encoded = nil
-        @mutexes[s].synchronize do
-          entry = @shards[s][k]
-          if entry.nil?
-            # miss
-          elsif expired?(entry)
-            @shards[s].delete(k)
-          else
-            encoded = entry[0]
-          end
-        end
-        return encoded.is_a?(String) ? encoded : nil
-      end
-      encoded = entry[0]
+      encoded = expired?(entry) ? live_encoded_after_expiry_recheck(s, k) : entry[0]
       encoded.is_a?(String) ? encoded : nil
     end
 
@@ -162,21 +146,8 @@ module Rails
       s = shard_of(k)
       entry = @shards[s][k]
       return nil if entry.nil?
-      if expired?(entry)
-        encoded = nil
-        @mutexes[s].synchronize do
-          entry = @shards[s][k]
-          if entry.nil?
-            # miss
-          elsif expired?(entry)
-            @shards[s].delete(k)
-          else
-            encoded = entry[0]
-          end
-        end
-        return encoded.nil? ? nil : decode(encoded)
-      end
-      decode(entry[0])
+      encoded = expired?(entry) ? live_encoded_after_expiry_recheck(s, k) : entry[0]
+      encoded.nil? ? nil : decode(encoded)
     end
 
     def write(key, value, opts = {})
@@ -222,6 +193,21 @@ module Rails
       n = k.bytesize
       return 0 if n == 0
       ((k.getbyte(n - 1) * 31) + k.getbyte(n / 2)) % SHARD_COUNT
+    end
+
+    # Unlocked path already saw expiry. Re-check under the shard lock so
+    # a write that landed in between is returned, not discarded as a miss.
+    def live_encoded_after_expiry_recheck(s, k)
+      encoded = nil
+      @mutexes[s].synchronize do
+        entry = @shards[s][k]
+        if entry && expired?(entry)
+          @shards[s].delete(k)
+        elsif entry
+          encoded = entry[0]
+        end
+      end
+      encoded
     end
 
     # Entry = [encoded_value, expires_at_or_nil]; a Marshal'd payload is
