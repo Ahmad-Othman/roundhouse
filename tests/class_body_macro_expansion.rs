@@ -1368,3 +1368,81 @@ fn class_attribute_carrier_refuses_what_it_cannot_carry() {
         "one method writing two attributes has no single slot"
     );
 }
+
+/// A carrier included only through another module must stay unexpanded:
+/// stripping its class methods without copying them onto the controller
+/// would leave the class-body call as `Unknown` / `NoMethodError`.
+#[test]
+fn class_attribute_carrier_included_through_another_module_is_refused() {
+    let nested = r#"
+module Preloads
+  extend ActiveSupport::Concern
+  included do
+    class_attribute :defs, default: []
+  end
+  class_methods do
+    def preload(codes)
+      self.defs += [codes]
+    end
+  end
+end
+"#;
+    let outer = r#"
+module Bundle
+  extend ActiveSupport::Concern
+  include Preloads
+end
+"#;
+    let tree = [
+        ("app/controllers/concerns/preloads.rb", nested),
+        ("app/controllers/concerns/bundle.rb", outer),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/things_controller.rb",
+            "class ThingsController < ApplicationController\n  include Bundle\n  preload %w[a]\n  def show; end\nend\n",
+        ),
+    ]
+    .into_iter()
+    .map(|(p, s)| (std::path::PathBuf::from(p), s.as_bytes().to_vec()))
+    .collect();
+    roundhouse::ingest::survey::activate();
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    let gaps = roundhouse::ingest::survey::drain();
+    assert!(
+        gaps.iter().any(|g| matches!(
+            g,
+            roundhouse::ingest::IngestError::Unsupported { message, .. }
+                if message.contains("included through another module")
+        )),
+        "nested carrier must be ledgered; got {gaps:?}"
+    );
+    let c = app
+        .controllers
+        .iter()
+        .find(|c| c.name.0.as_str() == "ThingsController")
+        .expect("ThingsController");
+    assert!(
+        !c.body.iter().any(|item| matches!(
+            item,
+            ControllerBodyItem::ClassMethod {
+                configuration_role: Some(
+                    roundhouse::dialect::ClassConfigurationRole::ClassAttribute
+                ),
+                ..
+            }
+        )),
+        "nested carrier must not expand onto the controller"
+    );
+    let preloads = app
+        .library_classes
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "Preloads")
+        .expect("Preloads");
+    assert!(
+        preloads.methods.iter().any(|m| m.name.as_str() == "preload"),
+        "refused carrier must keep its class methods on the module"
+    );
+}

@@ -107,6 +107,26 @@ pub(super) fn expand(
     if admitted.is_empty() {
         return;
     }
+    // Reject carriers reached only through another concern. `includes`
+    // is transitive; `direct_includes` also covers the controller's
+    // ancestors. Expanding would strip the carrier's class methods
+    // without copying them onto a controller that never named it.
+    admitted.retain(|carrier, _| {
+        let reached_indirectly = surfaces.controllers.values().any(|surface| {
+            surface.includes.contains(carrier) && !surface.direct_includes.contains(carrier)
+        });
+        if reached_indirectly {
+            survey::record(&IngestError::Unsupported {
+                file: carrier.0.as_str().to_string(),
+                message: "class_attribute carrier included through another module is not modeled"
+                    .to_string(),
+            });
+        }
+        !reached_indirectly
+    });
+    if admitted.is_empty() {
+        return;
+    }
     // On the module itself these methods would write an attribute the
     // module does not have; they exist only as each includer's own.
     for lc in &mut app.library_classes {
