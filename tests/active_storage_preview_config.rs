@@ -70,3 +70,83 @@ end
         "replacement Const must be synthesized from the map: {body}"
     );
 }
+
+#[test]
+fn single_quoted_video_preview_arguments_are_lifted() {
+    let files: [(&str, &str); 4] = [
+        (
+            "config/application.rb",
+            "module Blog\n  class Application < Rails::Application\n  end\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        ),
+        ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+        (
+            "config/initializers/active_storage.rb",
+            r#"Rails.application.configure do
+  config.active_storage.video_preview_arguments =
+    '-vf select=eq(n\,0)+gte(t\,5) -frames:v 1 -f image2'
+end
+"#,
+        ),
+    ];
+    let tree: HashMap<PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    let app_class = app
+        .rails_application
+        .as_ref()
+        .expect("Rails::Application reopen");
+    let method = app_class
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "active_storage_video_preview_arguments")
+        .expect("single-quoted arguments must be lifted");
+    let body = format!("{:?}", method.body);
+    assert!(
+        body.contains("gte(t"),
+        "single-quoted argv must reach the Application reopen: {body}"
+    );
+}
+
+#[test]
+fn commented_out_previewer_swap_is_ignored() {
+    let files: [(&str, &str); 4] = [
+        (
+            "config/application.rb",
+            "module Blog\n  class Application < Rails::Application\n  end\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\nend\n",
+        ),
+        ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+        (
+            "config/initializers/active_storage.rb",
+            r#"Rails.application.configure do
+  # config.active_storage.previewers = config.active_storage.previewers.map do |previewer|
+  #   previewer == ActiveStorage::Previewer::VideoPreviewer ? TimeLimitedVideoPreviewer : previewer
+  # end
+end
+"#,
+        ),
+    ];
+    let tree: HashMap<PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    let app_class = app
+        .rails_application
+        .as_ref()
+        .expect("Rails::Application reopen");
+    let names: Vec<&str> = app_class.methods.iter().map(|m| m.name.as_str()).collect();
+    assert!(
+        !names.contains(&"active_storage_previewers"),
+        "commented-out map-swap must not synthesize previewers: {names:?}"
+    );
+}

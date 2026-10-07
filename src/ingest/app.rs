@@ -5964,9 +5964,9 @@ fn quoted_after_key_label(text: &str) -> Option<String> {
 }
 
 /// `config.active_storage.video_preview_arguments = "…" \ "…"` —
-/// concatenated double-quoted string literals after the `=`, the way
-/// campfire tip writes the `-vf … -frames:v 1 -f image2` argv. Returns
-/// the joined runtime string (with `\\,` already a single backslash).
+/// concatenated quoted string literals after the `=` (double or single),
+/// the way campfire tip writes the `-vf … -frames:v 1 -f image2` argv.
+/// Returns the joined runtime string (with `\\,` already a single backslash).
 fn extract_video_preview_arguments(source: &[u8]) -> Option<String> {
     let source = String::from_utf8_lossy(source);
     let mut lines = source.lines().peekable();
@@ -5983,11 +5983,11 @@ fn extract_video_preview_arguments(source: &[u8]) -> Option<String> {
             continue;
         };
         let mut text = rest.to_string();
-        // Line continuations (`\`) and further `"…"` pieces on
-        // following lines until a blank / next config assignment.
+        // Line continuations (`\`), RHS starting on the next line, and
+        // further quoted pieces until a blank / next config assignment.
         while text.trim_end().ends_with('\\')
-            || (!text.contains('"') && lines.peek().is_some())
-            || (text.matches('"').count() % 2 == 1)
+            || ruby_string_literals_unclosed(&text)
+            || (!text.contains('"') && !text.contains('\'') && lines.peek().is_some())
         {
             let Some(next) = lines.next() else { break };
             let n = next.trim();
@@ -5997,29 +5997,7 @@ fn extract_video_preview_arguments(source: &[u8]) -> Option<String> {
             text.push(' ');
             text.push_str(n);
         }
-        let mut out = String::new();
-        let bytes = text.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] != b'"' {
-                i += 1;
-                continue;
-            }
-            i += 1;
-            while i < bytes.len() {
-                if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    out.push(bytes[i + 1] as char);
-                    i += 2;
-                    continue;
-                }
-                if bytes[i] == b'"' {
-                    i += 1;
-                    break;
-                }
-                out.push(bytes[i] as char);
-                i += 1;
-            }
-        }
+        let out = join_ruby_string_literals(&text);
         if !out.is_empty() {
             return Some(out);
         }
@@ -6027,21 +6005,89 @@ fn extract_video_preview_arguments(source: &[u8]) -> Option<String> {
     None
 }
 
+/// True when `text` ends inside an unclosed `'…'` or `"…"` literal.
+fn ruby_string_literals_unclosed(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let mut open: Option<u8> = None;
+    while i < bytes.len() {
+        if let Some(q) = open {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+                continue;
+            }
+            if bytes[i] == q {
+                open = None;
+            }
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'"' || bytes[i] == b'\'' {
+            open = Some(bytes[i]);
+        }
+        i += 1;
+    }
+    open.is_some()
+}
+
+/// Join adjacent `'…'` / `"…"` literals in an RHS, unescaping `\\X` → `X`.
+fn join_ruby_string_literals(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let q = bytes[i];
+        if q != b'"' && q != b'\'' {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                out.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if bytes[i] == q {
+                i += 1;
+                break;
+            }
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Replacement Const from
 /// `config.active_storage.previewers = ….map` that swaps
 /// `ActiveStorage::Previewer::VideoPreviewer` for another class
 /// (`previewer == …VideoPreviewer ? Replacement : previewer`).
 /// Returns the replacement's written name (e.g. `TimeLimitedVideoPreviewer`).
+/// Full-line comments are stripped so a commented-out swap cannot match;
+/// the assignment + `.map` form is required (not a bare class mention).
 fn extract_video_previewer_replacement(source: &[u8]) -> Option<String> {
     let source = String::from_utf8_lossy(source);
-    if !source.contains("active_storage.previewers") || !source.contains(".map") {
+    let active: String = source
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let Some(assign_at) = active.find("active_storage.previewers") else {
+        return None;
+    };
+    let after_name = active[assign_at + "active_storage.previewers".len()..].trim_start();
+    let Some(after_eq) = after_name.strip_prefix('=') else {
+        return None;
+    };
+    if !after_eq.contains(".map") {
         return None;
     }
     let marker = "ActiveStorage::Previewer::VideoPreviewer";
-    let Some(idx) = source.find(marker) else {
+    let Some(idx) = after_eq.find(marker) else {
         return None;
     };
-    let after = source[idx + marker.len()..].trim_start();
+    let after = after_eq[idx + marker.len()..].trim_start();
     let after = after.strip_prefix('?')?.trim_start();
     // `? TimeLimitedVideoPreviewer : previewer` or multiline.
     let name: String = after
