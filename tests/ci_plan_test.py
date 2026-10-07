@@ -415,6 +415,13 @@ class Routing(unittest.TestCase):
                 self.assertEqual(
                     self.extras(plan), set(ci.CORE) | {"framework-tests-spinel"}
                 )
+        # Generated-read ensure/finalize lives in the Ruby emitter.
+        # Native core already runs for this path; the bind cleanup suite
+        # must too when that file is the only change.
+        self.assertEqual(
+            ci.select(["src/emit/ruby/library.rs"])["spinel_tests"],
+            ci.PARAM_BIND_TESTS,
+        )
         self.assertEqual(
             ci.select(["runtime/spinel/db.rb"])["spinel_tests"],
             [

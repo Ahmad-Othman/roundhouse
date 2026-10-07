@@ -122,6 +122,7 @@ def native_coverage(path):
     if path in {
         "tests/support/emit_and_run.rs",
         "src/lower/model_to_library/adapter_emit.rs",
+        "src/emit/ruby/library.rs",
     } or path.startswith(("src/lower/arel/", "src/lower/model_to_library/adapter_emit/")):
         suites.update(PARAM_BIND_TESTS)
     if path.startswith(("runtime/spinel/", "runtime/ruby/")) and not interpreter_only:
