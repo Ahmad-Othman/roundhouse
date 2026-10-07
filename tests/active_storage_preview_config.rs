@@ -52,11 +52,21 @@ end
         "missing arguments method: {names:?}"
     );
     assert!(
-        names.contains(&"active_storage_video_preview_vf_filter"),
-        "missing filter method: {names:?}"
+        !names.contains(&"active_storage_video_preview_vf_filter"),
+        "vf filter must be derived at ActiveStorage, not stored on Application: {names:?}"
     );
     assert!(
         names.contains(&"active_storage_previewers"),
         "missing previewers method: {names:?}"
+    );
+    let previewers = app_class
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "active_storage_previewers")
+        .expect("previewers method");
+    let body = format!("{:?}", previewers.body);
+    assert!(
+        body.contains("TimeLimitedVideoPreviewer"),
+        "replacement Const must be synthesized from the map: {body}"
     );
 }

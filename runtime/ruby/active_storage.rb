@@ -89,20 +89,38 @@ module ActiveStorage
     Rails.application.active_storage_video_preview_arguments
   end
 
-  # The `-vf` filter expression inside `video_preview_arguments`. The
-  # poster reopen takes this alone (it already passes `-frames:v` /
-  # `-f image2` positionally); kept beside the full arguments string
-  # so suite asserts on the config spelling stay honest.
+  # The `-vf` filter expression peeled from `video_preview_arguments`.
+  # One Rails knob, one Application override; the poster reopen takes
+  # this alone (it already passes `-frames:v` / `-f image2`).
+  # Falls back to the framework default filter when the argv has no
+  # quoted `-vf` value — never feeds the whole argv into `-vf`.
   def self.video_preview_vf_filter
-    Rails.application.active_storage_video_preview_vf_filter
+    args = video_preview_arguments
+    i = args.index("-vf")
+    if i.nil?
+      return "select=eq(n\\,0)+eq(key\\,1)+gt(scene\\,0.015),loop=loop=-1:size=2,trim=start_frame=1"
+    end
+    rest = args[(i + 3)..-1].to_s
+    while rest.start_with?(" ")
+      rest = rest[1..-1].to_s
+    end
+    quote = rest[0]
+    if quote != "'" && quote != "\""
+      return "select=eq(n\\,0)+eq(key\\,1)+gt(scene\\,0.015),loop=loop=-1:size=2,trim=start_frame=1"
+    end
+    body = rest[1..-1].to_s
+    j = body.index(quote)
+    if j.nil?
+      return "select=eq(n\\,0)+eq(key\\,1)+gt(scene\\,0.015),loop=loop=-1:size=2,trim=start_frame=1"
+    end
+    body[0...j]
   end
 
   # Rails' `config.active_storage.previewers` — class list used for
   # identity checks (`assert_includes ActiveStorage.previewers, …`).
   # Default is the video previewer only (RH does not ship PDF
-  # previewers). Campfire's map-swap to `TimeLimitedVideoPreviewer`
-  # is lifted at ingest onto `Rails.application.active_storage_previewers`
-  # (app Consts resolve there; this method only forwards).
+  # previewers). A VideoPreviewer → replacement map on the Application
+  # reopen (campfire: TimeLimitedVideoPreviewer) is lifted at ingest.
   def self.previewers
     Rails.application.active_storage_previewers
   end

@@ -823,21 +823,25 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 methods.append(&mut synth);
             }
         }
-        // `config.active_storage.variable_content_types -= %w[…]` — an
-        // initializer trimming the image types a variant may be made
-        // from (campfire drops bmp/ico/psd: loaders it does not trust).
-        // The runtime answers `variable?` from Rails' default list
-        // minus this one, so a bmp avatar falls back to initials here
-        // exactly as it does there. Synthesized as
-        // `active_storage_excluded_content_types` on the reopen, over
-        // the framework default (`[]`) in runtime/ruby/rails.rb.
+        // Active Storage initializer lifts — one walk of
+        // `config/initializers` for the cluster that shares that
+        // directory: variable_content_types trim, video_preview_arguments,
+        // and previewers VideoPreviewer → replacement Const map.
         {
             let init_dir = dir.join("config/initializers");
             let mut excluded: Vec<String> = Vec::new();
+            let mut video_args: Option<String> = None;
+            let mut previewer_replacement: Option<String> = None;
             if vfs.is_dir(&init_dir) {
                 for entry in read_rb_files(vfs, &init_dir)? {
                     if let Ok(bytes) = vfs.read(&entry) {
                         excluded.extend(extract_variable_content_type_exclusions(&bytes));
+                        if let Some(a) = extract_video_preview_arguments(&bytes) {
+                            video_args = Some(a);
+                        }
+                        if let Some(name) = extract_video_previewer_replacement(&bytes) {
+                            previewer_replacement = Some(name);
+                        }
                     }
                 }
             }
@@ -856,51 +860,25 @@ end
                     methods.append(&mut synth);
                 }
             }
-        }
-        // `config.active_storage.video_preview_arguments = "…"` and
-        // `config.active_storage.previewers = ….map { VideoPreviewer →
-        // TimeLimitedVideoPreviewer }` — campfire tip. Lifted onto the
-        // Application reopen like the variable_content_types trim;
-        // `ActiveStorage.video_preview_arguments` / `.previewers` and
-        // the ffmpeg poster filter read the overrides.
-        {
-            let init_dir = dir.join("config/initializers");
-            let mut args: Option<String> = None;
-            let mut time_limited = false;
-            if vfs.is_dir(&init_dir) {
-                for entry in read_rb_files(vfs, &init_dir)? {
-                    if let Ok(bytes) = vfs.read(&entry) {
-                        if let Some(a) = extract_video_preview_arguments(&bytes) {
-                            args = Some(a);
-                        }
-                        if extract_time_limited_video_previewer_swap(&bytes) {
-                            time_limited = true;
-                        }
-                    }
-                }
-            }
-            if let Some(arguments) = args {
-                let filter = video_preview_vf_filter_from_arguments(&arguments)
-                    .unwrap_or_else(|| arguments.clone());
+            // One Rails knob → one Application override. The vf filter
+            // is peeled at `ActiveStorage.video_preview_vf_filter`.
+            if let Some(arguments) = video_args {
                 if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
                     "def active_storage_video_preview_arguments
   {arguments:?}
-end
-def active_storage_video_preview_vf_filter
-  {filter:?}
 end
 "
                 )) {
                     methods.append(&mut synth);
                 }
             }
-            if time_limited {
-                if let Ok(mut synth) = crate::runtime_src::parse_methods(
+            if let Some(replacement) = previewer_replacement {
+                if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
                     "def active_storage_previewers
-  [TimeLimitedVideoPreviewer]
+  [{replacement}]
 end
-",
-                ) {
+"
+                )) {
                     methods.append(&mut synth);
                 }
             }
@@ -6049,32 +6027,31 @@ fn extract_video_preview_arguments(source: &[u8]) -> Option<String> {
     None
 }
 
-/// The `-vf '…'` filter expression inside a `video_preview_arguments`
-/// string, or `None` when the spelling has no quoted `-vf` value.
-fn video_preview_vf_filter_from_arguments(arguments: &str) -> Option<String> {
-    let Some(rest) = arguments.split("-vf").nth(1) else {
-        return None;
-    };
-    let rest = rest.trim_start();
-    let quote = rest.chars().next()?;
-    if quote != '\'' && quote != '"' {
+/// Replacement Const from
+/// `config.active_storage.previewers = ….map` that swaps
+/// `ActiveStorage::Previewer::VideoPreviewer` for another class
+/// (`previewer == …VideoPreviewer ? Replacement : previewer`).
+/// Returns the replacement's written name (e.g. `TimeLimitedVideoPreviewer`).
+fn extract_video_previewer_replacement(source: &[u8]) -> Option<String> {
+    let source = String::from_utf8_lossy(source);
+    if !source.contains("active_storage.previewers") || !source.contains(".map") {
         return None;
     }
-    let body = &rest[1..];
-    let end = body.find(quote)?;
-    Some(body[..end].to_string())
-}
-
-/// `config.active_storage.previewers = ….map` that replaces
-/// `ActiveStorage::Previewer::VideoPreviewer` with
-/// `TimeLimitedVideoPreviewer` — campfire tip's identity swap.
-fn extract_time_limited_video_previewer_swap(source: &[u8]) -> bool {
-    let source = String::from_utf8_lossy(source);
-    let has_map = source.contains("active_storage.previewers")
-        && source.contains(".map");
-    let swaps = source.contains("ActiveStorage::Previewer::VideoPreviewer")
-        && source.contains("TimeLimitedVideoPreviewer");
-    has_map && swaps
+    let marker = "ActiveStorage::Previewer::VideoPreviewer";
+    let Some(idx) = source.find(marker) else {
+        return None;
+    };
+    let after = source[idx + marker.len()..].trim_start();
+    let after = after.strip_prefix('?')?.trim_start();
+    // `? TimeLimitedVideoPreviewer : previewer` or multiline.
+    let name: String = after
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == ':' || *c == '_')
+        .collect();
+    if name.is_empty() || name == "previewer" {
+        return None;
+    }
+    Some(name)
 }
 
 /// The MIME types a `config.active_storage.variable_content_types -=
