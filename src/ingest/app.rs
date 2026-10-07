@@ -4966,13 +4966,11 @@ fn synthesize_rails_health_controller(app: &mut crate::App) {
 
 /// The controller the `to: redirect(...)` routes dispatch to: one
 /// action per redirect, each answering the location Rails' routing
-/// redirect would.
-///
-/// One deliberate divergence, and it is the reason the routing form
-/// exists at all: Rails' `redirect("/x")` carries the request's query
-/// string over to the target. A `redirect_to "/x"` does not, and
-/// nothing in the synthesized action can see the query string to pass
-/// on.
+/// redirect would. The options form (`redirect(path: "/x")`) also
+/// carries the request's query over, read off the action's `request`;
+/// the positional `redirect("/x")` does not, in Rails either. How the
+/// query is joined to the path is the one deliberate divergence; see
+/// the comment in the body.
 fn synthesize_redirect_controller(
     redirects: &[crate::dialect::RedirectRoute],
 ) -> crate::dialect::Controller {
@@ -4989,26 +4987,48 @@ fn synthesize_redirect_controller(
                 expression.to_string()
             } else if redirect.location_is_expression {
                 redirect.location.clone()
+            } else if redirect.keep_query {
+                // The options form keeps the request query, read off the
+                // action's own `query_string` (set by every target's
+                // dispatcher from the raw request query). An empty query
+                // leaves the location unchanged; a path that already has a
+                // `?` is joined with `&`; the query goes ahead of a
+                // fragment, so `/login#step` plus `x=1` is `/login?x=1#step`.
+                //
+                // A deliberate divergence from Rails, which appends
+                // `"?" + query` and nothing else (MEASURED, 8.1.4 and
+                // main): `/a?b=1` plus `x=1` is `/a?b=1?x=1`, where `b` reads
+                // as "1?x=1", and `/a#top` plus `x=1` is `/a#top?x=1`, where
+                // the query sits inside the fragment and never reaches the
+                // server. Neither is a URL the route's author could have
+                // meant. Rails also re-encodes the query from the parsed
+                // params (keys sorted, a space as `+`); this passes it
+                // through as received.
+                //
+                // Only `path:` keeps the query, and its location is a
+                // string literal, so the separator and the fragment are
+                // decided here. A `%{name}` cannot bring a `?` or `#` of
+                // its own: `redirect_location_source` path-escapes it.
+                // Uses the controller attribute rather than
+                // `request.query_string` so C# and Elixir (which do not
+                // yet wire a full Request receiver) still preserve the
+                // query.
+                let (path, fragment) = redirect.location.split_once('#').unwrap_or((&redirect.location, ""));
+                let separator = if path.contains('?') { '&' } else { '?' };
+                let fragment = if fragment.is_empty() {
+                    String::new()
+                } else {
+                    format!(" + {}", redirect_location_source(&format!("#{fragment}")))
+                };
+                format!(
+                    "q = query_string\n    q == \"\" ? {} : {} + q{fragment}",
+                    redirect_location_source(&redirect.location),
+                    redirect_location_source(&format!("{path}{separator}")),
+                )
             } else {
                 redirect_location_source(&redirect.location)
             };
-            let (location, multiline) = if redirect.keep_query {
-                // Rails' options form keeps the request query. The
-                // dispatcher stores it on the request object. An empty
-                // query leaves the path unchanged; a path that already
-                // has `?` is joined with `&`. A fragment stays after the
-                // query: `/login#step` plus `x=1` is `/login?x=1#step`,
-                // not `/login#step?x=1`.
-                (
-                    format!(
-                        "q = ActionController::Current.request.query_string.to_s\n    parts = {location}.split(\"#\", 2)\n    base = parts[0]\n    joined = q == \"\" ? base : base + (base.include?(\"?\") ? \"&\" : \"?\") + q\n    parts.length == 1 ? joined : joined + \"#\" + parts[1]"
-                    ),
-                    true,
-                )
-            } else {
-                (location, false)
-            };
-            let src = if multiline || location.contains('\n') || location.contains(';') {
+            let src = if location.contains('\n') || location.contains(';') {
                 format!(
                     "def __redirect\n  location = begin\n    {location}\n  end\n  redirect_to(location, status: :{})\nend\n",
                     redirect_status_symbol(redirect.status),
@@ -5070,8 +5090,11 @@ fn synthesize_redirect_controller(
 
 /// A routing redirect's target as a Ruby string literal. Rails'
 /// `redirect("/~%{username}")` fills each `%{name}` from the matched
-/// path parameters, so the placeholder becomes `#{params[:name]}`.
-/// (Rails also URI-escapes the value; the emitted action does not.)
+/// path parameters, path-escaped as Rails does
+/// (`Journey::Router::Utils.escape_path`), so the placeholder becomes
+/// `#{ActionDispatch::Router.escape_path(params[:name].to_s)}`. The
+/// router decodes a capture (`Router.decode_capture`), so a `#` or `?`
+/// in it is escaped back and stays in the path.
 fn redirect_location_source(location: &str) -> String {
     let mut out = String::from("\"");
     let mut rest = location;
@@ -5080,7 +5103,7 @@ fn redirect_location_source(location: &str) -> String {
             if let Some(close) = after.find('}') {
                 let name = &after[..close];
                 if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                    out.push_str(&format!("#{{params[:{name}]}}"));
+                    out.push_str(&format!("#{{ActionDispatch::Router.escape_path(params[:{name}].to_s)}}"));
                     rest = &after[close + 1..];
                     continue;
                 }

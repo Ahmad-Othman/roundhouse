@@ -447,6 +447,75 @@ module ActionDispatch
       -1
     end
 
+    # A decoded capture path-escaped again, for a routing redirect's
+    # `%{name}`: Rails fills it with `Journey::Router::Utils.escape_path`
+    # of the decoded value, so a `#` or `?` in it stays part of the path.
+    # Walks bytes (not characters): after `decode_capture`, a multibyte
+    # scalar is real UTF-8 in the string, and each byte of it must become
+    # `%XX` the way Rails re-encodes `/articles/josé` as `/articles/jos%C3%A9`.
+    # PATH-safe printable ASCII (unreserved, sub-delims, `:`, `@`, `/`)
+    # passes; every other byte is `%` + two hex digits.
+    def self.escape_path(s)
+      out = ""
+      bytes = s.bytes
+      i = 0
+      while i < bytes.length
+        b = capture_byte(bytes, i)
+        if path_byte_ok(b)
+          out = out + printable[b - 32, 1].to_s
+        else
+          out = out + percent_escape_byte(b)
+        end
+        i += 1
+      end
+      out
+    end
+
+    # Printable ASCII, 0x20 to 0x7E in order: the character for byte
+    # `code` is `printable[code - 32, 1]`.
+    def self.printable
+      " !\"\#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    end
+
+    # Whether byte `b` may appear unescaped in a PATH (Rails' escape_path set).
+    def self.path_byte_ok(b)
+      return false if b < 32 || b > 126
+      c = printable[b - 32, 1].to_s
+      return false if c == " "
+      return false if c == "\""
+      return false if c == "#"
+      return false if c == "%"
+      return false if c == "<"
+      return false if c == ">"
+      return false if c == "?"
+      return false if c == "["
+      return false if c == "\\"
+      return false if c == "]"
+      return false if c == "^"
+      return false if c == "`"
+      return false if c == "{"
+      return false if c == "|"
+      return false if c == "}"
+      true
+    end
+
+    # One byte as `%` + two uppercase hex digits (Rails' PATH escape).
+    def self.percent_escape_byte(b)
+      hi = b / 16
+      lo = b - hi * 16
+      "%" + hex_char(hi) + hex_char(lo)
+    end
+
+    def self.hex_char(n)
+      return n.to_s if n < 10
+      return "A" if n == 10
+      return "B" if n == 11
+      return "C" if n == 12
+      return "D" if n == 13
+      return "E" if n == 14
+      "F"
+    end
+
     # Whether every plain literal segment of the pattern (no `:` or `*`)
     # equals the path's segment at the same index. Its own method for the
     # same reason as `glob_rest` below: one `while` per method.
