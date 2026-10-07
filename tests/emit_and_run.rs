@@ -9,6 +9,9 @@
 mod emit_and_run;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
+#[path = "emit_and_run/integer_query_find_by.rs"]
+mod integer_query_find_by;
+
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
 #[path = "support/data_factory.rs"]
