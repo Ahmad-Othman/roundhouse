@@ -85,7 +85,9 @@ pub(crate) fn binding_from_send(stmt: &Expr, self_ty: Option<&Ty>) -> Option<(Sy
     {
         return None;
     }
-    if args.len() < 2 {
+    // Ruby's Kernel#instance_variable_set takes exactly two arguments;
+    // extra args raise before any assignment.
+    if args.len() != 2 {
         return None;
     }
     let self_class = match self_ty {
@@ -254,15 +256,14 @@ fn fold_send(
         "upcase" if args.is_empty() => s.to_ascii_uppercase(),
         "strip" if args.is_empty() => s.trim().to_string(),
         "chomp" if args.is_empty() => s.trim_end_matches('\n').to_string(),
-        "remove" => {
-            let mut out = s.to_string();
-            for arg in args {
-                let Folded::Str(pat) = fold_value(arg, env, depth + 1, visiting)? else {
-                    return None;
-                };
-                out = out.replace(&pat, "");
-            }
-            out
+        // Match lowering: only the single-arg form grounds to
+        // `ActiveSupport.remove`. Zero-arg raises at runtime; multi-arg
+        // stays dynamic — both fail closed here.
+        "remove" if args.len() == 1 => {
+            let Folded::Str(pat) = fold_value(&args[0], env, depth + 1, visiting)? else {
+                return None;
+            };
+            s.replace(&pat, "")
         }
         "delete_suffix" if args.len() == 1 => {
             let Folded::Str(suf) = fold_value(&args[0], env, depth + 1, visiting)? else {
@@ -323,7 +324,8 @@ pub(crate) fn harvest_ivar_set(
     {
         return;
     }
-    if args.len() < 2 {
+    // Exact arity — see `binding_from_send`.
+    if args.len() != 2 {
         return;
     }
     let Some(name) = fold_ivar_name(&args[0], env) else {
