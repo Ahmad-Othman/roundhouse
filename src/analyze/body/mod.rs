@@ -2351,7 +2351,9 @@ fn kernel_array_elem(arg: &Ty) -> Option<Ty> {
             .map(kernel_array_elem)
             .collect::<Option<Vec<_>>>()
             .map(|elems| elems.into_iter().reduce(union_of).unwrap_or(Ty::Bottom)),
-        Ty::Var { .. } | Ty::Untyped | Ty::Hash { .. } | Ty::Record { .. } => None,
+        // Any other class may answer `to_ary`/`to_a` (a Struct, a Set,
+        // anything Enumerable), which `Array()` then unpacks.
+        Ty::Var { .. } | Ty::Untyped | Ty::Hash { .. } | Ty::Record { .. } | Ty::Class { .. } => None,
         scalar => Some(scalar.clone()),
     }
 }
@@ -2805,6 +2807,8 @@ mod tests {
             (Ty::Tuple { elems: vec![Ty::Str, Ty::Int] }, union_of(Ty::Str, Ty::Int)),
             (Ty::Relation { of: ClassId(Symbol::from("Story")) }, Ty::Class { id: ClassId(Symbol::from("Story")), args: vec![] }),
             (Ty::Class { id: ClassId(Symbol::from("Range")), args: vec![Ty::Int] }, Ty::Int),
+            // Unknown elements: the class may unpack through `to_a`.
+            (Ty::Class { id: ClassId(Symbol::from("Story")), args: vec![] }, Ty::Var { var: TyVar(0) }),
             (Ty::Sym, Ty::Sym),
             (Ty::Union { variants: vec![array_of(Ty::Sym), Ty::Sym, Ty::Nil] }, Ty::Sym),
         ] {

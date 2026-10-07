@@ -28,7 +28,9 @@ fn gradual_nil() -> Ty {
 fn has_informative_core(ty: &Ty) -> bool {
     match ty {
         Ty::Untyped | Ty::Var { .. } => false,
-        Ty::Union { variants } => variants.iter().any(|v| !v.is_unknown()),
+        // Nested unions (a sorbet signature keeps their shape) count only
+        // if some arm somewhere is known.
+        Ty::Union { variants } => variants.iter().any(has_informative_core),
         _ => true,
     }
 }
@@ -196,6 +198,16 @@ mod tests {
         let stable =
             stabilize_untyped_return_oscillation(&nil, &gradual).expect("nil-only cores match");
         assert_eq!(stable, gradual);
+    }
+
+    #[test]
+    fn a_nested_union_of_unknown_arms_is_not_informative() {
+        let unknown = Ty::Union {
+            variants: vec![Ty::Union { variants: vec![Ty::Untyped, Ty::Var { var: TyVar(0) }] }, Ty::Untyped],
+        };
+        assert!(!has_informative_core(&unknown));
+        let known = Ty::Union { variants: vec![Ty::Union { variants: vec![Ty::Str, Ty::Untyped] }, Ty::Untyped] };
+        assert!(has_informative_core(&known));
     }
 
     #[test]
